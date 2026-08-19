@@ -1,0 +1,10 @@
+upstream_revision=47f943859bef60e4160492346772ded9b24f765a
+upstream_status_porcelain=clean
+local_remote_count=0
+local_branch=main
+local_traceability_commit=a52fee8ccb526f5f5f0af5d1c48285202c5cc745
+local_commit_subject=feat: implement independent InBharat Harness rc1
+final_validation=pass
+final_test_count=47
+external_c_abi_consumer=pass
+note=Final evidence updates are committed in the release checkpoint after this snapshot.

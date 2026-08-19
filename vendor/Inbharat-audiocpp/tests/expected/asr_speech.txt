@@ -1,0 +1,1 @@
+[reference-asr speech duration=1.040s segments=1 pitch=423Hz level=-15.2dBFS]

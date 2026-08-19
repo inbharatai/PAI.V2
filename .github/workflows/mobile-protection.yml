@@ -1,0 +1,89 @@
+name: Mobile Protection
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-protection-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-mobile-untouched:
+    name: Verify Mobile Golden Baseline Untouched
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify protected tree matches committed baseline pointer
+        run: |
+          # Tree-pinned baseline. Previously this diffed against the
+          # mobile-golden-baseline-v2 TAG, which meant re-baselining after any
+          # legitimate mobile change required editing this workflow. That is
+          # how main went red: a protected file was touched after the tag had
+          # been re-baselined.
+          #
+          # The expected tree hash now lives in a committed pointer file, so
+          # re-baselining is an ordinary reviewable commit. Protection is
+          # intact: protected files cannot change without the pointer changing.
+          PROTECTED_PATH="android-app/UnoOneAgent"
+          POINTER_FILE="scripts/MOBILE_PROTECTED_TREE"
+
+          if [ ! -f "$POINTER_FILE" ]; then
+            echo "FAIL: baseline pointer missing at $POINTER_FILE"
+            exit 1
+          fi
+
+          EXPECTED_TREE=$(tr -d '[:space:]' < "$POINTER_FILE")
+          ACTUAL_TREE=$(git rev-parse "HEAD:${PROTECTED_PATH}")
+
+          if [ "$ACTUAL_TREE" != "$EXPECTED_TREE" ]; then
+            echo "FAIL: protected path changed without re-baselining."
+            echo "  expected tree : $EXPECTED_TREE  (from $POINTER_FILE)"
+            echo "  actual tree   : $ACTUAL_TREE"
+            echo ""
+            git diff --name-status "$EXPECTED_TREE" "$ACTUAL_TREE" || true
+            echo ""
+            echo "If intentional: ./scripts/regen-mobile-golden-hashes.sh"
+            echo "then commit MOBILE_GOLDEN_HASHES.txt and $POINTER_FILE together."
+            exit 1
+          fi
+          echo "PASS: protected tree matches committed baseline ($ACTUAL_TREE)"
+
+      - name: Verify hash manifest is complete
+        run: |
+          if [ ! -f scripts/MOBILE_GOLDEN_HASHES.txt ]; then
+            echo "FAIL: Hash manifest not found at scripts/MOBILE_GOLDEN_HASHES.txt"
+            exit 1
+          fi
+
+          # Count non-comment, non-empty lines
+          HASH_COUNT=$(grep -c '^[0-9a-f]\{64\}  ' scripts/MOBILE_GOLDEN_HASHES.txt || echo 0)
+
+          # The expected count derives from the baseline tree itself.
+          EXPECTED_TREE=$(tr -d '[:space:]' < scripts/MOBILE_PROTECTED_TREE)
+          EXPECTED_COUNT=$(git ls-tree -r --name-only "$EXPECTED_TREE" | wc -l)
+          if [ "$HASH_COUNT" -ne "$EXPECTED_COUNT" ]; then
+            echo "FAIL: Hash manifest has $HASH_COUNT entries, expected $EXPECTED_COUNT"
+            echo "The manifest must contain one SHA-256 hash per protected file."
+            exit 1
+          fi
+
+          sha256sum --check --strict scripts/MOBILE_GOLDEN_HASHES.txt
+          echo "PASS: Hash manifest contains and verifies $HASH_COUNT entries"
+
+      - name: Mobile protection result
+        if: always()
+        run: |
+          echo "============================================"
+          echo "Mobile Golden Baseline Protection Check"
+          echo "============================================"
+          echo "Protected path: android-app/UnoOneAgent/"
+          echo "Baseline: scripts/MOBILE_PROTECTED_TREE (tree hash)"
+          echo "Re-baseline: ./scripts/regen-mobile-golden-hashes.sh"
+          echo "============================================"

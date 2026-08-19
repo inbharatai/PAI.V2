@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "version": "0.1.0-rc.2",
+  "iterations": 100000,
+  "ordinary_prompts": 600,
+  "false_agent_activations": 0,
+  "false_agent_rate": 0.00000000,
+  "routing_ns_p50": 1474,
+  "routing_ns_p95": 1844,
+  "routing_ns_max": 54086,
+  "session_churn_count": 10000,
+  "session_churn_events": 10000,
+  "session_churn_ns_total": 45550783,
+  "checksum": 240000
+}

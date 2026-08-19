@@ -1,0 +1,17 @@
+[package]
+name = "unoone-text"
+version = "0.1.0"
+description = "Unicode-safe text truncation for Pocket AI — never splits a grapheme cluster, never panics on a byte boundary"
+authors = ["InBharat Ai"]
+edition = "2021"
+
+# Portable and platform-independent on purpose.
+#
+# The bug this crate exists to eliminate only manifests on non-ASCII input, so
+# it must be testable on every host rather than only inside the Tauri desktop
+# crate (which cannot be compiled without WebView2 / webkit2gtk). Pocket AI
+# targets Hindi, Bengali, Assamese, Tamil, Telugu, Kannada and Malayalam, where
+# a single user-perceived character is routinely 3+ bytes and several code
+# points, so this is core correctness, not a nicety.
+[dependencies]
+unicode-segmentation = "1"

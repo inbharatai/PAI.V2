@@ -1,0 +1,133 @@
+{
+  "kdf": [
+    {
+      "expected_key_hex": "46e168fa7bf0b339c3be26f3b25e566981d45d09fca66b9d8e06f87512158897",
+      "iterations": 3,
+      "memory_kib": 262144,
+      "name": "kdf-argon2id-pin",
+      "output_len": 32,
+      "parallelism": 4,
+      "password_utf8": "synthetic-cross-platform-password",
+      "salt_hex": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc"
+    }
+  ],
+  "record": [
+    {
+      "aad_hex": "7b227265636f72645f6964223a2231643066326233632d346235612d346336642d386539662d306131623263336434653566222c227265636f72645f74797065223a22444f43554d454e54222c22736368656d615f76657273696f6e223a312c22656e6372797074696f6e5f76657273696f6e223a312c22637265617465645f6174223a22323032362d30382d30315430383a35383a35302e3331383733313130302b30303a3030222c22757064617465645f6174223a22323032362d30382d30315430383a35383a35302e3331383733313130302b30303a3030222c227265766973696f6e223a312c226f726967696e5f706c6174666f726d223a224445534b544f50222c226f726967696e5f6465766963655f6964223a22766563746f722d67656e222c227472616e73616374696f6e5f6964223a2231643763383338382d633230662d343838382d626635632d613233396132393134303265222c22636f6e74656e745f68617368223a22222c22706172656e745f7265636f72645f6964223a6e756c6c2c22736f757263655f7265636f72645f696473223a5b5d2c22707269766163795f6c6576656c223a2250524956415445222c22746f6d6273746f6e65223a66616c73652c2264656c657465645f6174223a6e756c6c7d",
+      "ciphertext_hex": "2ab4ad5a9e72e5e3945ed0602e2f8e20a0b125b66edbd458887bf510e15bad0280c3de6ae082e8f7dd81ff3421fced0f610fff4ddf38a85a570ad3b98592c312972c84c7d7a7d73eec91801dd99e12c4dde65353f82c83292f74d54a56c95e9ab13015b7f6f07fcb0d234a62b3acc792ad1776b1ac140e8e2ef0",
+      "domain": "records",
+      "master_key_hex": "a5a8bf8291e4ebfecdd0272a390c136675784f52a1b4bb8e9de0f7fac9dc2336",
+      "name": "rust-encrypt-pinned",
+      "nonce_hex": "090102030405060708090a0b",
+      "plaintext_utf8": "cross-platform contract check — सभी एन्क्रिप्शन स्थानीय है",
+      "record_json": {
+        "content_hash": "",
+        "created_at": "2026-08-01T08:58:50.318731100+00:00",
+        "deleted_at": null,
+        "encryption_version": 1,
+        "origin_device_id": "vector-gen",
+        "origin_platform": "DESKTOP",
+        "parent_record_id": null,
+        "privacy_level": "PRIVATE",
+        "record_id": "1d0f2b3c-4b5a-4c6d-8e9f-0a1b2c3d4e5f",
+        "record_type": "DOCUMENT",
+        "revision": 1,
+        "schema_version": 1,
+        "source_record_ids": [],
+        "tombstone": false,
+        "transaction_id": "1d7c8388-c20f-4888-bf5c-a239a291402e",
+        "updated_at": "2026-08-01T08:58:50.318731100+00:00"
+      }
+    },
+    {
+      "aad_hex": "7b227265636f72645f6964223a2231643066326233632d346235612d346336642d386539662d306131623263336434653566222c227265636f72645f74797065223a22444f43554d454e54222c22736368656d615f76657273696f6e223a312c22656e6372797074696f6e5f76657273696f6e223a312c22637265617465645f6174223a22323032362d30382d30315430383a35383a35302e3331383733313130302b30303a3030222c22757064617465645f6174223a22323032362d30382d30315430383a35383a35302e3331383733313130302b30303a3030222c227265766973696f6e223a312c226f726967696e5f706c6174666f726d223a224445534b544f50222c226f726967696e5f6465766963655f6964223a22766563746f722d67656e222c227472616e73616374696f6e5f6964223a2231643763383338382d633230662d343838382d626635632d613233396132393134303265222c22636f6e74656e745f68617368223a22222c22706172656e745f7265636f72645f6964223a6e756c6c2c22736f757263655f7265636f72645f696473223a5b5d2c22707269766163795f6c6576656c223a2250524956415445222c22746f6d6273746f6e65223a66616c73652c2264656c657465645f6174223a6e756c6c7d",
+      "ciphertext_hex": "e7744ed7e5f0ce7aa44dfdb406ff9e1822ff4c98751538974003b77c586d774195cd75477d03811463e6f66821051d8ae9897e8b7aa1c004a331bdc4b7b11948ef4710d31f7dc8d28c8ce3b791c07f55bd070c265a65786274313a9a8e27db681d924aff15df0dcadec0529975f94be337b3b28c7d614918e252",
+      "domain": "records",
+      "master_key_hex": "a5a8bf8291e4ebfecdd0272a390c136675784f52a1b4bb8e9de0f7fac9dc2336",
+      "name": "kotlin-encrypt-pinned",
+      "nonce_hex": "0c020406080a0c0e10121416",
+      "plaintext_utf8": "cross-platform contract check — सभी एन्क्रिप्शन स्थानीय है",
+      "record_json": {
+        "content_hash": "",
+        "created_at": "2026-08-01T08:58:50.318731100+00:00",
+        "deleted_at": null,
+        "encryption_version": 1,
+        "origin_device_id": "vector-gen",
+        "origin_platform": "DESKTOP",
+        "parent_record_id": null,
+        "privacy_level": "PRIVATE",
+        "record_id": "1d0f2b3c-4b5a-4c6d-8e9f-0a1b2c3d4e5f",
+        "record_type": "DOCUMENT",
+        "revision": 1,
+        "schema_version": 1,
+        "source_record_ids": [],
+        "tombstone": false,
+        "transaction_id": "1d7c8388-c20f-4888-bf5c-a239a291402e",
+        "updated_at": "2026-08-01T08:58:50.318731100+00:00"
+      }
+    }
+  ],
+  "spec": "unoone-vault-cross-platform/1",
+  "wrap": [
+    {
+      "aad_utf8": "unoone-vault-master-key-wrap",
+      "kek_hex": "46e168fa7bf0b339c3be26f3b25e566981d45d09fca66b9d8e06f87512158897",
+      "master_key_hex": "a5a8bf8291e4ebfecdd0272a390c136675784f52a1b4bb8e9de0f7fac9dc2336",
+      "name": "wrap-master-key-xchacha20",
+      "nonce_hex": "0b0e1114171a1d202326292c2f3235383b3e4144474a4d50",
+      "wrapped_hex": "ec13cf9932ba915ab8dc33f9a57b506d592d7366a3ef08db79c57baec0287d08f046731a810479a006d405713934deef"
+    }
+  ],
+  "escaping": [
+    {
+      "name": "ascii",
+      "input_utf8_hex": "706c61696e2d61736369695f30313233",
+      "serde_json": "\"plain-ascii_0123\""
+    },
+    {
+      "name": "quote_backslash",
+      "input_utf8_hex": "6122625c63",
+      "serde_json": "\"a\\\"b\\\\c\""
+    },
+    {
+      "name": "newline_tab_cr",
+      "input_utf8_hex": "610a6209630d64",
+      "serde_json": "\"a\\nb\\tc\\rd\""
+    },
+    {
+      "name": "backspace_formfeed",
+      "input_utf8_hex": "6108620c63",
+      "serde_json": "\"a\\bb\\fc\""
+    },
+    {
+      "name": "other_c0",
+      "input_utf8_hex": "7801791f7a",
+      "serde_json": "\"x\\u0001y\\u001fz\""
+    },
+    {
+      "name": "nul",
+      "input_utf8_hex": "610062",
+      "serde_json": "\"a\\u0000b\""
+    },
+    {
+      "name": "del_7f",
+      "input_utf8_hex": "617f62",
+      "serde_json": "\"ab\""
+    },
+    {
+      "name": "devanagari",
+      "input_utf8_hex": "e0a4a8e0a4aee0a4b8e0a58de0a4a4e0a587",
+      "serde_json": "\"नमस्ते\""
+    },
+    {
+      "name": "emoji_zwj",
+      "input_utf8_hex": "f09f91a8e2808df09f91a9e2808df09f91a7e2808df09f91a6",
+      "serde_json": "\"👨‍👩‍👧‍👦\""
+    },
+    {
+      "name": "all_c0",
+      "input_utf8_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "serde_json": "\"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f\""
+    }
+  ]
+}

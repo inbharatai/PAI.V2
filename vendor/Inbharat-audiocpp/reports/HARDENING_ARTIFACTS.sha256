@@ -1,0 +1,4 @@
+7527ae70f270c661bf304c2a9d3b47cc721adefb1bc15c45d7b560f05dd4c69b  build/hardening-final-release/libibaudio.so.0.1.0
+6f6eb00fb74fba0db963955bdc7f93f09b5c6e265438c98ecb460659f80a1f95  build/hardening-final-release/ibaudio
+ae64ca68aa61ed3b85d65bce62ad5846841f775874d25d83855d17345b646604  build/hardening-final-windows/libibaudio.dll
+13a32355428833bd0730689e1b446ce3e1c6b0e6da3e7a7a6f03ee24ac9390a0  build/hardening-final-windows/ibaudio.exe

@@ -1,0 +1,28 @@
+[workspace]
+members = ["crates/core", "crates/cli", "crates/ffi"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-rc.2"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["InBharat Harness contributors"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+# Keep unwind semantics so catch_unwind can honor the public C ABI panic-containment contract.
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"

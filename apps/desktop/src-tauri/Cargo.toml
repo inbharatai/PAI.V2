@@ -1,0 +1,86 @@
+[package]
+name = "unoone-power"
+version = "0.1.0"
+description = "UnoOne Power — Private AI Desktop Workstation"
+authors = ["InBharat Ai"]
+edition = "2021"
+
+[features]
+# Developer tooling is OPT-IN and must never ship in a user-facing release.
+# It was previously an unconditional dependency feature, which meant every
+# release binary staged to a Pocket AI drive carried the devtools surface.
+# Enable locally with: cargo build --features devtools
+devtools = ["tauri/devtools"]
+# custom-protocol MUST be the default: tauri-macros' generate_context! treats a
+# build as DEV-MODE (and embeds ZERO frontend assets) whenever the crate does
+# not enable tauri/custom-protocol. Leaving it opt-in is how a physical drive
+# was shipped with a binary that could only ever show "localhost refused to
+# connect". The frontend (npm run build) must exist before any cargo build —
+# both CI workflows enforce that order.
+custom-protocol = ["tauri/custom-protocol"]
+# Prototype-only auto-unlock. NEVER enable for release/CI artifacts: it skips
+# the interactive password prompt when UNOONE_DEV_BYPASS=1 is set.
+dev-bypass = []
+default = ["custom-protocol"]
+
+[dependencies]
+# default-features = false removes the `compression` feature: with compression
+# ON, embedded frontend assets are brotli-compressed into the binary, which
+# makes the byte-level embedding gate (scripts/verify-frontend-embedded.mjs)
+# permanently blind — it cannot distinguish "assets missing" from "assets
+# compressed". Embedding uncompressed (~250 KB larger) keeps the gate truthful.
+# The listed features reproduce tauri's defaults minus `compression` and minus
+# the Linux-only x11/dbus entries.
+tauri = { version = "2", default-features = false, features = ["wry", "common-controls-v6", "dynamic-acl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+sys-info = "0.9"
+num_cpus = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+# Real screenshot capture for the browser workspace (display-region capture
+# of the WebView2 window; no mocked screenshot paths).
+screenshots = "0.8"
+png = "0.17"
+unoone-vault-core = { path = "../../../packages/vault-core" }
+reqwest = { version = "0.12", features = ["json"] }
+futures = "0.3"
+hmac = "0.12"
+hex = "0.4"
+rand = "0.8"
+base64 = "0.22"
+base64-url = "3"
+cpal = "0.15"
+hound = "3.5"
+lopdf = { version = "0.33", default-features = false, features = ["nom_parser"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+tauri-plugin-single-instance = "2"
+unoone-usb-manifest = { path = "../../../packages/usb-manifest" }
+unoone-document-migration = { path = "../../../packages/document-migration" }
+unoone-browser-policy = { path = "../../../packages/browser-policy" }
+# Portable, exhaustively-tested retention policy for recording privacy modes.
+# Kept as a separate crate so privacy semantics can be proven on hosts that
+# cannot build the Tauri shell (no WebView2 / webkit2gtk).
+unoone-recording-policy = { path = "../../../packages/recording-policy" }
+# Unicode-safe truncation. Raw byte slicing panicked on Indic scripts, where a
+# single character is 3+ bytes; see packages/text-util.
+unoone-text = { path = "../../../packages/text-util" }
+# Backend-preference and model-identity decisions as pure, tested logic.
+# Fixes the insert(0) precedence bug and the fail-open identity check.
+unoone-runtime-select = { path = "../../../packages/runtime-select" }
+# Reusable InBharat Harness (sibling workspace) + Pocket AI product adapter.
+# The Harness is the unified text plane; pai-harness-adapter holds all
+# product-specific glue (vault memory, localhost llama provider, host/model
+# tier policy). Neither brings Tauri/UNOONE concerns into the Harness core.
+inbharat-harness-core = { path = "../../../vendor/inbharat-harness/crates/core" }
+pai-harness-adapter = { path = "../../../packages/pai-harness-adapter" }
+
+[dev-dependencies]
+tempfile = "3"
+mockito = "1"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

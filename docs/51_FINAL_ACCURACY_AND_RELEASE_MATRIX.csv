@@ -1,0 +1,19 @@
+area,status,decision,evidence,remaining_gate
+GitHub main integration,VERIFIED_WORKING,,"Pocket AI commit 5e8c722 is on main; Mobile 30439438831; Android 30439439139; Desktop 30439439144; Windows 30439439032 all passed",none
+Physical Pocket AI inventory,VERIFIED_WORKING,,"13531 files; 6270 directories; 18233374779 file bytes",none
+Windows Dock binary,VERIFIED_WORKING,,"on-drive size/hash verified; A34EAA8BD90A722A039622B84CF3AE14B394A579E37CB30EA62FCEFB3A87404E",prepared-host insertion and auto-launch UX
+Start UnoOne binary,VERIFIED_WORKING,,"native --verify-only exit 0; F08A931327C0DDEA1F89B9F9CE2688E115D20B3B67FDD58F633129D14028100C",first-use install/launch UX
+UnoOne Power binary,VERIFIED_WORKING,,"on-drive size/hash verified; FF9D853265DCD4492765C3D3BF8464EC226213BEF3285823F32A7D94102EE491",prepared-host UI and feature acceptance
+Strict manifest,VERIFIED_WORKING,,"schema v2; 545/545 physical checks; native verifier exit 0",cryptographic manifest signing
+UnoOne Power auto-detect,IMPLEMENTED_NOT_TESTED,,"frontend build plus Windows/macOS Rust CI pass",prepared-host insertion and removal test
+Windows auto-launch,IMPLEMENTED_NOT_TESTED,,"Dock and Starter binaries built and hash-verified",prepared-host insertion and first-use test
+USB runtime package,VERIFIED_WORKING,READY_FOR_DEVICE_TEST,"manifest FCBB143C61E0D1D46A4BA35AD6CB554B2CCAF876AC6622A3EA313AE8A24A8B00; 545/545 checks",code signing and live feature acceptance
+Android auto-open source,BUILDS_NOT_RUNTIME_TESTED,READY_FOR_DEVICE_TEST,"344 protected blobs match mobile-golden-baseline-v2; targeted Gradle build/test/lint passed",physical Android USB-C test
+Android vault module,BUILDS_NOT_RUNTIME_TESTED,,"unit compile and lint passed",cross-platform physical vault round trip
+Gemma 12B model files,VERIFIED_WORKING,,"size and SHA-256 verified by both physical validators",live direct llama-server inference
+Direct model runtime,BLOCKED_BY_ENVIRONMENT,,"manifest-only runtime selection implemented; binaries hash-verified",signed or policy-allowed prepared host
+Whisper and Piper package,VERIFIED_WORKING,,"381 voice assets on drive; real inference passed run 30437957332",physical microphone and playback UX
+Recording privacy pipeline,PARTIALLY_IMPLEMENTED,,"capture and encryption source exists",STT summary and retention tests
+Browser workspace,IMPLEMENTED_NOT_TESTED,,"source wiring and frontend build pass",live WebView test
+Vision and camera,PARTIALLY_IMPLEMENTED,,"confidence fabrication removed and device enumeration added",live mmproj and getUserMedia tests
+Signing and WDAC,BLOCKED_BY_ENVIRONMENT,,"no policy weakened; executables and manifest are unsigned",sign shipped executables/DLLs and manifest or catalogue

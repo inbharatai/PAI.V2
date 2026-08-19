@@ -1,0 +1,27 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "InBharat-Audio-audio.cpp-selected-closure",
+  "documentNamespace": "https://inbharat.example/spdx/audio-cpp-empty-selected-closure-rc2",
+  "creationInfo": {
+    "created": "2026-08-17T00:00:00Z",
+    "creators": ["Tool: InBharat Audio provenance scaffold"]
+  },
+  "documentComment": "No audio.cpp source or assets are included in RC2. This manifest intentionally records an empty selected closure.",
+  "packages": [
+    {
+      "name": "audio.cpp-reference-only",
+      "SPDXID": "SPDXRef-Package-audio-cpp",
+      "versionInfo": "bb15edd78b56e035967e0eb999a6b28a62337db4",
+      "downloadLocation": "https://github.com/0xShug0/audio.cpp.git",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright 2026 ShugoAI LLC",
+      "comment": "Reference pin only; not shipped or linked."
+    }
+  ],
+  "files": [],
+  "relationships": []
+}

@@ -1,0 +1,28 @@
+{
+  "content_utf8": "android-authored bytes: नमस्ते from the phone vault",
+  "envelope_path": "kotlin-authored-record.json",
+  "fields": {
+    "content_hash": "50ee229452f6c3918f356b0f2e5f604e31243f70612e148e06b1ef6bd0d9d452",
+    "created_at": "2026-08-01T13:00:00+00:00",
+    "deleted_at": null,
+    "encryption_version": 1,
+    "origin_device_id": "synthetic-android-fixture",
+    "origin_platform": "ANDROID",
+    "parent_record_id": null,
+    "privacy_level": "PRIVATE",
+    "record_id": "7e9b2f4a-1c3d-4e5f-9a8b-2c4d6e8f0a1b",
+    "record_type": "MEMORY",
+    "revision": 1,
+    "schema_version": 1,
+    "source_record_ids": [],
+    "tombstone": false,
+    "transaction_id": "3f8a1b2c-4d5e-4f60-8a9b-0c1d2e3f4a5b",
+    "updated_at": "2026-08-01T13:00:00+00:00"
+  },
+  "header_path": "header_a.json",
+  "nonce_hex": "0b1e2d3c4b5a69788796a5b4",
+  "password_utf8": "synthetic-fixture-password-2026",
+  "purpose": "bidirectional seal: Kotlin authors this envelope byte-for-byte (Android CI), Rust reads it via the real read_record (Desktop CI)",
+  "record_id": "7e9b2f4a-1c3d-4e5f-9a8b-2c4d6e8f0a1b",
+  "spec": "unoone-vault-kotlin-envelope/1"
+}

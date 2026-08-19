@@ -1,0 +1,7 @@
+{
+  "id": "blob-0001",
+  "media_type": "text/plain",
+  "byte_len": 12,
+  "digest": "sha256:<provided-by-attachment-store>",
+  "display_name": "note.txt"
+}

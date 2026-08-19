@@ -1,0 +1,7 @@
+inbharat-harness-cli v0.1.0-rc.1 (/agent/workspace/INBHARAT_HARNESS_RND/inbharat-harness/crates/cli)
+└── inbharat-harness-core v0.1.0-rc.1 (/agent/workspace/INBHARAT_HARNESS_RND/inbharat-harness/crates/core)
+
+inbharat-harness-core v0.1.0-rc.1 (/agent/workspace/INBHARAT_HARNESS_RND/inbharat-harness/crates/core)
+
+inbharat-harness-ffi v0.1.0-rc.1 (/agent/workspace/INBHARAT_HARNESS_RND/inbharat-harness/crates/ffi)
+└── inbharat-harness-core v0.1.0-rc.1 (/agent/workspace/INBHARAT_HARNESS_RND/inbharat-harness/crates/core)

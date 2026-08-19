@@ -1,0 +1,91 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {"major": 3, "minor": 20, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "IBAUDIO_BUILD_SHARED": "ON",
+        "IBAUDIO_BUILD_CLI": "ON",
+        "IBAUDIO_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-debug",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/linux-debug",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Debug"}
+    },
+    {
+      "name": "linux-release",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/linux-release",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Release"}
+    },
+    {
+      "name": "linux-asan-ubsan",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/linux-asan-ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "IBAUDIO_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
+      "name": "windows-x64-zig",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/windows-x64-zig",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/zig-windows-x86_64.cmake",
+      "cacheVariables": {"CMAKE_BUILD_TYPE": "Release", "IBAUDIO_BUILD_TESTS": "OFF"}
+    },
+    {
+      "name": "macos-universal",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/macos-universal",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64"
+      },
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin"}
+    },
+    {
+      "name": "android-arm64-cpu",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/android-arm64-cpu",
+      "toolchainFile": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ANDROID_ABI": "arm64-v8a",
+        "ANDROID_PLATFORM": "android-26",
+        "ANDROID_STL": "c++_shared",
+        "IBAUDIO_BUILD_CLI": "OFF",
+        "IBAUDIO_BUILD_TESTS": "OFF",
+        "IBAUDIO_BUILD_ANDROID_JNI": "ON",
+        "IBAUDIO_ENABLE_VULKAN_PROBE": "OFF"
+      }
+    },
+    {
+      "name": "android-arm64-vulkan-probe",
+      "inherits": "android-arm64-cpu",
+      "binaryDir": "${sourceDir}/build/android-arm64-vulkan-probe",
+      "cacheVariables": {"IBAUDIO_ENABLE_VULKAN_PROBE": "ON"}
+    }
+  ],
+  "buildPresets": [
+    {"name": "linux-debug", "configurePreset": "linux-debug"},
+    {"name": "linux-release", "configurePreset": "linux-release"},
+    {"name": "linux-asan-ubsan", "configurePreset": "linux-asan-ubsan"},
+    {"name": "windows-x64-zig", "configurePreset": "windows-x64-zig"},
+    {"name": "macos-universal", "configurePreset": "macos-universal"},
+    {"name": "android-arm64-cpu", "configurePreset": "android-arm64-cpu", "targets": ["ibaudio", "ibaudio_jni"]},
+    {"name": "android-arm64-vulkan-probe", "configurePreset": "android-arm64-vulkan-probe", "targets": ["ibaudio", "ibaudio_jni"]}
+  ],
+  "testPresets": [
+    {"name": "linux-debug", "configurePreset": "linux-debug", "output": {"outputOnFailure": true}},
+    {"name": "linux-release", "configurePreset": "linux-release", "output": {"outputOnFailure": true}},
+    {"name": "linux-asan-ubsan", "configurePreset": "linux-asan-ubsan", "output": {"outputOnFailure": true}}
+  ]
+}

@@ -1,0 +1,3 @@
+InBharat Audio 0.1.0-rc2
+
+This local release candidate contains an independently authored C99 ABI runtime and deterministic reference engines. The default build contains no audio.cpp source or model assets. The reviewed audio.cpp pin is documented only for future optional adapter work; no endorsement by ShugoAI or audio.cpp is implied.

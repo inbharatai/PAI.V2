@@ -1,0 +1,25 @@
+{
+  "schema": "inbharat.pocket_ai_pi.platform.v1",
+  "target_os": "linux",
+  "target_arch": "aarch64",
+  "runtime_policy": {
+    "network_default": "deny",
+    "bind_address": "127.0.0.1",
+    "require_package_verification": true,
+    "require_model_hashes": true,
+    "require_audio_acceptance": true,
+    "allow_arbitrary_shell_tools": false,
+    "canonical_memory": "VAULT_ONLY",
+    "on_usb_removal": ["cancel_harness", "stop_audio", "stop_model", "lock_vault", "zeroize_sensitive_state"]
+  },
+  "paths": {
+    "harness": "RUNTIMES/LINUX-ARM64/HARNESS/inbharat-harness",
+    "ibaudio": "RUNTIMES/LINUX-ARM64/AUDIO/ibaudio",
+    "audiocpp": "RUNTIMES/LINUX-ARM64/AUDIOCPP/audiocpp_cli",
+    "llama_server_cpu": "RUNTIMES/LINUX-ARM64/LLAMA/CPU/llama-server",
+    "llama_server_vulkan": "RUNTIMES/LINUX-ARM64/LLAMA/VULKAN/llama-server",
+    "vault_id": "VAULT/identity/vault.id",
+    "audio_config": "SPEECH/config/inbharat-audio.v1.json",
+    "audio_acceptance": "SPEECH/acceptance/audio-cpp.acceptance.v1.json"
+  }
+}

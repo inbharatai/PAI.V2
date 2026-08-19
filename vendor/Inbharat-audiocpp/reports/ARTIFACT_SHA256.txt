@@ -1,0 +1,4 @@
+8d96a2cb940fd3ca91c54b22c1f061ee3f6bc3342347a2a73c668c4b4d74588b  build/final-release/libibaudio.so.0.1.0
+44f16ad27a78a171d7cb38eecf0f5b93821690abbe5f47bf6ebec9cc54106d9a  build/final-release/ibaudio
+b14f24752553bb5cc0d9139d0a24ab11789012d8ed864bdb06ae8174528f9f68  build/windows-x64-zig/libibaudio.dll
+9ed4195452bda3f7397bddf2798e75cbd4d8500a8bbfba3276692a0566600774  build/windows-x64-zig/ibaudio.exe

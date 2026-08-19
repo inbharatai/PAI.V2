@@ -1,0 +1,15 @@
+{
+  "manifest_version": 1,
+  "id": "inbharat.headless.safe",
+  "maximum_level": "L2",
+  "model_provider": "echo",
+  "model": "echo-v1",
+  "trajectory": "standard",
+  "capabilities": ["model", "file.read"],
+  "filesystem_roots": ["."],
+  "allowed_programs": [],
+  "network_destinations": [],
+  "credential_refs": [],
+  "confirmation": "unavailable",
+  "telemetry": "off"
+}

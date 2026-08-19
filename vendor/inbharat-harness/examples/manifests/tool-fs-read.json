@@ -1,0 +1,22 @@
+{
+  "manifest_version": 1,
+  "id": "fs.read",
+  "version": "1.0.0",
+  "description": "Read one bounded UTF-8 file inside the configured root",
+  "input_schema": {
+    "type": "object",
+    "properties": {"path": {"type": "string"}},
+    "required": ["path"],
+    "additionalProperties": false
+  },
+  "output_schema": {"type": "string"},
+  "required_capabilities": ["file.read"],
+  "levels": ["L1", "L2", "L3"],
+  "determinism": "deterministic",
+  "side_effect": "read",
+  "concurrency_safe": true,
+  "timeout_ms": 10000,
+  "max_output_bytes": 262144,
+  "verification": "canonical-output",
+  "compensation": "none"
+}

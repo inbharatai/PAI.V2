@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inbharat.local/schema/pocket-ai-pi-package-v1.json",
+  "title": "Pocket AI Pi package manifest",
+  "type": "object",
+  "required": ["schema", "product_id", "generated_at_utc", "target", "assets"],
+  "properties": {
+    "schema": {"const": "inbharat.pocket_ai_pi.package.v1"},
+    "product_id": {"const": "POCKET_AI_PI"},
+    "generated_at_utc": {"type": "string"},
+    "target": {"const": "linux-aarch64"},
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "size_bytes", "executable"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "size_bytes": {"type": "integer", "minimum": 0},
+          "executable": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

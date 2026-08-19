@@ -1,0 +1,3 @@
+target/x86_64-unknown-linux-musl/release/inbharat-harness 886216 bytes
+target/x86_64-unknown-linux-musl/release/libinbharat_harness.a 24447804 bytes
+target/harness-c-abi-smoke 8835656 bytes

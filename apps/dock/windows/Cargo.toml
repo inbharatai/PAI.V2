@@ -1,0 +1,27 @@
+[package]
+name = "unoone-dock-windows"
+version = "0.1.0"
+description = "Per-user Windows notification-area helper for UnoOne Pocket AI"
+edition = "2021"
+
+[[bin]]
+name = "UnoOneDock"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+unoone-usb-manifest = { path = "../../../packages/usb-manifest" }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+] }

@@ -1,0 +1,199 @@
+name: Pocket AI Windows Bundle
+
+on:
+  push:
+    branches:
+      - main
+      - codex/windows-autolaunch-remediation
+      - 'fix/**'
+    paths:
+      - 'apps/desktop/**'
+      - 'apps/dock/**'
+      - 'apps/starter/**'
+      - 'packages/**'
+      - 'scripts/build-pocket-ai-windows.ps1'
+      - 'Cargo.toml'
+      - '.github/workflows/pocket-ai-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build portable Windows applications
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apps/desktop/src/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-windows-latest-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: cargo-windows-latest-
+
+      - name: Build desktop frontend
+        working-directory: apps/desktop/src
+        run: |
+          npm ci
+          npm run build
+
+      - name: Test strict Pocket AI manifest validation
+        run: cargo test --release -p unoone-usb-manifest
+
+      # Recording privacy retention is a user-facing promise, so it is gated
+      # separately and always runs before anything is packaged.
+      - name: Test recording retention policy
+        run: cargo test --release -p unoone-recording-policy
+
+      - name: Build Pocket AI Windows applications
+        run: cargo build --release -p unoone-power -p unoone-dock-windows -p unoone-starter-windows
+
+      # ---------------------------------------------------------------
+      # Regression gate for the "localhost refused to connect" failure.
+      #
+      # A physical drive was staged with a UnoOnePower.exe that had no frontend
+      # embedded. tauri.conf.json was already correct, so no config check could
+      # have caught it. This inspects the real bytes of the built executable and
+      # fails the build if the hashed Vite assets are not inside it.
+      # ---------------------------------------------------------------
+      - name: Verify production frontend is embedded in the release executable
+        run: >
+          node scripts/verify-frontend-embedded.mjs
+          --dist apps/desktop/src/dist
+          --exe target/release/unoone-power.exe
+          --json
+
+      - name: Assemble portable bundle
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:RUNNER_TEMP "pocket-ai-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item "target/release/unoone-power.exe" (Join-Path $bundle "UnoOnePower.exe")
+          Copy-Item "target/release/UnoOneDock.exe" (Join-Path $bundle "UnoOneDock.exe")
+          Copy-Item "target/release/start-unoone.exe" (Join-Path $bundle "Start UnoOne.exe")
+          Get-ChildItem -LiteralPath $bundle -File |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
+              "$hash  $($_.Name)"
+            } |
+            Set-Content -LiteralPath (Join-Path $bundle "SHA256SUMS.txt") -Encoding utf8NoBOM
+
+      - name: Upload portable bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocket-ai-windows-x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/pocket-ai-windows-x86_64/
+          if-no-files-found: error
+          retention-days: 14
+
+  voice-smoke:
+    name: Smoke-test pinned offline voice assets
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Download and verify pinned upstream assets
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "pocket-ai-voice-smoke"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $assets = @(
+            @{
+              Name = "whisper.zip"
+              Url = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip"
+              Sha256 = "7D8BE46ECD31828E1EB7A2ECDD0D6B314FEAFD82163038AB6092594B0A063539"
+            },
+            @{
+              Name = "whisper-model.bin"
+              Url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+              Sha256 = "A03779C86DF3323075F5E796CB2CE5029F00EC8869EEE3FDFB897AFE36C6D002"
+            },
+            @{
+              Name = "jfk.wav"
+              Url = "https://raw.githubusercontent.com/ggml-org/whisper.cpp/v1.9.1/samples/jfk.wav"
+              Sha256 = "59DFB9A4ACB36FE2A2AFFC14BACBEE2920FF435CB13CC314A08C13F66BA7860E"
+            },
+            @{
+              Name = "piper.zip"
+              Url = "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip"
+              Sha256 = "F3C58906402B24F3A96D92145F58ACBA6D86C9B5DB896D207F78DC80811EFCEA"
+            },
+            @{
+              Name = "voice.onnx"
+              Url = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/bryce/medium/en_US-bryce-medium.onnx"
+              Sha256 = "DC9CAA6C313199FFB5AC698B6E542FA6CBA388AEAF2731E25262E33B9810AEF1"
+            },
+            @{
+              Name = "voice.onnx.json"
+              Url = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/bryce/medium/en_US-bryce-medium.onnx.json"
+              Sha256 = "7CEB1BC4AF6D4E41B6D1EDBB86C67E91E01EAA71F66DB4CD0AE92AC704D415BE"
+            }
+          )
+          foreach ($asset in $assets) {
+            $destination = Join-Path $root $asset.Name
+            & curl.exe --silent --show-error --location --fail --retry 3 --output $destination $asset.Url
+            if ($LASTEXITCODE -ne 0) { throw "Download failed: $($asset.Url)" }
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+            if ($actual -ne $asset.Sha256) {
+              throw "SHA-256 mismatch for $($asset.Name): expected $($asset.Sha256), got $actual"
+            }
+          }
+
+      - name: Run real Whisper and Piper inference
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "pocket-ai-voice-smoke"
+          $whisperRoot = Join-Path $root "whisper"
+          $piperRoot = Join-Path $root "piper-runtime"
+          Expand-Archive -LiteralPath (Join-Path $root "whisper.zip") -DestinationPath $whisperRoot
+          Expand-Archive -LiteralPath (Join-Path $root "piper.zip") -DestinationPath $piperRoot
+
+          $whisper = Join-Path $whisperRoot "Release\whisper-cli.exe"
+          $transcriptPrefix = Join-Path $root "jfk-transcript"
+          & $whisper `
+            --model (Join-Path $root "whisper-model.bin") `
+            --file (Join-Path $root "jfk.wav") `
+            --output-txt `
+            --output-file $transcriptPrefix
+          if ($LASTEXITCODE -ne 0) { throw "Whisper inference failed" }
+          $transcriptPath = "$transcriptPrefix.txt"
+          if (-not (Test-Path -LiteralPath $transcriptPath) -or
+              (Get-Item -LiteralPath $transcriptPath).Length -eq 0) {
+            throw "Whisper did not produce a transcript"
+          }
+
+          $piper = Join-Path $piperRoot "piper\piper.exe"
+          $speechPath = Join-Path $root "pocket-ai-ready.wav"
+          "Pocket AI is ready." |
+            & $piper `
+              --model (Join-Path $root "voice.onnx") `
+              --config (Join-Path $root "voice.onnx.json") `
+              --output_file $speechPath
+          if ($LASTEXITCODE -ne 0) { throw "Piper inference failed" }
+          if (-not (Test-Path -LiteralPath $speechPath) -or
+              (Get-Item -LiteralPath $speechPath).Length -le 44) {
+            throw "Piper did not produce a valid WAV payload"
+          }
+
+          Write-Host "Whisper transcript:"
+          Get-Content -LiteralPath $transcriptPath
+          Write-Host "Piper WAV bytes: $((Get-Item -LiteralPath $speechPath).Length)"

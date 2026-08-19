@@ -1,0 +1,24 @@
+[workspace]
+members = [
+    "packages/vault-core",
+    "packages/usb-manifest",
+    "packages/recording-policy",
+    "packages/text-util",
+    "packages/runtime-select",
+    "packages/document-migration",
+    "packages/browser-policy",
+    "packages/pai-harness-adapter",
+    "apps/desktop/src-tauri",
+    "apps/dock/windows",
+    "apps/starter/windows",
+]
+# vendor/inbharat-harness is a SELF-CONTAINED nested Cargo workspace (its own
+# [workspace] + [workspace.package] root at vendor/inbharat-harness/Cargo.toml).
+# Without this exclude, cargo would treat vendored crates as members of THIS
+# outer workspace and try to resolve their `*.workspace = true` inheritance
+# against this root — which has no [workspace.package] — and fail with
+# "workspace.package.edition was not defined". Excluding the vendored tree
+# makes cargo resolve inheritance against the harness's own inner root, while
+# the explicit path dependencies below still load normally.
+exclude = ["vendor/inbharat-harness"]
+resolver = "2"

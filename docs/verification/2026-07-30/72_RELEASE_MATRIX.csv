@@ -1,0 +1,20 @@
+journey,deliverable,status,evidence
+interrupted work recovery,53_INTERRUPTED_WORK_RECOVERY,VERIFIED_WORKING,3 preservation copies; stash commit 3a7c8ee anchored to recovery/hyperagent-resume-20260730; bundle OK
+live drive audit,54_LIVE_POCKET_AI_AUDIT,VERIFIED_WORKING,strict validator 545/545 exit 0 (2 runs); Get-Volume/Partition/Disk facts; vault.id sha256+size fingerprint
+packaged UI launch,55_PACKAGED_UI,VERIFIED_WORKING,process alive + window "UnoOne Power"; no :5173 connections; embedding gate VERIFIED on exact staged exe
+vault identity invariance,56_VAULT_IDENTITY,VERIFIED_WORKING,5 identity_tests pass (58/58 crate); transactional setup; refuse re-init
+starter verify,57_STARTER,VERIFIED_WORKING,"Start UnoOne.exe --verify-only exit 0 valid:true; tamper+rollback proven live during failed restage"
+auto-launch dock,58_AUTO_LAUNCH,BLOCKED_BY_ENVIRONMENT,physical USB hot-plug + interactive consent needed
+direct gemma runtime,59_DIRECT_GEMMA,VERIFIED_WORKING,"health 200 in 58.4s/60.5s; real answer ""4""; 47 completion tokens; 4.74 tok/s server-measured; clean SIGTERM stop; 127.0.0.1 only"
+browser workspace,60_BROWSER_WORKSPACE,BUILDS_NOT_RUNTIME_TESTED,35 unit tests green; backend executes+verifies; live-page journeys human-gated
+recording privacy,61_RECORDING_PRIVACY,BUILDS_NOT_RUNTIME_TESTED,20/20 policy tests; temp-WAV delete-verify in code; live mic journey human-gated
+offline voice,62_OFFLINE_VOICE,VERIFIED_WORKING,"Piper synth 4.23s WAV; Whisper transcribed it back verbatim; bundled binaries only"
+vision/ocr/camera,63_VISION_OCR_CAMERA,BUILDS_NOT_RUNTIME_TESTED,mmproj loaded in direct run; confidence honest Option<f32>; camera journeys human-gated
+documents/vault,64_DOCUMENTS_VAULT,BUILDS_NOT_RUNTIME_TESTED,TF-IDF labelled honestly; vault tests green; document journeys human-gated
+agent accuracy,65_AGENT_ACCURACY,BUILDS_NOT_RUNTIME_TESTED,16/16 deterministic tool-call tests; live-model suite human-gated
+mobile source,66_MOBILE_SOURCE,VERIFIED_WORKING,"gradlew clean test lint :app:assembleDebug exit 0; M1-M3 fixed; protect re-baselined green"
+mobile physical,67_MOBILE_PHYSICAL,BLOCKED_BY_ENVIRONMENT,no Android device attached to this machine
+cross-platform vault,68_CROSS_PLATFORM_VAULT,BLOCKED_BY_ENVIRONMENT,needs the phone (67)
+security/privacy,70_SECURITY_PRIVACY,VERIFIED_WORKING,constraints honoured; loopback-only observed; no weakening of OS protections
+UX,71_UX,IMPLEMENTED_NOT_TESTED,copy/flow fixes compiled+built; window launch verified; deeper UX human-gated
+macOS support,69,OUT_OF_SCOPE,explicitly not claimed this cycle

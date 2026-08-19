@@ -1,0 +1,6 @@
+IBAUDIO_1.0 {
+    global:
+        ibaudio_*;
+    local:
+        *;
+};

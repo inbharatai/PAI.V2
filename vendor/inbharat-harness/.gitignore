@@ -1,0 +1,5 @@
+/target/
+/reports/*.tmp
+/benchmarks/*.tmp
+*.swp
+.DS_Store

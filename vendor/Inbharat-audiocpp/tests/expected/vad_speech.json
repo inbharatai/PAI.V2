@@ -1,0 +1,6 @@
+{
+  "sample_rate": 16000,
+  "segments": [
+    {"start_frame": 3840, "end_frame": 20480, "confidence_min": 0.99, "peak_dbfs_tolerance": [-15.1, -14.8]}
+  ]
+}

@@ -1,0 +1,9 @@
+branch=main
+remote_count=0
+local_traceability_commit=b943f855ef93bee3d8eaec385f619bbf2215a553
+local_commit_subject=feat: implement independent InBharat Audio rc1
+upstream_revision=bb15edd78b56e035967e0eb999a6b28a62337db4
+upstream_status=clean
+final_release_gate=pass_11_of_11
+final_sanitizer_gate=pass_11_of_11
+note=Final evidence updates are committed in the release checkpoint after this snapshot.

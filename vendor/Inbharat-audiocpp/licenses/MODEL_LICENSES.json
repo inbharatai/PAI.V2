@@ -1,0 +1,39 @@
+{
+  "schema": "inbharat.ibaudio.model-licenses.v1",
+  "generated_for": "0.1.0-rc2",
+  "legal_review": "required before external distribution",
+  "entries": [
+    {
+      "model_id": "reference-asr-v1",
+      "artifact_type": "built-in deterministic algorithm; no weights",
+      "spdx_license": "Apache-2.0",
+      "immutable_revision": "0.1.0-rc2",
+      "sha256": "b73eaef057628c8a41b57c25ccf512a4ecf1b93dc2dace2d85ce60576d220964",
+      "redistribution_state": "no external model artifact"
+    },
+    {
+      "model_id": "reference-tts-v1",
+      "artifact_type": "built-in deterministic algorithm; no voice or weights",
+      "spdx_license": "Apache-2.0",
+      "immutable_revision": "0.1.0-rc2",
+      "sha256": "4f334629426d651c527543815cbb4ea830c20325d4f4cb14e8b48268867a3ad4",
+      "redistribution_state": "no external model artifact"
+    },
+    {
+      "model_id": "energy-vad-v1",
+      "artifact_type": "built-in energy algorithm; no weights",
+      "spdx_license": "Apache-2.0",
+      "immutable_revision": "0.1.0-rc2",
+      "sha256": "62cea6999cea6832c164b39f16065dea1a15fe9d51cae876c115b921cc494d9a",
+      "redistribution_state": "no external model artifact"
+    },
+    {
+      "model_id": "kws-deferred-v1",
+      "artifact_type": "none",
+      "spdx_license": "Apache-2.0",
+      "immutable_revision": "0.1.0-rc2",
+      "sha256": "8e80e8d5b50ada745519c4315d3ff0219942a7850cec73369b9e95c958d84c3c",
+      "redistribution_state": "not implemented; no keyword model may ship without separate approval"
+    }
+  ]
+}

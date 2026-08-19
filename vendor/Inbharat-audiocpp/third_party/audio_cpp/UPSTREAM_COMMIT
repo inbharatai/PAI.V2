@@ -1,0 +1,4 @@
+repository=https://github.com/0xShug0/audio.cpp.git
+revision=bb15edd78b56e035967e0eb999a6b28a62337db4
+tag=release-0.6
+subject=Expose NeuTTS and SenseVoice controls in native UI (#228)

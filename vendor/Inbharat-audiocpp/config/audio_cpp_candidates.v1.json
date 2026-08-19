@@ -1,0 +1,33 @@
+{
+  "schema": "inbharat.ibaudio.audio_cpp_candidates.v1",
+  "generated_for_review": "2026-08-19",
+  "upstream_source": "https://github.com/0xShug0/audio.cpp",
+  "upstream_candidate_commit": "26dcb5c4cf5aa016ae6285096a7b45f2671e5d17",
+  "production_ready": false,
+  "candidates": [
+    {
+      "task": "ASR",
+      "family": "qwen3_asr",
+      "phase1_languages": ["en", "hi", "hinglish"],
+      "status": "BENCHMARK_REQUIRED"
+    },
+    {
+      "task": "TTS",
+      "family": "omnivoice",
+      "phase1_languages": ["en", "hi", "hinglish"],
+      "status": "BENCHMARK_REQUIRED"
+    },
+    {
+      "task": "TTS",
+      "family": "voxcpm2",
+      "phase1_languages": ["en", "hi", "hinglish"],
+      "status": "BENCHMARK_REQUIRED"
+    },
+    {
+      "task": "VAD",
+      "family": "silero_vad",
+      "phase1_languages": ["language-agnostic"],
+      "status": "BENCHMARK_REQUIRED"
+    }
+  ]
+}

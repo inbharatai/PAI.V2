@@ -1,0 +1,14 @@
+captured_at_utc=2026-08-17T10:35:56Z
+Linux cc47f869-6ae 6.18.40 #1 SMP Wed Jul 29 22:20:41 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+audio.cpp pin/pristine check OK: bb15edd78b56e035967e0eb999a6b28a62337db4
+clang version 19.1.7 (https://github.com/ziglang/zig-bootstrap de1b01a8c1dddf75a560123ac1c2ab182b4830da)
+Target: x86_64-unknown-linux-musl
+Thread model: posix
+InstalledDir: /agent/workspace/toolchains/zig-x86_64-linux-0.14.1
+cmake version 3.30.5
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+ninja=1.12.1
+zig=0.14.1
+Python 3.9.25
+git version 2.49.0

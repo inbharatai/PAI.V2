@@ -1,0 +1,8 @@
+captured_at_utc=2026-08-17T09:18:59Z
+kernel=Linux 6.18.40 x86_64 GNU/Linux
+git=git version 2.49.0
+node=v24.14.1
+pnpm=10.34.3
+python=Python 3.9.25
+cpu=model_name=Intel(R) Xeon(R) Processor @ 2.90GHz
+memory=4386416 kB

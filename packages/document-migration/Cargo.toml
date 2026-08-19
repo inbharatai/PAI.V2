@@ -1,0 +1,8 @@
+[package]
+name = "unoone-document-migration"
+version = "0.1.0"
+edition = "2021"
+description = "Pure decision logic for migrating plaintext vault documents/memory to encrypted records"
+license = "MIT"
+
+[dependencies]

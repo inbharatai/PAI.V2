@@ -1,0 +1,15 @@
+{
+  "manifest_version": 1,
+  "id": "inbharat.local.development",
+  "maximum_level": "L3",
+  "model_provider": "echo",
+  "model": "echo-v1",
+  "trajectory": "diagnostic",
+  "capabilities": ["model", "file.read", "file.write", "workspace"],
+  "filesystem_roots": ["./workspace"],
+  "allowed_programs": [],
+  "network_destinations": [],
+  "credential_refs": ["local://model/provider-key"],
+  "confirmation": "one-shot-required-for-effects",
+  "telemetry": "off"
+}

@@ -1,0 +1,4 @@
+build/hardening-final-release/libibaudio.so.0.1.0 9735080 bytes
+build/hardening-final-release/ibaudio 5485072 bytes
+build/hardening-final-windows/libibaudio.dll 1024512 bytes
+build/hardening-final-windows/ibaudio.exe 841728 bytes

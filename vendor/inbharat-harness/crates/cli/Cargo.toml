@@ -1,0 +1,17 @@
+[package]
+name = "inbharat-harness-cli"
+description = "Local command-line interface for InBharat Harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "inbharat-harness"
+path = "src/main.rs"
+
+[dependencies]
+inbharat-harness-core = { path = "../core" }

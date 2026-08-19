@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Physical Pocket AI prototype: SanDisk USB 3.2 Gen1.
+         The app still validates manifest.json and vault.id after attachment;
+         VID/PID alone is never treated as product identity. -->
+    <usb-device vendor-id="1921" product-id="21929" />
+</resources>

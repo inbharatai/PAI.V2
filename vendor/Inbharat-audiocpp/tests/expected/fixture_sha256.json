@@ -1,0 +1,9 @@
+{
+  "malformed_bad_align.wav": "b13e940353e03e351c7f29b543e5ce587f5e846b376552227124ec68836cdadb",
+  "malformed_empty.wav": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "malformed_riff.wav": "4a642a8fafca54cde894de8c1cc7d8944937604269c9e818314350cb747ec84b",
+  "malformed_truncated_data.wav": "b976c4460bf115ef18839c1ae4362b6d6bba9b97978336b62614978e1a9e9050",
+  "silence_16k.wav": "358c6dcef4442790decb0a5c03fb320154f9d1dd5b4618e301f9e6661a413cb5",
+  "speech_440hz_16k_mono.wav": "6c73b194d108cdb8a2e172dce243a6cd5b159a370de6221becb670a02afb2dfe",
+  "stereo_48k.wav": "65ab99762e540bd97e48597a662ce1a28f8bd72c98bdfccbea77f7e4294f42d0"
+}

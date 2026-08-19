@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "vault_id": "7a581279-e710-4161-9107-d73c312ff799",
+  "kdf_params": {
+    "memory_kib": 262144,
+    "iterations": 3,
+    "parallelism": 4,
+    "output_len": 32
+  },
+  "salt": "b35b4b8157cf12312a113a54bd0c21ea5ecd3ee1730d87b4c97ea42bf05056f1",
+  "wrapped_master_key": "c63b8373e740e9816d97282c22300b4f4ce14e02e578ca27833cf06390cf2d2a3e810fcf2caaab9087994eb8269b7c50",
+  "wrap_nonce": "0891fb24ceadcb2d60b5f8ebd77f9bd78649abaae6d5ac43",
+  "header_hmac": "1d4e9718e8659d337c59471fa76ee64229a37133c2df81b982edd72a2e3ee0f1",
+  "recovery_enabled": true,
+  "wrapped_master_key_recovery": "60d6eafd77dcc78671b92b334c8d1dcfe9195d7d8526900aa262d5c577927053425e1ae8cea6cbeb4a6d74d1684f34cb",
+  "recovery_wrap_nonce": "818cf3dc6fdff7dfa1a201d9ecb0d31a5dadd773c5d8b9e1",
+  "recovery_salt": "4f7155761e464abde6450d43bb72af89ab76d533425c4464da3ce14f4be08b38",
+  "created_at": "2026-08-01T08:58:56.709180500+00:00",
+  "updated_at": "2026-08-01T08:59:09.479187600+00:00",
+  "generation": 1,
+  "committed": true
+}

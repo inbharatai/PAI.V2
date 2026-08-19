@@ -1,0 +1,26 @@
+[package]
+name = "unoone-runtime-select"
+version = "0.1.0"
+description = "Pocket AI local-inference selection policy — GPU backend preference and model-identity verification, as pure testable logic"
+authors = ["InBharat Ai"]
+edition = "2021"
+
+# Portable and dependency-free on purpose.
+#
+# Backend preference and model-identity verification are decisions, not I/O.
+# They previously lived inside the Tauri desktop crate (`unoone-power`), which
+# cannot be compiled on hosts without WebView2/webkit2gtk, so the logic was
+# never unit-tested and two real bugs shipped:
+#
+#   1. detect_backends() built its list with insert(0), so on a machine with
+#      both CUDA and Vulkan the caller's .next() selected Vulkan over CUDA
+#      purely because the Vulkan probe ran last. That is accidental precedence,
+#      not a decision, and CUDA is the faster llama.cpp backend on NVIDIA.
+#
+#   2. The model SHA-256 check was skipped whenever the manifest carried no
+#      hash (`if let Some(expected)`), so a substituted model passed silently —
+#      fail-open on the one product whose trust model is "verify every asset".
+#
+# This crate makes both decisions explicit and exhaustively tested. It holds no
+# desktop types, so the desktop side maps to it in a few lines and nothing about
+# the frontend wire format changes.

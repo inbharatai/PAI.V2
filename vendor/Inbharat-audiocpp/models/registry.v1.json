@@ -1,0 +1,71 @@
+{
+  "schema": "inbharat.ibaudio.model-registry.v1",
+  "runtime_minimum": "0.1.0-rc2",
+  "models": [
+    {
+      "id": "reference-asr-v1",
+      "family": "reference-asr",
+      "version": "1.0.0",
+      "task": "asr",
+      "available": true,
+      "artifact_kind": "builtin-algorithm",
+      "artifact_sha256": "b73eaef057628c8a41b57c25ccf512a4ecf1b93dc2dace2d85ce60576d220964",
+      "hash_kind": "builtin-identity-sha256",
+      "spdx_license": "Apache-2.0",
+      "source_uri": "builtin://reference-asr-v1",
+      "source_revision": "0.1.0-rc2",
+      "streaming_class": "window-incremental-revisable",
+      "streaming_label": "window-incremental provisional analysis; partials are revisable, final is authoritative",
+      "weights": []
+    },
+    {
+      "id": "reference-tts-v1",
+      "family": "reference-tts",
+      "version": "1.0.0",
+      "task": "tts",
+      "available": true,
+      "artifact_kind": "builtin-algorithm",
+      "artifact_sha256": "4f334629426d651c527543815cbb4ea830c20325d4f4cb14e8b48268867a3ad4",
+      "hash_kind": "builtin-identity-sha256",
+      "spdx_license": "Apache-2.0",
+      "source_uri": "builtin://reference-tts-v1",
+      "source_revision": "0.1.0-rc2",
+      "streaming_class": "segment-chunked",
+      "streaming_label": "segment-chunked deterministic PCM; generation is cooperative between characters and frames",
+      "weights": []
+    },
+    {
+      "id": "energy-vad-v1",
+      "family": "energy-vad",
+      "version": "1.0.0",
+      "task": "vad",
+      "available": true,
+      "artifact_kind": "builtin-algorithm",
+      "artifact_sha256": "62cea6999cea6832c164b39f16065dea1a15fe9d51cae876c115b921cc494d9a",
+      "hash_kind": "builtin-identity-sha256",
+      "spdx_license": "Apache-2.0",
+      "source_uri": "builtin://energy-vad-v1",
+      "source_revision": "0.1.0-rc2",
+      "streaming_class": "stateful-low-latency",
+      "streaming_label": "stateful frame-energy VAD; events emit after configured hysteresis",
+      "weights": []
+    },
+    {
+      "id": "kws-deferred-v1",
+      "family": "deferred-kws",
+      "version": "1.0.0",
+      "task": "kws",
+      "available": false,
+      "artifact_kind": "none",
+      "artifact_sha256": "8e80e8d5b50ada745519c4315d3ff0219942a7850cec73369b9e95c958d84c3c",
+      "hash_kind": "builtin-identity-sha256",
+      "spdx_license": "Apache-2.0",
+      "source_uri": "builtin://kws-deferred-v1",
+      "source_revision": "0.1.0-rc2",
+      "streaming_class": "deferred",
+      "streaming_label": "deferred; no keyword model or inference adapter is included",
+      "weights": [],
+      "availability_reason": "Interface reserved pending a licensed immutable model, parity tests, cancellation points, and platform evidence."
+    }
+  ]
+}

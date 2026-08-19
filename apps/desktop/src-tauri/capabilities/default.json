@@ -1,0 +1,10 @@
+{
+  "identifier": "default",
+  "description": "Default capability for the main UnoOne Power window. Grants access to the core APIs needed for the browser workspace and standard UI interaction.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:allow-close"
+  ]
+}

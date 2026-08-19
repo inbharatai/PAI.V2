@@ -1,0 +1,34 @@
+[package]
+name = "inbharat-harness-core"
+description = "Dependency-free routing, session, provider, tool, and execution core for InBharat Harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+test-providers = []
+research-innovations = []
+
+[lints]
+workspace = true
+
+[lib]
+name = "inbharat_harness_core"
+path = "src/lib.rs"
+
+[[test]]
+name = "cancellation_recovery"
+path = "tests/cancellation_recovery.rs"
+required-features = ["test-providers"]
+
+[[test]]
+name = "providers_and_modes"
+path = "tests/providers_and_modes.rs"
+required-features = ["test-providers"]
+
+[[test]]
+name = "routing_and_tools"
+path = "tests/routing_and_tools.rs"
+required-features = ["test-providers"]

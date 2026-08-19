@@ -1,0 +1,4 @@
+schema,runtime_version,backend,operation,iterations,mean_ms
+inbharat.ibaudio.benchmark.v1,0.1.0-rc2,cpu,asr,1000,0.229853
+inbharat.ibaudio.benchmark.v1,0.1.0-rc2,cpu,vad,1000,0.126018
+inbharat.ibaudio.benchmark.v1,0.1.0-rc2,cpu,tts,1000,0.524235

@@ -1,0 +1,9 @@
+[package]
+name = "unoone-browser-policy"
+version = "0.1.0"
+edition = "2021"
+description = "Pure navigation/redirect decision logic for the browser workspace"
+license = "MIT"
+
+[dependencies]
+url = "2"

@@ -1,0 +1,4 @@
+build/final-release/ibaudio 5485064 bytes
+build/final-release/libibaudio.so.0.1.0 9678984 bytes
+build/windows-x64-zig/ibaudio.exe 841728 bytes
+build/windows-x64-zig/libibaudio.dll 1020416 bytes

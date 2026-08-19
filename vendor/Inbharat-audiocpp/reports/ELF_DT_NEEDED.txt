@@ -1,0 +1,8 @@
+libibaudio.so.0.1.0
+libm.so.6
+libc.so.6
+ld-linux-x86-64.so.2
+ibaudio
+libibaudio.so.1
+libc.so.6
+ld-linux-x86-64.so.2

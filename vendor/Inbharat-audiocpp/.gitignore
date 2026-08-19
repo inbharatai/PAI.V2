@@ -1,0 +1,11 @@
+build/
+out/
+.idea/
+.gradle/
+local.properties
+*.swp
+__pycache__/
+*.pyc
+.DS_Store
+.ibaudio-cache/
+reports/*.tmp

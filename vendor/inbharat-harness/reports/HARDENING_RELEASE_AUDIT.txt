@@ -1,0 +1,10 @@
+release_audit_schema=1
+repository=inbharat-harness
+head=0b24f21bef63c5a4b30ce561b4302e18b66d6b75
+tracked_files=128
+binary_files=0
+symlinks=0
+files_over_2mib=0
+remote_count=0
+working_tree_clean=yes
+secret_or_packaging_findings=0

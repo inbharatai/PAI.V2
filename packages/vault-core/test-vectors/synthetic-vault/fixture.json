@@ -1,0 +1,17 @@
+{
+  "header_path": "header_a.json",
+  "password_utf8": "synthetic-fixture-password-2026",
+  "records": [
+    {
+      "expected_content_utf8": "synthetic memory bytes: turmeric cardamom",
+      "path": "memory-record.json",
+      "record_type": "MEMORY"
+    },
+    {
+      "expected_content_utf8": "synthetic document bytes: meeting with the supplier",
+      "path": "document-record.json",
+      "record_type": "DOCUMENT"
+    }
+  ],
+  "spec": "unoone-vault-synthetic-fixture/1"
+}

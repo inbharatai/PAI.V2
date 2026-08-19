@@ -1,0 +1,59 @@
+# --- Rust / Cargo ---
+target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# --- Node / frontend (Tauri desktop app) ---
+**/node_modules/
+apps/desktop/src/dist/
+**/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Tauri build artifacts ---
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/schemas/
+
+# --- C/C++ (vendored Inbharat-audiocpp) ---
+build/
+**/build/
+CMakeCache.txt
+**/CMakeCache.txt
+CMakeFiles/
+**/CMakeFiles/
+cmake_install.cmake
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.a
+.cache/
+**/.cache/
+
+# --- Logs / local validation output ---
+*.log
+validation-local-*
+validation-local*/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# --- Local secrets / env (never committed) ---
+.env
+.env.*
+!.env.example
+**/local.properties
+
+# --- Screenshots / local media ---
+screenshots/
+*.local.png

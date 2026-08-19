@@ -1,0 +1,11 @@
+0000000000000000 T ib_harness_api_version_v1
+0000000000000000 T ib_harness_bytes_free_v1
+0000000000000000 T ib_harness_cancel_create_v1
+0000000000000000 T ib_harness_cancel_destroy_v1
+0000000000000000 T ib_harness_cancel_request_v1
+0000000000000000 T ib_harness_create_v1
+0000000000000000 T ib_harness_destroy_v1
+0000000000000000 T ib_harness_route_v1
+0000000000000000 T ib_harness_run_v1
+0000000000000000 T ib_harness_run_with_cancel_v1
+0000000000000000 T ib_harness_status_message_v1

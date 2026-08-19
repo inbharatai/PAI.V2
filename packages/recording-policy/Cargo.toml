@@ -1,0 +1,20 @@
+[package]
+name = "unoone-recording-policy"
+version = "0.1.0"
+description = "Pocket AI recording retention policy — the single source of truth for what a privacy mode is allowed to persist"
+authors = ["InBharat Ai"]
+edition = "2021"
+
+# Deliberately dependency-light and platform-independent.
+#
+# This crate exists so the privacy retention semantics of Pocket AI can be
+# proven by unit test on ANY host, including CI containers and Linux build
+# machines that cannot compile the Tauri desktop shell (which requires
+# webkit2gtk / WebView2). Privacy guarantees must never be untestable because
+# of a GUI toolchain dependency.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Used only to assert the Tauri command wire format never drifts.
+serde_json = "1"

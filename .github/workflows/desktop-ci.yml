@@ -1,0 +1,197 @@
+name: Desktop CI
+
+on:
+  push:
+    branches: [ main, desktop/production-foundation ]
+    paths:
+      - 'apps/desktop/**'
+      - 'packages/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/desktop-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'apps/desktop/**'
+      - 'packages/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/desktop-ci.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mobile-protection:
+    name: Verify Mobile Untouched
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify no Android files changed
+        shell: bash
+        run: |
+          # Tree-pinned baseline (see mobile-protection.yml): the expected tree
+          # hash lives in a committed pointer file, so re-baselining is a
+          # reviewable commit rather than a workflow edit or a tag move.
+          PROTECTED_PATH="android-app/UnoOneAgent"
+          POINTER_FILE="scripts/MOBILE_PROTECTED_TREE"
+
+          if [ ! -f "$POINTER_FILE" ]; then
+            echo "FAIL: baseline pointer missing at $POINTER_FILE"
+            exit 1
+          fi
+
+          EXPECTED_TREE=$(tr -d '[:space:]' < "$POINTER_FILE")
+          ACTUAL_TREE=$(git rev-parse "HEAD:${PROTECTED_PATH}")
+
+          if [ "$ACTUAL_TREE" != "$EXPECTED_TREE" ]; then
+            echo "FAIL: protected path changed without re-baselining."
+            echo "  expected tree : $EXPECTED_TREE  (from $POINTER_FILE)"
+            echo "  actual tree   : $ACTUAL_TREE"
+            echo ""
+            git diff --name-status "$EXPECTED_TREE" "$ACTUAL_TREE" || true
+            exit 1
+          fi
+
+          echo "PASS: protected tree matches committed baseline ($ACTUAL_TREE)"
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: apps/desktop/src/package-lock.json
+
+      - name: Install dependencies
+        working-directory: apps/desktop/src
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: apps/desktop/src
+        run: npm run build
+
+  rust-check:
+    name: Rust Backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # generate_context! embeds the frontend at compile time (custom-protocol
+      # is a default feature), so the dist must exist before ANY cargo command,
+      # including cargo check. Each matrix runner builds it independently.
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: apps/desktop/src/package-lock.json
+
+      - name: Build desktop frontend
+        working-directory: apps/desktop/src
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ matrix.os }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: cargo-${{ matrix.os }}-
+
+      - name: cargo fmt
+        run: cargo fmt --check
+        continue-on-error: true
+
+      - name: cargo check
+        run: cargo check --workspace
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for hardcoded secrets
+        shell: bash
+        run: |
+          FOUND=0
+          # Check for common secret patterns
+          for PATTERN in "password\s*=\s*['\"][^'\"]{8,}['\"]" "api_key\s*=\s*['\"][^'\"]+['\"]" "secret\s*=\s*['\"][^'\"]+['\"]" "token\s*=\s*['\"][^'\"]+['\"]"; do
+            if grep -rPn "$PATTERN" apps/desktop/src-tauri/src/ apps/desktop/src/src/ packages/vault-core/src/ --include="*.rs" --include="*.ts" --include="*.tsx" 2>/dev/null; then
+              FOUND=1
+            fi
+          done
+          if [ "$FOUND" = "1" ]; then
+            echo "FAIL: Potential hardcoded secrets found"
+            exit 1
+          fi
+          echo "PASS: No hardcoded secrets detected"
+
+  artifact-scan:
+    name: Artifact Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for binary artifacts in git
+        shell: bash
+        run: |
+          FOUND=0
+          # Check for model binaries, DLLs, executables that should not be in git
+          for EXT in ".gguf" ".dll" ".so" ".dylib" ".apk" ".aab"; do
+            if git ls-files -- "*.${EXT#*.}" 2>/dev/null | head -1 | grep -q "."; then
+              echo "FAIL: Found ${EXT} files in git"
+              git ls-files -- "*${EXT}"
+              FOUND=1
+            fi
+          done
+          # Check for target/ directory (build artifacts)
+          if git ls-files -- "apps/desktop/src-tauri/target/" 2>/dev/null | head -1 | grep -q "."; then
+            echo "FAIL: Found target/ directory in git"
+            FOUND=1
+          fi
+          # Check for Cargo.lock in VCS (should be in .gitignore for apps)
+          if git ls-files -- "apps/desktop/src-tauri/Cargo.lock" 2>/dev/null | head -1 | grep -q "."; then
+            echo "WARN: Cargo.lock is tracked — should be in .gitignore for apps"
+          fi
+          if [ "$FOUND" = "1" ]; then
+            exit 1
+          fi
+          echo "PASS: No binary artifacts in git"

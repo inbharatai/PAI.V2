@@ -1,0 +1,26 @@
+{
+  "abi": "inbharat-harness",
+  "major": 1,
+  "calling_convention": "C",
+  "symbols": [
+    "ib_harness_api_version_v1",
+    "ib_harness_create_v1",
+    "ib_harness_destroy_v1",
+    "ib_harness_cancel_create_v1",
+    "ib_harness_cancel_request_v1",
+    "ib_harness_cancel_destroy_v1",
+    "ib_harness_route_v1",
+    "ib_harness_run_v1",
+    "ib_harness_run_with_cancel_v1",
+    "ib_harness_bytes_free_v1",
+    "ib_harness_status_message_v1"
+  ],
+  "ownership": {
+    "IbByteSpanV1": "caller",
+    "IbOwnedBytesV1": "library; release with ib_harness_bytes_free_v1",
+    "IbHarnessHandle": "library; release with ib_harness_destroy_v1",
+    "IbCancellationHandle": "library; release with ib_harness_cancel_destroy_v1 after all runs stop"
+  },
+  "panic_policy": "contained and returned as status 255",
+  "encoding": "UTF-8"
+}
