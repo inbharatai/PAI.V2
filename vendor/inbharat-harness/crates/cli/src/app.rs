@@ -1,6 +1,8 @@
 use crate::policy::{CliPermission, CliSandbox};
 use crate::{benchmark, demo};
 use inbharat_harness_core::error::{ErrorCode, Failure, FailureClass, HarnessResult};
+#[cfg(feature = "test-providers")]
+use inbharat_harness_core::providers::EchoModelProvider;
 use inbharat_harness_core::providers::{
     BasicSafetyProvider, CanonicalVerificationProvider, Capability, CapabilitySet,
     ConfirmationOutcome, StaticConfirmationProvider,
@@ -46,12 +48,8 @@ fn run(args: Vec<String>) -> HarnessResult<()> {
             Ok(())
         }
         "route" => command_route(rest),
-        "run-task" | "chat" => Err(Failure::new(
-            ErrorCode::CapabilityUnavailable,
-            FailureClass::Provider,
-            "cli.model_provider",
-            "standalone Harness does not bundle a dummy model provider; embed a real ModelProvider (for Pocket AI: local llama-server) to execute model turns",
-        )),
+        "run-task" => command_run_task(rest),
+        "chat" => command_chat(rest),
         "benchmark" => command_benchmark(rest),
         "demo-website" => command_demo_website(rest),
         "info" => command_info(),
@@ -80,7 +78,6 @@ fn command_route(args: &[String]) -> HarnessResult<()> {
     Ok(())
 }
 
-#[allow(dead_code)] // Retained for embedded/test-provider builds; standalone CLI bundles no model.
 fn command_run_task(args: &[String]) -> HarnessResult<()> {
     let parsed = CommonArgs::parse(args, true)?;
     let prompt = parsed.prompt()?;
@@ -107,7 +104,6 @@ fn command_run_task(args: &[String]) -> HarnessResult<()> {
     Ok(())
 }
 
-#[allow(dead_code)] // Retained for embedded/test-provider builds; standalone CLI bundles no model.
 fn command_chat(args: &[String]) -> HarnessResult<()> {
     let parsed = CommonArgs::parse(args, false)?;
     if !parsed.prompt_parts.is_empty() {
@@ -219,8 +215,13 @@ fn command_info() -> HarnessResult<()> {
         "providers=model,memory,safety,permission,confirmation,verification,sandbox,credential"
     );
     println!("secure_defaults=read-only,no-process,no-network,no-secret-values,telemetry-off");
-    println!("commands=route,benchmark,demo-website,info");
-    println!("model_execution=embedding-only;no-dummy-provider-bundled");
+    println!("commands=route,run-task,chat,benchmark,demo-website,info");
+    #[cfg(feature = "test-providers")]
+    println!("model_execution=echo-test-provider");
+    #[cfg(not(feature = "test-providers"))]
+    println!(
+        "model_execution=none-bundled;L1-deterministic-tools-work;model-turns-need-a-real-ModelProvider"
+    );
     io::stdout()
         .flush()
         .map_err(|error| cli_io("info.flush", error))
@@ -252,10 +253,16 @@ fn build_harness(parsed: &CommonArgs) -> HarnessResult<Harness> {
             granted,
             trusted_process: parsed.trusted_process,
         }));
+    // Only the test-providers build registers a (synthetic) model. The
+    // production CLI bundles no dummy provider, so model-requiring tasks
+    // fail-closed at the runtime capability gate (runtime.rs run_model_loop),
+    // while L1 deterministic tool execution still works because it dispatches a
+    // registered tool directly and needs no model.
+    #[cfg(feature = "test-providers")]
+    let builder = builder.register_model(Arc::new(EchoModelProvider::default()))?;
     Ok(builder.build())
 }
 
-#[allow(dead_code)] // Retained for embedded/test-provider builds; standalone CLI bundles no model.
 fn print_outcome(outcome: &inbharat_harness_core::RunOutcome) {
     println!("{}", outcome.output);
     eprintln!(
@@ -401,18 +408,36 @@ impl CommonArgs {
         RunOptions {
             explicit_level: self.explicit_level,
             capabilities,
-            provider: self
-                .provider
-                .clone()
-                .unwrap_or_else(|| "unconfigured-provider".to_owned()),
-            model: self
-                .model
-                .clone()
-                .unwrap_or_else(|| "unconfigured-model".to_owned()),
+            provider: self.provider.clone().unwrap_or_else(default_provider),
+            model: self.model.clone().unwrap_or_else(default_model),
             trajectory: self.trajectory.unwrap_or(TrajectoryMode::Standard),
             ..RunOptions::default()
         }
     }
+}
+
+/// Default provider id for `RunOptions` when `--provider` is not given.
+///
+/// The test-providers build pairs this with the registered `EchoModelProvider`
+/// (`id = "echo"`) so model-turn smoke tests resolve a real provider. The
+/// production build has no registered provider, so the sentinel
+/// `unconfigured-provider` makes the unconfigured state explicit and lets the
+/// runtime fail-closed with a truthful message rather than silently matching a
+/// synthetic id.
+fn default_provider() -> String {
+    #[cfg(feature = "test-providers")]
+    return "echo".to_owned();
+    #[cfg(not(feature = "test-providers"))]
+    return "unconfigured-provider".to_owned();
+}
+
+/// Default model id for `RunOptions` when `--model` is not given; see
+/// [`default_provider`]. The echo provider serves `echo-v1`.
+fn default_model() -> String {
+    #[cfg(feature = "test-providers")]
+    return "echo-v1".to_owned();
+    #[cfg(not(feature = "test-providers"))]
+    return "unconfigured-model".to_owned();
 }
 
 fn json_strings(values: &[&str]) -> String {

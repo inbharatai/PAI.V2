@@ -2,7 +2,11 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
-"$root/scripts/cargo-portable.sh" build --workspace
+# Build with test-providers so the synthetic EchoModelProvider is registered and
+# the model-turn run-task/chat smoke checks resolve a real provider. Production
+# builds omit this feature and bundle no dummy model (model turns fail-closed;
+# L1 deterministic tool execution still works without a model).
+"$root/scripts/cargo-portable.sh" build --workspace --features test-providers
 if command -v cc >/dev/null 2>&1; then
   target_dir="$root/target/debug"
 else

@@ -13,5 +13,13 @@ workspace = true
 name = "inbharat-harness"
 path = "src/main.rs"
 
+[features]
+# Forwarded to the core crate. When enabled, the standalone CLI registers the
+# synthetic EchoModelProvider so `run-task`/`chat` model-turn smoke tests can
+# run without a real backend. OFF by default and OFF in every release: no dummy
+# provider is bundled, so model-requiring tasks fail-closed at runtime while L1
+# deterministic tool execution (registered tools, no model needed) still works.
+test-providers = ["inbharat-harness-core/test-providers"]
+
 [dependencies]
 inbharat-harness-core = { path = "../core" }
