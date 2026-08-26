@@ -6,12 +6,12 @@
   "allowed_languages": ["en", "hi", "hinglish"],
   "asr": {
     "family": "qwen3_asr",
-    "model_relative_path": "SPEECH/models/asr/qwen3-asr",
+    "model_relative_path": "SPEECH/models/asr/qwen3-asr.gguf",
     "default_language": "auto"
   },
   "tts": {
     "family": "omnivoice",
-    "model_relative_path": "SPEECH/models/tts/omnivoice",
+    "model_relative_path": "SPEECH/models/tts/omnivoice.gguf",
     "default_language": "hi"
   }
 }
