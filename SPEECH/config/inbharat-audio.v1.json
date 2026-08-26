@@ -1,7 +1,7 @@
 {
   "schema": "inbharat.pai.speech.v1",
   "enabled": false,
-  "upstream_commit": "bb15edd78b56e035967e0eb999a6b28a62337db4",
+  "upstream_commit": "26dcb5c4cf5aa016ae6285096a7b45f2671e5d17",
   "backend": "best",
   "allowed_languages": ["en", "hi", "hinglish"],
   "asr": {

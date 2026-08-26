@@ -2,6 +2,8 @@
 
 **Private AI on a pen drive — two host platforms, one encrypted vault, zero cloud.**
 
+> **Patent pending** — Indian provisional application **202631102427** (ref E106/3399/2026-KOL), filed 2026-08-25. See [PATENT.md](PATENT.md).
+
 Pocket AI is the physical UnoOne pen drive. Its models, runtimes, applications,
 identity, and encrypted vault live on that removable device. Windows and
 Android are hosts for the same Pocket AI; UnoOne Dock is only a per-user
@@ -590,6 +592,17 @@ The installer PWA is implemented but intentionally keeps downloads locked when a
 - [Speech model qualification](docs/SPEECH_MODEL_QUALIFICATION.md)
 - [Privacy policy](docs/play-review/privacy-policy.md)
 - [Data safety](docs/play-review/data-safety.md)
+
+## Patent Notice
+
+This software is claimed in Indian provisional patent application
+**202631102427** (*Portable Host-Adaptive Private Artificial Intelligence System
+with Device-Resident Canonical State*), filed 2026-08-25 with the Patent Office,
+Kolkata (ref E106/3399/2026-KOL; TEMP/E1/113020/2026-KOL; docket 25913). The
+complete specification is due by 2027-08-25. See [PATENT.md](PATENT.md) for the
+full filing record. The release identity, encrypted vault, local-only inference,
+capability-gated harness execution, and 22-scheduled-language Bharat speech
+runtime are among the aspects covered by the application.
 
 ## License
 
