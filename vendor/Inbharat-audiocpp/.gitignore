@@ -1,5 +1,7 @@
 build/
 out/
+build*/
+cmake-build-*/
 .idea/
 .gradle/
 local.properties

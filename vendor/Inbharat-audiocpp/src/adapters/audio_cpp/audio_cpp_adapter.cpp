@@ -12,7 +12,7 @@
 
 namespace ibaudio::audio_cpp_adapter {
 
-constexpr const char *kReviewedCommit = "bb15edd78b56e035967e0eb999a6b28a62337db4";
+constexpr const char *kReviewedCommit = "26dcb5c4cf5aa016ae6285096a7b45f2671e5d17";
 
 const char *reviewed_commit() noexcept {
     return kReviewedCommit;

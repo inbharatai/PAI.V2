@@ -7,6 +7,7 @@
 
 #include "inbharat/ibaudio.h"
 #include "../../internal.hpp"
+#include "../../language/language.hpp"
 #include <cmath>
 #include <vector>
 #include <string>
@@ -42,94 +43,21 @@ public:
             score.confidence = 0.0f;
             return score;
         }
-        
-        // Decode UTF-8 and count script code points. The previous byte-wise
-        // `std::isalpha` logic never recognized Devanagari in the default C
-        // locale and incorrectly treated any non-ASCII alphabetic byte as
-        // Hindi. Keep this research heuristic explicit and Unicode-correct.
-        int latin_count = 0;
-        int devanagari_count = 0;
-        int digit_count = 0;
-        int space_count = 0;
-        const auto bytes = reinterpret_cast<const unsigned char *>(transcript.data());
-        size_t index = 0u;
-        while (index < transcript.size()) {
-            uint32_t codepoint = 0u;
-            size_t width = 0u;
-            const unsigned char first = bytes[index];
-            if (first < 0x80u) {
-                codepoint = first;
-                width = 1u;
-            } else if ((first & 0xE0u) == 0xC0u && index + 1u < transcript.size()) {
-                codepoint = static_cast<uint32_t>(first & 0x1Fu) << 6u;
-                codepoint |= static_cast<uint32_t>(bytes[index + 1u] & 0x3Fu);
-                width = 2u;
-            } else if ((first & 0xF0u) == 0xE0u && index + 2u < transcript.size()) {
-                codepoint = static_cast<uint32_t>(first & 0x0Fu) << 12u;
-                codepoint |= static_cast<uint32_t>(bytes[index + 1u] & 0x3Fu) << 6u;
-                codepoint |= static_cast<uint32_t>(bytes[index + 2u] & 0x3Fu);
-                width = 3u;
-            } else if ((first & 0xF8u) == 0xF0u && index + 3u < transcript.size()) {
-                codepoint = static_cast<uint32_t>(first & 0x07u) << 18u;
-                codepoint |= static_cast<uint32_t>(bytes[index + 1u] & 0x3Fu) << 12u;
-                codepoint |= static_cast<uint32_t>(bytes[index + 2u] & 0x3Fu) << 6u;
-                codepoint |= static_cast<uint32_t>(bytes[index + 3u] & 0x3Fu);
-                width = 4u;
-            } else {
-                ++index;
-                continue;
-            }
-            index += width;
 
-            if ((codepoint >= 'A' && codepoint <= 'Z') ||
-                (codepoint >= 'a' && codepoint <= 'z')) {
-                ++latin_count;
-            } else if (codepoint >= 0x0900u && codepoint <= 0x097Fu) {
-                ++devanagari_count;
-            } else if (codepoint >= '0' && codepoint <= '9') {
-                ++digit_count;
-            } else if (codepoint == ' ' || codepoint == '\t' || codepoint == '\n' || codepoint == '\r') {
-                ++space_count;
-            }
-        }
-        
-        const int total = latin_count + devanagari_count + digit_count + space_count;
-        if (total == 0) {
-            score.confidence = 0.0f;
-            return score;
-        }
-        
-        // Compute language scores
-        score.english = static_cast<float>(latin_count) / static_cast<float>(total);
-        score.hindi = static_cast<float>(devanagari_count) / static_cast<float>(total);
-        
-        // Hinglish is a mix of both
-        if (score.english > 0.2f && score.hindi > 0.2f) {
-            score.hinglish = std::min(score.english, score.hindi) * 2.0f;
-        }
-        
-        // Normalize scores
-        const float sum = score.english + score.hindi + score.hinglish;
-        if (sum > 1.0e-12f) {
-            score.english /= sum;
-            score.hindi /= sum;
-            score.hinglish /= sum;
-        }
-        
-        // Compute confidence from acoustic features if available
-        if (audio != nullptr && audio->frame_count > 0) {
-            // Simple confidence based on speech energy
-            double energy = 0.0;
-            for (uint64_t i = 0; i < audio->frame_count * audio->channels; ++i) {
-                const double sample = audio->interleaved_f32[i];
-                energy += sample * sample;
-            }
-            const double rms = std::sqrt(energy / static_cast<double>(audio->frame_count * audio->channels));
-            score.confidence = std::min(1.0f, static_cast<float>(rms * 10.0));
-        } else {
-            score.confidence = 0.7f;  // Default confidence
-        }
-        
+        // Delegate to the Bharat adaptation layer's UTF-8-correct codepoint scoring.
+        // (The previous byte loop never counted Devanagari: isalpha() is false for
+        // UTF-8 lead bytes, so Hindi text scored zero. Codepoints fix that.)
+        const ibaudio::language::LanguageScore s = ibaudio::language::score_code_mix(transcript);
+        score.english = s.english;
+        score.hindi = s.hindi;
+        score.hinglish = s.hinglish;
+
+        // Confidence reflects input coverage, not loudness: full when there is letter
+        // content to classify, zero when there is none. The audio argument no longer
+        // drives a decorative RMS-based "confidence".
+        (void)audio;
+        score.confidence = (score.english > 0.0f || score.hindi > 0.0f) ? 1.0f : 0.0f;
+
         return score;
     }
     

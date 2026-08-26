@@ -130,7 +130,7 @@ ibaudio_status_t ibaudio_context_aware_output_compute(
     context.user_engagement = std::max(0.0f, std::min(1.0f, user_engagement));
     context.time_pressure = std::max(0.0f, std::min(1.0f, time_pressure));
     context.is_quiet_environment = environment_noise_dbfs < -50.0f;
-    context.is_noisy_environment = environment_noise_dbfs >= -30.0f;
+    context.is_noisy_environment = environment_noise_dbfs > -30.0f;
     
     const auto adjustment = output->impl.compute(context);
     out_adjustment->volume_scale = adjustment.volume_scale;

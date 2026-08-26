@@ -25,7 +25,12 @@ int main(void) {
     memset(&capabilities, 0, sizeof(capabilities));
     if (ibaudio_runtime_get_capabilities(runtime, &capabilities) != IBAUDIO_STATUS_OK) return 2;
     if (capabilities.abi_major != 1u || capabilities.abi_minor != 0u) return 3;
-    if (ibaudio_runtime_get_model_count(runtime, &model_count) != IBAUDIO_STATUS_OK || model_count != 4u) return 4;
+    if (ibaudio_runtime_get_model_count(runtime, &model_count) != IBAUDIO_STATUS_OK) return 4;
+#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
+    if (model_count != 6u) return 4;  /* 4 reference/deferred + Silero VAD + Qwen3-ASR */
+#else
+    if (model_count != 4u) return 4;
+#endif
     memset(&descriptor, 0, sizeof(descriptor));
     if (ibaudio_runtime_get_model_descriptor(runtime, 0u, &descriptor) != IBAUDIO_STATUS_OK) return 5;
     if (strcmp(descriptor.id, "reference-asr-v1") != 0) return 6;

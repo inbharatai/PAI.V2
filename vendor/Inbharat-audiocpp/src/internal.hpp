@@ -173,7 +173,10 @@ struct ibaudio_runtime {
     std::unordered_set<std::string> cache_keys;
     std::atomic<uint32_t> live_models{0};
     std::string startup_diagnostic;
+    bool allow_remote_providers = false;  // policy: remote providers never selected when false
 };
+
+namespace ibaudio { class Provider; }
 
 struct ibaudio_model {
     ibaudio_runtime *runtime = nullptr;
@@ -181,6 +184,10 @@ struct ibaudio_model {
     std::string artifact_path;
     std::string verified_hash;
     ibaudio_backend_t backend = IBAUDIO_BACKEND_CPU;
+    // Resolved inference engine for this model. Null means "no provider resolved";
+    // session inference then surfaces UNAVAILABLE rather than guessing. Set at load
+    // time by the provider resolver in facade_util.cpp.
+    ibaudio::Provider *provider = nullptr;
     std::atomic<uint32_t> live_sessions{0};
 };
 
@@ -245,4 +252,8 @@ struct ibaudio_stream {
     uint32_t vad_silence_run_ms = 0;
     float vad_max_confidence = 0.0f;
     float vad_peak_dbfs = -120.0f;
+    // Provider streaming-VAD state (non-null when the model's provider drives an
+    // incremental VAD, e.g. audio.cpp Silero). Owned here; destroyed on stream release.
+    void *provider_vad_state = nullptr;
+    uint64_t provider_vad_base_frame = 0;  // frame offset of provider events
 };

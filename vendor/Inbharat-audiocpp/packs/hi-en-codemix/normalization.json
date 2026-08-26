@@ -1,0 +1,24 @@
+{
+  "pack": "hi-en-codemix",
+  "version": "1.0.0",
+  "description": "Segment-level code-mix handling for Hinglish. An utterance is NOT forced into a single language; per-token language metadata is emitted and each script follows its own normalization/script policy.",
+  "code_mix": {
+    "segment_level_metadata": true,
+    "per_token_language_tags": true,
+    "force_single_language": false,
+    "script_policy_per_segment": {
+      "latin": "preserve",
+      "devanagari": "caller-selectable"
+    }
+  },
+  "example": {
+    "input": "Kal meri Google meeting 3 PM pe schedule kar dena",
+    "tokens": [
+      { "token": "Kal", "language": "hi", "script": "latin" },
+      { "token": "meri", "language": "hi", "script": "latin" },
+      { "token": "Google", "language": "en", "script": "latin" },
+      { "token": "meeting", "language": "en", "script": "latin" }
+    ],
+    "note": "Romanized Hindi and English share the Latin script; script alone cannot separate them. This pack tags by script and flags the mix; word-level language identity within Latin script is recorded as a known limitation, not guessed."
+  }
+}

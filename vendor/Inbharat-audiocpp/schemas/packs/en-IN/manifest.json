@@ -1,0 +1,17 @@
+{
+  "id": "reference-asr-en-IN",
+  "provider": "reference",
+  "task": ["asr"],
+  "languages": ["en-IN"],
+  "code_mix": false,
+  "streaming": "framework-chunking",
+  "platforms": ["linux-x64", "windows-x64"],
+  "backends": ["cpu"],
+  "ram_mb": 64,
+  "model_sha256": "b73eaef057628c8a41b57c25ccf512a4ecf1b93dc2dace2d85ce60576d220964",
+  "license": "Apache-2.0",
+  "locality": "local-native",
+  "privacy_class": "ephemeral",
+  "validated": { "linux-x64": true, "windows-x64": false },
+  "evidence_level": "host-tested"
+}

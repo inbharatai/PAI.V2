@@ -3,20 +3,35 @@
 ## Layering
 
 ```text
-CLI / Kotlin
-      |
-  thin JNI
-      |
+AI APPLICATIONS (Claude / agents / hosts)
+      |                    |                  |
+  ibaudio-mcp (MCP)   native transport   REST/WS (later)
+      |  control only   |  binary PCM        |
+      +--------+--------+--------+
+               |
+CLI / Kotlin / Rust / Swift
+               |
+  thin JNI (Android)
+               |
 include/inbharat/ibaudio.h       versioned C99 ABI, opaque handles
-      |
+               |
 src/{runtime,session,stream}     policy, lifecycle, jobs, diagnostics
-      |
+               |
+      CAPABILITY ROUTER (src/provider.cpp)
+               |
+      PROVIDER REGISTRY
+      |          |            |           |
+ reference   audio.cpp    ai4bharat    sarvam (remote,
+ (built-in)  (pinned,     (local-       OFF by default,
+              deferred)    service)      gated)
+               |
 src/{audio,sha256}               bounded deterministic primitives
-      |
-CPU reference engines            ASR analyzer, tone TTS, energy VAD
-      |
-optional adapters                 isolated; audio.cpp is deferred/default-off
+               |
+src/language/                    Bharat adaptation layer (deterministic)
+src/transport/                   binary PCM frame codec
 ```
+
+The C header is the only stable native contract. Applications never call an engine directly — they call InBharat Audio, and the capability router selects a provider from evidence-backed capabilities. audio.cpp is one provider, not the product.
 
 The C header is the only stable native contract. Internal C++ layouts, STL containers, mutexes, threads, and exceptions are hidden with visibility controls. Every exported function either validates directly or executes through an exception guard.
 

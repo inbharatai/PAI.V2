@@ -32,7 +32,7 @@ extern "C" {
 #define IBAUDIO_API_VERSION_MAJOR 1u
 #define IBAUDIO_API_VERSION_MINOR 0u
 #define IBAUDIO_API_VERSION ((IBAUDIO_API_VERSION_MAJOR << 16u) | IBAUDIO_API_VERSION_MINOR)
-#define IBAUDIO_RUNTIME_VERSION "0.2.0-dev.1"
+#define IBAUDIO_RUNTIME_VERSION "0.1.0-rc2"
 #define IBAUDIO_SHA256_HEX_LENGTH 64u
 
 typedef struct ibaudio_runtime ibaudio_runtime_t;
@@ -58,7 +58,8 @@ enum {
     IBAUDIO_STATUS_DEFERRED = 11,
     IBAUDIO_STATUS_SECURITY_ERROR = 12,
     IBAUDIO_STATUS_INTEGRITY_ERROR = 13,
-    IBAUDIO_STATUS_INTERNAL_ERROR = 14
+    IBAUDIO_STATUS_INTERNAL_ERROR = 14,
+    IBAUDIO_STATUS_PERMISSION_DENIED = 15
 };
 
 typedef int32_t ibaudio_error_domain_t;
@@ -199,6 +200,10 @@ typedef struct ibaudio_runtime_options_v1 {
     uint32_t deterministic_mode;
     uint32_t max_cached_models;
     uint64_t max_input_frames;
+    /* Allow remote (network) providers as routing candidates. Default 0 = offline:
+     * a remote provider is never selected when this is 0. Set 1 only for deployments
+     * that explicitly permit cloud speech. There is no silent cloud fallback. */
+    uint32_t allow_remote_providers;
 } ibaudio_runtime_options_v1;
 
 typedef struct ibaudio_capabilities_v1 {
@@ -347,16 +352,6 @@ typedef struct ibaudio_job_info_v1 {
     uint32_t cancellation_requested;
 } ibaudio_job_info_v1;
 
-typedef struct ibaudio_audio_cpp_status_v1 {
-    uint32_t struct_size;
-    uint32_t api_version;
-    uint32_t adapter_compiled;
-    uint32_t inference_ready;
-    char reviewed_commit[48];
-    char upstream_source[128];
-    char reason[192];
-} ibaudio_audio_cpp_status_v1;
-
 typedef struct ibaudio_metrics_v1 {
     uint32_t struct_size;
     uint32_t api_version;
@@ -390,6 +385,16 @@ IBAUDIO_API void ibaudio_session_options_init(ibaudio_session_options_v1 *option
 IBAUDIO_API void ibaudio_audio_process_options_init(ibaudio_audio_process_options_v1 *options);
 IBAUDIO_API void ibaudio_stream_options_init(ibaudio_stream_options_v1 *options);
 
+typedef struct ibaudio_audio_cpp_status_v1 {
+    uint32_t struct_size;
+    uint32_t api_version;
+    uint32_t adapter_compiled;
+    uint32_t inference_ready;
+    char reviewed_commit[48];
+    char upstream_source[128];
+    char reason[192];
+} ibaudio_audio_cpp_status_v1;
+
 /* Runtime owns policy, registry, diagnostics, metrics, and the model cache. */
 IBAUDIO_API ibaudio_status_t ibaudio_runtime_create(
     const ibaudio_runtime_options_v1 *options,
@@ -418,10 +423,10 @@ IBAUDIO_API ibaudio_status_t ibaudio_runtime_get_diagnostics_json(
 IBAUDIO_API ibaudio_status_t ibaudio_runtime_get_metrics(
     const ibaudio_runtime_t *runtime,
     ibaudio_metrics_v1 *out_metrics);
+IBAUDIO_API ibaudio_status_t ibaudio_runtime_reset_metrics(ibaudio_runtime_t *runtime);
 IBAUDIO_API ibaudio_status_t ibaudio_runtime_get_audio_cpp_status(
     const ibaudio_runtime_t *runtime,
     ibaudio_audio_cpp_status_v1 *out_status);
-IBAUDIO_API ibaudio_status_t ibaudio_runtime_reset_metrics(ibaudio_runtime_t *runtime);
 
 /* Models are immutable logical adapters. Reference models contain no weights. */
 IBAUDIO_API ibaudio_status_t ibaudio_model_load(
@@ -556,7 +561,6 @@ IBAUDIO_API ibaudio_status_t ibaudio_sha256_file(
 
 /* Innovation APIs (v0.2.0) */
 
-#if defined(IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_API)
 typedef struct ibaudio_prosody_controller ibaudio_prosody_controller_t;
 typedef struct ibaudio_turn_manager ibaudio_turn_manager_t;
 typedef struct ibaudio_conversation_state ibaudio_conversation_state_t;
@@ -613,6 +617,12 @@ typedef struct ibaudio_output_adjustment_v1 {
     float pause_scale;
 } ibaudio_output_adjustment_v1;
 
+/* Experimental research modules (build with IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES=ON).
+ * These are placeholder implementations whose names overclaim their algorithms:
+ * prosody has no inference output path, voice_clone has no synthesis path, and
+ * neural_codec contains no neural network. See docs/audit/03_CURRENT_PRODUCTION_VS_RESEARCH.md. */
+#if defined(IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES)
+
 /* Prosody controller for emotion, rate, pause, emphasis, and urgency. */
 IBAUDIO_API ibaudio_prosody_controller_t *ibaudio_prosody_controller_create(void);
 IBAUDIO_API void ibaudio_prosody_controller_destroy(ibaudio_prosody_controller_t *controller);
@@ -623,7 +633,9 @@ IBAUDIO_API ibaudio_status_t ibaudio_prosody_controller_set_rate(
 IBAUDIO_API ibaudio_status_t ibaudio_prosody_controller_set_urgency(
     ibaudio_prosody_controller_t *controller, float urgency);
 
-/* Turn manager for semantic turn-taking and barge-in classification. */
+#endif /* IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES (prosody) */
+
+/* Turn manager for rule-based turn-taking and barge-in classification. */
 IBAUDIO_API ibaudio_turn_manager_t *ibaudio_turn_manager_create(void);
 IBAUDIO_API void ibaudio_turn_manager_destroy(ibaudio_turn_manager_t *manager);
 IBAUDIO_API ibaudio_status_t ibaudio_turn_manager_update(
@@ -665,7 +677,10 @@ IBAUDIO_API ibaudio_status_t ibaudio_environment_adapter_suppress_noise(
     ibaudio_audio_view_v1 *audio,
     const ibaudio_environment_profile_v1 *profile);
 
-/* Voice clone engine for speaker enrollment and conditioning. */
+/* Experimental research module (gated). */
+#if defined(IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES)
+/* Voice clone engine for speaker enrollment and conditioning. NOTE: enrollment/consent
+ * registry only — no synthesis/cloning path exists. */
 IBAUDIO_API ibaudio_voice_clone_engine_t *ibaudio_voice_clone_engine_create(void);
 IBAUDIO_API void ibaudio_voice_clone_engine_destroy(ibaudio_voice_clone_engine_t *engine);
 IBAUDIO_API ibaudio_status_t ibaudio_voice_clone_engine_enroll(
@@ -679,8 +694,9 @@ IBAUDIO_API ibaudio_status_t ibaudio_voice_clone_engine_verify_consent(
 IBAUDIO_API ibaudio_status_t ibaudio_voice_clone_engine_delete_speaker(
     ibaudio_voice_clone_engine_t *engine,
     const char *speaker_id);
+#endif /* IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES (voice_clone) */
 
-/* Code-switch detector for English/Hindi/Hinglish. */
+/* Code-switch detector for English/Hindi/Hinglish. (script-ratio heuristic — see audit 03) */
 IBAUDIO_API ibaudio_codeswitch_detector_t *ibaudio_codeswitch_detector_create(void);
 IBAUDIO_API void ibaudio_codeswitch_detector_destroy(ibaudio_codeswitch_detector_t *detector);
 IBAUDIO_API ibaudio_status_t ibaudio_codeswitch_detector_detect(
@@ -693,7 +709,10 @@ IBAUDIO_API ibaudio_status_t ibaudio_codeswitch_detector_is_code_switching(
     const ibaudio_language_score_v1 *score,
     uint32_t *out_is_switching);
 
-/* Neural codec for efficient low-latency audio representation. */
+/* Experimental research module (gated). */
+#if defined(IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES)
+/* Neural codec. NOTE: despite the name this is a scalar energy quantization +
+ * sine-synthesis placeholder — no neural network, no RVQ. See audit 03. */
 IBAUDIO_API ibaudio_neural_codec_t *ibaudio_neural_codec_create(
     uint32_t sample_rate,
     uint32_t frame_size,
@@ -710,6 +729,7 @@ IBAUDIO_API ibaudio_status_t ibaudio_neural_codec_decode(
 IBAUDIO_API ibaudio_status_t ibaudio_neural_codec_get_bitrate(
     ibaudio_neural_codec_t *codec,
     float *out_bitrate_kbps);
+#endif /* IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES (neural_codec) */
 
 /* Context-aware output for volume/rate adjustment. */
 IBAUDIO_API ibaudio_context_aware_output_t *ibaudio_context_aware_output_create(void);
@@ -725,8 +745,6 @@ IBAUDIO_API ibaudio_status_t ibaudio_context_aware_output_apply(
     ibaudio_context_aware_output_t *output,
     ibaudio_audio_view_v1 *audio,
     const ibaudio_output_adjustment_v1 *adjustment);
-
-#endif /* IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_API */
 
 #ifdef __cplusplus
 } /* extern "C" */

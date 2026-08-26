@@ -1,0 +1,47 @@
+{
+  "schema": "inbharat.language-pack.v1",
+  "id": "pack-bn-IN",
+  "language": {
+    "code": "bn-IN",
+    "name": "Bengali",
+    "scheduled_indian_language": true
+  },
+  "scripts": [
+    "Beng"
+  ],
+  "romanized_input": {
+    "accepted": false,
+    "classification_policy": "acoustic_or_user-confirmed",
+    "note": "Latin script alone never proves which Indian language was spoken."
+  },
+  "normalization": {
+    "indian_numbers": true,
+    "currency": true,
+    "dates_times": "PENDING_TESTS",
+    "proper_name_lexicon": "user-approved-local"
+  },
+  "providers": {
+    "stt_candidates": [
+      "ai4bharat-indicconformer-600m"
+    ],
+    "tts_candidates": [
+      "ai4bharat-indicf5"
+    ],
+    "remote_fallback": "disabled-by-default"
+  },
+  "deployment": {
+    "windows": "candidate",
+    "android_arm64": "candidate",
+    "model_loading": "lazy-hot-swappable",
+    "memory_eviction": "bounded-lru"
+  },
+  "validation": {
+    "stt": "PENDING",
+    "tts": "PENDING",
+    "language_detection": "PENDING",
+    "speech_to_speech": "PENDING",
+    "windows_physical": "PENDING",
+    "android_physical": "PENDING"
+  },
+  "claim_policy": "A candidate provider is not support. Advertise a task only after same-language benchmark evidence passes."
+}

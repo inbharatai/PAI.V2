@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "provider.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -171,7 +172,53 @@ float dbfs(double rms) {
     return rms > 1.0e-12 ? static_cast<float>(20.0 * std::log10(rms)) : -120.0f;
 }
 
+// When the model's provider supports true streaming VAD (e.g. audio.cpp Silero), drive
+// the provider's incremental model; otherwise run the built-in frame-energy hysteresis.
 void process_vad_frames(ibaudio_stream *stream, bool flush) {
+    ibaudio::Provider *provider =
+        (stream->session->model != nullptr) ? stream->session->model->provider : nullptr;
+    if (provider != nullptr && provider->capabilities().streaming_vad) {
+        // Lazily create provider VAD state.
+        if (stream->provider_vad_state == nullptr) {
+            if (provider->vad_stream_create(&stream->provider_vad_state) != IBAUDIO_STATUS_OK) {
+                stream->provider_vad_state = nullptr;  // fall through to energy path
+            }
+        }
+        if (stream->provider_vad_state != nullptr) {
+            // Feed newly-available canonical frames to the provider's streaming VAD.
+            std::vector<ibaudio_vad_segment_v1> segs;
+            const uint64_t total = stream->canonical_mono.size();
+            if (total > stream->provider_vad_base_frame) {
+                const float *data = stream->canonical_mono.data() + stream->provider_vad_base_frame;
+                const uint64_t count = total - stream->provider_vad_base_frame;
+                if (provider->vad_stream_push(stream->provider_vad_state, data, count, 16000u, segs) == IBAUDIO_STATUS_OK) {
+                    stream->provider_vad_base_frame = total;
+                    for (const auto &s : segs) {
+                        ibaudio_stream_event_v1 ev{};
+                        ev.type = IBAUDIO_EVENT_VAD_SEGMENT;
+                        ev.start_frame = s.start_frame;
+                        ev.end_frame = s.end_frame;
+                        ev.confidence = s.confidence;
+                        enqueue_event(stream, ev);
+                    }
+                }
+            }
+            if (flush) {
+                std::vector<ibaudio_vad_segment_v1> final_segs;
+                if (provider->vad_stream_finish(stream->provider_vad_state, final_segs) == IBAUDIO_STATUS_OK) {
+                    for (const auto &s : final_segs) {
+                        ibaudio_stream_event_v1 ev{};
+                        ev.type = IBAUDIO_EVENT_VAD_SEGMENT;
+                        ev.start_frame = s.start_frame;
+                        ev.end_frame = s.end_frame;
+                        ev.confidence = s.confidence;
+                        enqueue_event(stream, ev);
+                    }
+                }
+            }
+            return;
+        }
+    }
     const auto &config = stream->session->vad;
     const uint64_t frame_size = std::max<uint64_t>(1u, 16000ull * config.frame_ms / 1000u);
     const uint64_t hop_size = std::max<uint64_t>(1u, 16000ull * config.hop_ms / 1000u);
@@ -262,7 +309,12 @@ void process_asr_partials(ibaudio_stream *stream) {
             stream->canonical_mono.begin() + static_cast<std::ptrdiff_t>(stream->next_asr_partial_frame));
         audio.sample_rate = 16000u;
         audio.channels = 1u;
-        std::string provisional = ibaudio::run_reference_asr(audio);
+        std::string provisional;
+        ibaudio::Provider *provider = stream->session->model->provider;
+        if (provider == nullptr ||
+            provider->run_asr(audio, nullptr, nullptr, provisional) != IBAUDIO_STATUS_OK) {
+            provisional = "[reference-asr unavailable]";
+        }
         provisional += " [provisional]";
         ibaudio_stream_event_v1 event{};
         event.type = IBAUDIO_EVENT_PARTIAL_TEXT;
@@ -335,8 +387,18 @@ ibaudio_status_t ibaudio_tts_stream_start(
         const ibaudio_status_t status = start_common(session, options, out_stream);
         if (status != IBAUDIO_STATUS_OK) return status;
         ibaudio_stream *stream = *out_stream;
+        ibaudio::Provider *provider = session->model->provider;
+        if (provider == nullptr) {
+            return ibaudio::set_error(IBAUDIO_STATUS_UNAVAILABLE, IBAUDIO_ERROR_DOMAIN_MODEL,
+                                      __func__, "no provider resolved for this model", true);
+        }
         try {
-            ibaudio::AudioData audio = ibaudio::run_reference_tts(input);
+            ibaudio::AudioData audio;
+            const ibaudio_status_t run_status = provider->run_tts(input, nullptr, nullptr, audio);
+            if (run_status != IBAUDIO_STATUS_OK) {
+                return ibaudio::set_error(run_status, IBAUDIO_ERROR_DOMAIN_MODEL, __func__,
+                                          "provider TTS stream generation failed", true);
+            }
             const uint64_t chunk_frames = std::max<uint32_t>(1u, options->preferred_chunk_frames);
             for (uint64_t start = 0u; start < audio.samples.size(); start += chunk_frames) {
                 const uint64_t count = std::min<uint64_t>(chunk_frames, audio.samples.size() - start);
@@ -461,7 +523,12 @@ ibaudio_status_t ibaudio_stream_finish(ibaudio_stream_t *stream) {
             audio.samples = stream->canonical_mono;
             audio.sample_rate = 16000u;
             audio.channels = 1u;
-            const std::string final_text = ibaudio::run_reference_asr(audio);
+            std::string final_text;
+            ibaudio::Provider *provider = stream->session->model->provider;
+            if (provider == nullptr ||
+                provider->run_asr(audio, nullptr, nullptr, final_text) != IBAUDIO_STATUS_OK) {
+                final_text = "[reference-asr unavailable]";
+            }
             ibaudio_stream_event_v1 event{};
             event.type = IBAUDIO_EVENT_FINAL_TEXT;
             event.is_final = 1u;
@@ -551,6 +618,10 @@ ibaudio_status_t ibaudio_stream_release(ibaudio_stream_t **stream) {
             value->events.clear();
         }
         ibaudio_session *session = value->session;
+        if (value->provider_vad_state != nullptr && session != nullptr &&
+            session->model != nullptr && session->model->provider != nullptr) {
+            session->model->provider->vad_stream_destroy(value->provider_vad_state);
+        }
         delete value;
         *stream = nullptr;
         if (session != nullptr) session->live_streams.fetch_sub(1u, std::memory_order_release);

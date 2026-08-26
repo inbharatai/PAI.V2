@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inbharat.ai/schemas/capability-manifest.v1.schema.json",
+  "title": "InBharat Audio Capability Manifest v1",
+  "description": "Declares what an engine/model pack can genuinely do. Capability is evidence, not filenames: a field may only be asserted when the recorded evidence level supports it.",
+  "type": "object",
+  "required": ["id", "provider", "task", "languages", "platforms", "validated", "license", "model_sha256"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "description": "Stable pack id, e.g. qwen3-asr-hi-q8." },
+    "provider": { "type": "string", "minLength": 1, "description": "Owning provider id, e.g. audiocpp, ai4bharat, sarvam, reference." },
+    "task": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "enum": ["asr", "tts", "vad", "kws", "diarization", "alignment"] }
+    },
+    "languages": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$" },
+      "description": "BCP-47 codes the pack has evidence for. An empty array means language-agnostic."
+    },
+    "code_mix": { "type": "boolean", "default": false, "description": "True only with code-mix benchmark evidence." },
+    "streaming": {
+      "type": "string",
+      "enum": ["true-model-streaming", "framework-chunking", "pseudo-streaming", "none"],
+      "description": "Honest streaming class. 'framework-chunking' and 'pseudo-streaming' must not be marketed as true streaming."
+    },
+    "platforms": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["windows-x64", "linux-x64", "linux-arm64", "macos-arm64", "android-arm64", "android-x64"] }
+    },
+    "backends": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["cpu", "cuda", "hip", "vulkan", "metal", "nnapi", "coreml", "directml"] }
+    },
+    "ram_mb": { "type": "integer", "minimum": 0, "description": "Measured peak RSS at inference, not a guess." },
+    "model_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the primary model artifact." },
+    "license": { "type": "string", "minLength": 1, "description": "SPDX identifier." },
+    "locality": { "type": "string", "enum": ["local-native", "local-service", "remote"], "default": "local-native" },
+    "privacy_class": { "type": "string", "enum": ["ephemeral", "transcript-only", "audio-and-transcript", "no-persistence"], "default": "ephemeral" },
+    "validated": {
+      "type": "object",
+      "description": "Per-platform evidence. A platform may only be true after inference has actually run on it; a cross-build is never 'true'.",
+      "patternProperties": {
+        "^(windows-x64|linux-x64|linux-arm64|macos-arm64|android-arm64|android-x64)$": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "evidence_level": {
+      "type": "string",
+      "enum": ["source-scaffold", "configure-build-only", "sanitizer-tested", "host-tested", "emulator-tested", "physical-device-tested"],
+      "description": "Highest evidence level achieved. Android is only complete at physical-device-tested; a loader/probe success is never an inference claim."
+    }
+  }
+}

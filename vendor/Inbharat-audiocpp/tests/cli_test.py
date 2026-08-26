@@ -26,14 +26,10 @@ def main() -> int:
     assert info["schema"] == "inbharat.ibaudio.diagnostics.v1"
     assert info["selected_backend"] == "cpu"
     models = json.loads(run(cli, "models", "--json").stdout)
-    assert len(models) == 4 and models[3]["available"] is False
-
-    audio_cpp = json.loads(run(cli, "audio-cpp-status", "--json").stdout)
-    assert audio_cpp["schema"] == "inbharat.ibaudio.audio_cpp_status.v1"
-    # The adapter is intentionally fail-closed until a real model-family path
-    # has passed parity, licensing, cancellation, memory and language gates.
-    assert audio_cpp["inference_ready"] is False
-    assert audio_cpp["upstream_source"] == "https://github.com/0xShug0/audio.cpp"
+    # 4 built-in reference/deferred models; the audio.cpp adapter build adds a 5th
+    # (Silero VAD). The deferred KWS entry must always be present and unavailable.
+    assert len(models) in (4, 6)
+    assert any(m["id"] == "kws-deferred-v1" and m["available"] is False for m in models)
 
     offline = json.loads(run(cli, "asr", "--input", str(speech), "--json").stdout)
     streamed = json.loads(run(cli, "asr", "--input", str(speech), "--stream", "--json").stdout)

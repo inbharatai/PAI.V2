@@ -88,6 +88,13 @@ public:
     }
     
     // Apply noise suppression
+    // These three transforms mutate the audio in place through the view's data pointer.
+    // ibaudio_audio_view_v1.interleaved_f32 is `const float *` because the view is a
+    // read-only abstraction across the rest of the ABI, but these entry points are
+    // documented to require caller-owned, mutable backing storage (see the public
+    // ibaudio_environment_adapter_* functions and innovation_tests.cpp). The const_cast
+    // is the intentional, contract-safe escape hatch; it is only UB if a caller violates
+    // the contract by backing the view with truly-const storage.
     void suppress_noise(ibaudio_audio_view_v1 *audio, const EnvironmentProfile &profile) {
         if (audio == nullptr || audio->interleaved_f32 == nullptr || !profile.is_noisy) {
             return;

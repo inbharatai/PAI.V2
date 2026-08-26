@@ -1,1 +1,1 @@
-{"schema":"inbharat.ibaudio.benchmark.v1","runtime_version":"0.1.0-rc2","backend":"cpu","iterations":1000,"results":[{"operation":"asr","mean_ms":0.229853},{"operation":"vad","mean_ms":0.126018},{"operation":"tts","mean_ms":0.524235}]}
+{"schema":"inbharat.ibaudio.benchmark.v1","runtime_version":"0.1.0-rc2","backend":"cpu","iterations":20,"results":[{"operation":"asr","mean_ms":0.237371},{"operation":"vad","mean_ms":0.131869},{"operation":"tts","mean_ms":0.479956}]}

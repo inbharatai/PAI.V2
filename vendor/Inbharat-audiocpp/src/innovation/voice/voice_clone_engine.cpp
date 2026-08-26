@@ -34,7 +34,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         
         if (!consent_verified) {
-            return IBAUDIO_STATUS_INVALID_ARGUMENT;  // Permission denied
+            return IBAUDIO_STATUS_PERMISSION_DENIED;
         }
         
         if (reference.frame_count < 16000 * 3) {  // Minimum 3 seconds at 16kHz

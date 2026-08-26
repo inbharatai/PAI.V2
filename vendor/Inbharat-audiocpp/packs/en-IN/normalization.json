@@ -1,0 +1,15 @@
+{
+  "pack": "en-IN",
+  "version": "1.0.0",
+  "rules": {
+    "indian_digit_grouping": true,
+    "currency_symbols": ["₹", "Rs.", "Rs"],
+    "currency_word": "rupees",
+    "percent_suffix": true,
+    "large_units": ["thousand", "lakh", "crore"],
+    "decimal_point_word": "point",
+    "time_24h_to_words": false,
+    "date_expansion": false
+  },
+  "notes": "Deterministic token-level expansion. Currency/lakh/crore and percent are covered by tests/language_tests.cpp; time and date expansion are reserved off until rules are pinned by tests."
+}

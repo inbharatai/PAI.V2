@@ -173,7 +173,11 @@ void test_unit() {
     ibaudio_capabilities_v1 capabilities{};
     ok(ibaudio_runtime_get_capabilities(runtime.p, &capabilities));
     CHECK(capabilities.abi_major == 1u);
+#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
+    CHECK(capabilities.model_count == 6u);  // 4 reference/deferred + audio.cpp Silero VAD + Qwen3-ASR
+#else
     CHECK(capabilities.model_count == 4u);
+#endif
     CHECK((capabilities.feature_flags & IBAUDIO_CAP_CANCELLATION) != 0u);
     uint32_t backend_count = 0u;
     ok(ibaudio_runtime_get_backend_count(runtime.p, &backend_count));
@@ -208,14 +212,29 @@ void test_unit() {
 
     uint32_t model_count = 0u;
     ok(ibaudio_runtime_get_model_count(runtime.p, &model_count));
+#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
+    CHECK(model_count == 6u);
+#else
     CHECK(model_count == 4u);
+#endif
     ibaudio_model_descriptor_v1 descriptor{};
     ok(ibaudio_runtime_get_model_descriptor(runtime.p, 0u, &descriptor));
     CHECK(std::string(descriptor.id) == "reference-asr-v1");
     CHECK(std::strlen(descriptor.artifact_sha256) == 64u);
     CHECK(std::string(descriptor.spdx_license) == "Apache-2.0");
-    ok(ibaudio_runtime_get_model_descriptor(runtime.p, 3u, &descriptor));
-    CHECK(descriptor.task == IBAUDIO_TASK_KWS && descriptor.available == 0u);
+    // Find the deferred KWS entry by id rather than assuming a fixed index (the
+    // audio.cpp adapter build inserts the Silero VAD model before it).
+    uint32_t total_models = 0u;
+    ok(ibaudio_runtime_get_model_count(runtime.p, &total_models));
+    bool found_kws = false;
+    for (uint32_t mi = 0u; mi < total_models; ++mi) {
+        ok(ibaudio_runtime_get_model_descriptor(runtime.p, mi, &descriptor));
+        if (std::string(descriptor.id) == "kws-deferred-v1") {
+            CHECK(descriptor.task == IBAUDIO_TASK_KWS && descriptor.available == 0u);
+            found_kws = true;
+        }
+    }
+    CHECK(found_kws);
     ibaudio_model_load_options_v1 deferred{};
     ibaudio_model_load_options_init(&deferred);
     const std::string kws = "kws-deferred-v1";

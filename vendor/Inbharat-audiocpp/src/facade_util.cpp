@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "provider.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -7,6 +8,17 @@
 #include <limits>
 
 namespace {
+
+// Resolve which provider executes a registered model, through the capability
+// router. The router applies the runtime's remote policy: a remote provider is never
+// returned when the deployment disallows remote, even if it backs the family. A null
+// result leaves the model with provider=nullptr so session inference surfaces
+// UNAVAILABLE rather than guessing or silently falling back.
+ibaudio::Provider *resolve_provider_for(const ibaudio::ModelRecord &record, ibaudio_runtime *runtime) {
+    const std::string family = record.descriptor.family;
+    const bool remote_allowed = runtime != nullptr && runtime->allow_remote_providers;
+    return ibaudio::ProviderRegistry::instance().resolve_for_family(family, remote_allowed);
+}
 
 ibaudio_buffer *new_audio_buffer(ibaudio_runtime *runtime, ibaudio::AudioData data) {
     auto buffer = std::make_unique<ibaudio_buffer>();
@@ -141,6 +153,11 @@ ibaudio_status_t ibaudio_model_load(
         model->artifact_path = artifact_path;
         model->verified_hash = verified_hash;
         model->backend = IBAUDIO_BACKEND_CPU;
+        // Resolve the inference provider for this model at load time. For now the
+        // built-in model families map to the always-available local "reference"
+        // provider; external/pinned adapters resolve to their own providers as they
+        // are enabled. A null provider makes session inference fail UNAVAILABLE.
+        model->provider = resolve_provider_for(*record_it, runtime);
         if (!artifact_path.empty()) {
             model->record.descriptor.artifact_size_bytes = artifact_size;
             ibaudio::copy_text(model->record.descriptor.artifact_sha256,

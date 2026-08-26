@@ -3,7 +3,8 @@
 **Status:** accepted source audit for InBharat Audio 0.1.0-rc1  
 **Audited checkout:** pinned local audio.cpp release 0.6 checkout  
 **Pinned revision:** `bb15edd78b56e035967e0eb999a6b28a62337db4` (`Expose NeuTTS and SenseVoice controls in native UI (#228)`)  
-**Audit mode:** source inspection; the upstream checkout was not modified.  
+**Audit mode:** source inspection; the upstream checkout was not modified.
+**Pin move (post-audit):** the production pin has since moved from `bb15edd7` (release-0.6, audited below) to `26dcb5c4cf5aa016ae6285096a7b45f2671e5d17` (release-0.6.1); see `docs/audit/05_PIN_MOVE_REVIEW.md`. The audit below documents the 0.6 baseline; the live verification command in §10 reflects the current 0.6.1 pin.
 **Baseline evidence:** a portable Linux CPU/core configuration and `audiocpp_cli` build passed using local CMake, Ninja, and Zig/Clang. Eight selected framework tests passed; `model_spec_system_test` failed because its external `miotts` spec was not installed in the test working directory, and `audio_utility_api_test` exceeded the 120-second sandbox command window. No model-weight, Android, GPU, or full-catalog parity claim is made.
 
 ## 1. Executive conclusion
@@ -509,7 +510,7 @@ All builds should be out of tree; the paths below keep generated files outside t
 SRC=${INBHARAT_AUDIO_RND}/upstream/audio.cpp
 
 git -C "$SRC" rev-parse HEAD
-# Must print bb15edd78b56e035967e0eb999a6b28a62337db4
+# Must print 26dcb5c4cf5aa016ae6285096a7b45f2671e5d17
 git -C "$SRC" status --short
 # Must be empty.
 

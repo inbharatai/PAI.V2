@@ -22,3 +22,7 @@ Use app-private regular files for future approved models and supply `allowedMode
 8. Vulkan flavor only after actual model operation/parity/fallback tests.
 
 The current sandbox has no Android SDK/NDK, emulator, or device. Therefore Android status is **source scaffold, not built here**. CI defines a build-only arm64 lane; its success still does not change device evidence.
+
+## Provider-architecture note (2026-08)
+
+The JNI bridge targets the stable C ABI, which now dispatches through the provider registry — Android calls the same `ibaudio_*` surface as every other platform, and the provider underneath (reference, pinned audio.cpp, a local service) is interchangeable without any Kotlin or JNI change. Remote providers are excluded from the `android` build profile, so an offline Android build contains no network code path.

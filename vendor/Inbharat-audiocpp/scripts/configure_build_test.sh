@@ -24,4 +24,11 @@ BUILD=${BUILD:-$ROOT/build/linux-release}
   -DIBAUDIO_BUILD_TESTS=ON -DIBAUDIO_BUILD_CLI=ON -DIBAUDIO_ENABLE_VULKAN_PROBE=ON
 "$CMAKE" --build "$BUILD" --parallel "${JOBS:-2}"
 "$CMAKE" -E env CTEST_OUTPUT_ON_FAILURE=1 "$CMAKE" --build "$BUILD" --target test
-python3 "$ROOT/scripts/check_abi.py" "$BUILD/libibaudio.so" "$ROOT/abi/ibaudio_symbols_v1.txt"
+# ABI gate is flag-aware: experimental research modules are off by default, so the
+# default build is checked against the 79-symbol core manifest; the full 94-symbol
+# manifest applies only to an IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES=ON build.
+ABI_MANIFEST="$ROOT/abi/ibaudio_symbols_v1_core.txt"
+if [ "${IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES:-OFF}" = "ON" ]; then
+  ABI_MANIFEST="$ROOT/abi/ibaudio_symbols_v1.txt"
+fi
+python3 "$ROOT/scripts/check_abi.py" "$BUILD/libibaudio.so" "$ABI_MANIFEST"

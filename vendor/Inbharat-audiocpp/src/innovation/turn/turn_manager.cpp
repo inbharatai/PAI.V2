@@ -58,7 +58,7 @@ public:
         }
         
         // Long speech with rising pitch and high energy is likely barge-in
-        if (context.speech_duration_ms >= 300.0f &&
+        if (context.speech_duration_ms > 300.0f &&
             context.pitch_trend > 0.5f &&
             context.speech_energy > 0.7f) {
             return TurnAction::BargeIn;

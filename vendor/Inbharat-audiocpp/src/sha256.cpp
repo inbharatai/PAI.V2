@@ -164,7 +164,10 @@ std::string sha256_file_path(const std::filesystem::path &path) {
         throw std::runtime_error("unable to open file for SHA-256: " + path.string());
     }
     Sha256 hash;
-    std::array<uint8_t, 1024u * 1024u> block{};
+    // Heap-allocate the read buffer: a 1 MiB stack array overflows the 1 MiB default
+    // thread stack on Windows (STATUS_STACK_OVERFLOW 0xC00000FD). Linux's 8 MiB stack
+    // hides the defect, but a heap buffer is correct on every platform.
+    std::vector<uint8_t> block(1024u * 1024u);
     while (input) {
         input.read(reinterpret_cast<char *>(block.data()), static_cast<std::streamsize>(block.size()));
         const std::streamsize count = input.gcount();

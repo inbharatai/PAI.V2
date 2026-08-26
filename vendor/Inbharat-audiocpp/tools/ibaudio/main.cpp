@@ -148,7 +148,7 @@ std::vector<uint8_t> read_file(const std::string &path) {
     return bytes;
 }
 
-[[maybe_unused]] void write_file(const std::string &path, const void *bytes, uint64_t size) {
+void write_file(const std::string &path, const void *bytes, uint64_t size) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     if (!output) throw std::runtime_error("cannot open output file: " + path);
     if (size > 0u) output.write(static_cast<const char *>(bytes), static_cast<std::streamsize>(size));
@@ -236,8 +236,8 @@ void command_info(const std::map<std::string, std::string> &options) {
     }
     std::cout << "InBharat Audio " << ibaudio_get_runtime_version() << "\n"
               << "C ABI: " << capabilities.abi_major << '.' << capabilities.abi_minor << "\n"
-              << "Models: " << capabilities.model_count << " registered model(s); test fixtures are excluded from production builds\n"
-              << "Backends: " << capabilities.backend_count << " (availability is reported explicitly; no silent accelerator claims)\n"
+              << "Models: " << capabilities.model_count << " (reference engines via the provider registry; deferred entries unavailable)\n"
+              << "Backends: " << capabilities.backend_count << " (CPU mandatory; accelerators explicitly probed/unavailable)\n"
               << "Max input frames: " << capabilities.max_input_frames << '\n';
     uint32_t count = 0u;
     require(ibaudio_runtime_get_backend_count(runtime.value, &count), "get backend count");
@@ -301,12 +301,11 @@ void command_audio_cpp_status(const std::map<std::string, std::string> &options)
               << "reason: " << status.reason << '\n';
 }
 
-#if defined(IBAUDIO_ENABLE_TEST_FIXTURE_MODELS)
 void command_asr(const std::map<std::string, std::string> &options) {
     const std::string input_path = option(options, "input");
     if (input_path.empty()) throw std::runtime_error("asr requires --input FILE.wav");
     RuntimeOwner runtime = make_runtime(options);
-    ModelOwner model = load_model(runtime.value, "reference-asr-v1");
+    ModelOwner model = load_model(runtime.value, option(options, "model", "reference-asr-v1"));
     const bool streaming = flag(options, "stream");
     SessionOwner session = make_session(model.value, IBAUDIO_TASK_ASR, streaming);
     BufferOwner decoded = decode_wav(runtime.value, input_path);
@@ -351,7 +350,7 @@ void command_asr(const std::map<std::string, std::string> &options) {
         }
     }
     if (flag(options, "json")) {
-        std::cout << "{\"model\":\"reference-asr-v1\",\"transcript\":\""
+        std::cout << "{\"model\":\"" << json_escape(option(options, "model", "reference-asr-v1")) << "\",\"transcript\":\""
                   << json_escape(transcript) << "\",\"streaming\":" << (streaming ? "true" : "false") << "}\n";
     } else {
         std::cout << transcript << '\n';
@@ -384,13 +383,11 @@ void command_tts(const std::map<std::string, std::string> &options) {
     }
 }
 
-#endif
-
 void command_vad(const std::map<std::string, std::string> &options) {
     const std::string input_path = option(options, "input");
     if (input_path.empty()) throw std::runtime_error("vad requires --input FILE.wav");
     RuntimeOwner runtime = make_runtime(options);
-    ModelOwner model = load_model(runtime.value, "energy-vad-v1");
+    ModelOwner model = load_model(runtime.value, option(options, "model", "energy-vad-v1"));
     SessionOwner session = make_session(model.value, IBAUDIO_TASK_VAD, false, option_float(options, "threshold-dbfs", -42.0f));
     BufferOwner decoded = decode_wav(runtime.value, input_path);
     ibaudio_audio_view_v1 audio{};
@@ -403,7 +400,7 @@ void command_vad(const std::map<std::string, std::string> &options) {
     const size_t count = static_cast<size_t>(size / sizeof(ibaudio_vad_segment_v1));
     const auto *values = static_cast<const ibaudio_vad_segment_v1 *>(data);
     if (flag(options, "json")) {
-        std::cout << "{\"model\":\"energy-vad-v1\",\"segments\":[";
+        std::cout << "{\"model\":\"" << json_escape(option(options, "model", "energy-vad-v1")) << "\",\"segments\":[";
         for (size_t index = 0; index < count; ++index) {
             if (index > 0u) std::cout << ',';
             std::cout << "{\"start_frame\":" << values[index].start_frame
@@ -420,7 +417,6 @@ void command_vad(const std::map<std::string, std::string> &options) {
     }
 }
 
-#if defined(IBAUDIO_ENABLE_TEST_FIXTURE_MODELS)
 void command_benchmark(const std::map<std::string, std::string> &options) {
     const uint32_t iterations = option_u32(options, "iterations", 5u);
     if (iterations == 0u || iterations > 10000u) throw std::runtime_error("iterations must be in [1, 10000]");
@@ -479,8 +475,6 @@ void command_benchmark(const std::map<std::string, std::string> &options) {
     std::cout << json.str() << '\n';
 }
 
-#endif
-
 void print_help() {
     std::cout <<
         "ibaudio " IBAUDIO_RUNTIME_VERSION "\n"
@@ -488,17 +482,13 @@ void print_help() {
         "Commands:\n"
         "  info [--json] [--backend auto|cpu|vulkan|cuda|hip]\n"
         "  models [--json]\n"
+        "  asr --input FILE.wav [--stream] [--partials] [--chunk-frames N] [--json]\n"
+        "  tts --text TEXT --output FILE.wav [--json]\n"
         "  vad --input FILE.wav [--threshold-dbfs DB] [--json]\n"
+        "  benchmark [--iterations N] [--output-json FILE] [--output-csv FILE]\n"
         "  diagnostics\n"
         "  audio-cpp-status [--json]\n\n"
         "Common options: --threads N --cache DIR --model-root DIR --backend NAME --no-fallback\n";
-#if defined(IBAUDIO_ENABLE_TEST_FIXTURE_MODELS)
-    std::cout <<
-        "Test-fixture commands (not compiled into production builds):\n"
-        "  asr --input FILE.wav [--stream] [--partials] [--chunk-frames N] [--json]\n"
-        "  tts --text TEXT --output FILE.wav [--json]\n"
-        "  benchmark [--iterations N] [--output-json FILE] [--output-csv FILE]\n";
-#endif
 }
 
 } // namespace
@@ -513,14 +503,10 @@ int main(int argc, char **argv) {
         const auto options = parse_options(argc, argv, 2);
         if (command == "info") command_info(options);
         else if (command == "models") command_models(options);
-#if defined(IBAUDIO_ENABLE_TEST_FIXTURE_MODELS)
         else if (command == "asr") command_asr(options);
         else if (command == "tts") command_tts(options);
-#endif
         else if (command == "vad") command_vad(options);
-#if defined(IBAUDIO_ENABLE_TEST_FIXTURE_MODELS)
         else if (command == "benchmark") command_benchmark(options);
-#endif
         else if (command == "diagnostics") command_diagnostics(options);
         else if (command == "audio-cpp-status") command_audio_cpp_status(options);
         else throw std::runtime_error("unknown command: " + command);

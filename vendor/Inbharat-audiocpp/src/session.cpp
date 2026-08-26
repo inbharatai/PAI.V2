@@ -1,8 +1,8 @@
 #include "internal.hpp"
-
-#include <cmath>
+#include "provider.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <memory>
@@ -304,8 +304,15 @@ ibaudio_status_t ibaudio_session_run_asr(
         if (acquired != IBAUDIO_STATUS_OK) return acquired;
         BusyGuard guard(session);
         ibaudio::AudioData prepared = prepare_audio(session, *audio, 16000u);
+        ibaudio::Provider *provider = session->model->provider;
+        if (provider == nullptr) {
+            return ibaudio::set_error(IBAUDIO_STATUS_UNAVAILABLE, IBAUDIO_ERROR_DOMAIN_MODEL,
+                                      __func__, "no provider resolved for this model", true);
+        }
         uint64_t processed = 0u;
-        const std::string text = ibaudio::run_reference_asr(prepared, nullptr, &processed);
+        std::string text;
+        const ibaudio_status_t status = provider->run_asr(prepared, nullptr, &processed, text);
+        if (status != IBAUDIO_STATUS_OK) return status;
         session->model->runtime->metrics.audio_frames_in.fetch_add(audio->frame_count, std::memory_order_relaxed);
         *out_text = make_text(session->model->runtime, text);
         return IBAUDIO_STATUS_OK;
@@ -326,8 +333,15 @@ ibaudio_status_t ibaudio_session_run_tts(
         const ibaudio_status_t acquired = acquire_session(session, __func__);
         if (acquired != IBAUDIO_STATUS_OK) return acquired;
         BusyGuard guard(session);
+        ibaudio::Provider *provider = session->model->provider;
+        if (provider == nullptr) {
+            return ibaudio::set_error(IBAUDIO_STATUS_UNAVAILABLE, IBAUDIO_ERROR_DOMAIN_MODEL,
+                                      __func__, "no provider resolved for this model", true);
+        }
         uint64_t processed = 0u;
-        ibaudio::AudioData output = ibaudio::run_reference_tts(input, nullptr, &processed);
+        ibaudio::AudioData output;
+        const ibaudio_status_t status = provider->run_tts(input, nullptr, &processed, output);
+        if (status != IBAUDIO_STATUS_OK) return status;
         session->model->runtime->metrics.audio_frames_out.fetch_add(output.info.frame_count, std::memory_order_relaxed);
         *out_audio = make_audio(session->model->runtime, std::move(output));
         return IBAUDIO_STATUS_OK;
@@ -349,8 +363,15 @@ ibaudio_status_t ibaudio_session_run_vad(
         if (acquired != IBAUDIO_STATUS_OK) return acquired;
         BusyGuard guard(session);
         ibaudio::AudioData prepared = prepare_audio(session, *audio, 16000u);
+        ibaudio::Provider *provider = session->model->provider;
+        if (provider == nullptr) {
+            return ibaudio::set_error(IBAUDIO_STATUS_UNAVAILABLE, IBAUDIO_ERROR_DOMAIN_MODEL,
+                                      __func__, "no provider resolved for this model", true);
+        }
         uint64_t processed = 0u;
-        auto segments = ibaudio::run_energy_vad(prepared, session->vad, nullptr, &processed);
+        std::vector<ibaudio_vad_segment_v1> segments;
+        const ibaudio_status_t status = provider->run_vad(prepared, session->vad, nullptr, &processed, segments);
+        if (status != IBAUDIO_STATUS_OK) return status;
         session->model->runtime->metrics.audio_frames_in.fetch_add(audio->frame_count, std::memory_order_relaxed);
         *out_segments = make_segments(session->model->runtime, std::move(segments));
         return IBAUDIO_STATUS_OK;
@@ -379,14 +400,23 @@ ibaudio_status_t ibaudio_job_start_asr(
         const ibaudio_status_t acquired = acquire_session(session, __func__);
         if (acquired != IBAUDIO_STATUS_OK) return acquired;
         BusyGuard reservation(session);
+        ibaudio::Provider *provider = session->model->provider;
+        if (provider == nullptr) {
+            return ibaudio::set_error(IBAUDIO_STATUS_UNAVAILABLE, IBAUDIO_ERROR_DOMAIN_MODEL,
+                                      __func__, "no provider resolved for this model", true);
+        }
         std::vector<float> samples = copy_job_audio(session, *audio);
         ibaudio_audio_view_v1 copied = *audio;
         const ibaudio_status_t status = start_job(session, out_job,
-            [session, samples = std::move(samples), copied](ibaudio_job *job) mutable {
+            [session, provider, samples = std::move(samples), copied](ibaudio_job *job) mutable {
                 copied.interleaved_f32 = samples.data();
                 ibaudio::AudioData prepared = prepare_audio(session, copied, 16000u, &job->cancellation);
                 uint64_t processed = 0u;
-                std::string text = ibaudio::run_reference_asr(prepared, &job->cancellation, &processed);
+                std::string text;
+                const ibaudio_status_t run_status = provider->run_asr(prepared, &job->cancellation, &processed, text);
+                if (run_status != IBAUDIO_STATUS_OK) {
+                    throw std::runtime_error(std::string("provider ASR failed: ") + ibaudio_status_string(run_status));
+                }
                 session->model->runtime->metrics.audio_frames_in.fetch_add(copied.frame_count, std::memory_order_relaxed);
                 return std::make_pair(make_text(session->model->runtime, text), processed);
             });
@@ -407,15 +437,24 @@ ibaudio_status_t ibaudio_job_start_tts(
         const ibaudio_status_t acquired = acquire_session(session, __func__);
         if (acquired != IBAUDIO_STATUS_OK) return acquired;
         BusyGuard reservation(session);
+        ibaudio::Provider *provider = session->model->provider;
+        if (provider == nullptr) {
+            return ibaudio::set_error(IBAUDIO_STATUS_UNAVAILABLE, IBAUDIO_ERROR_DOMAIN_MODEL,
+                                      __func__, "no provider resolved for this model", true);
+        }
         std::string copied = ibaudio::from_view(text);
         if (copied.empty() || copied.size() > 16384u) {
             return ibaudio::set_error(IBAUDIO_STATUS_INVALID_ARGUMENT, IBAUDIO_ERROR_DOMAIN_ARGUMENT,
                                       __func__, "TTS text must contain 1 to 16384 bytes");
         }
         const ibaudio_status_t status = start_job(session, out_job,
-            [session, copied = std::move(copied)](ibaudio_job *job) {
+            [session, provider, copied = std::move(copied)](ibaudio_job *job) {
                 uint64_t processed = 0u;
-                ibaudio::AudioData output = ibaudio::run_reference_tts(copied, &job->cancellation, &processed);
+                ibaudio::AudioData output;
+                const ibaudio_status_t run_status = provider->run_tts(copied, &job->cancellation, &processed, output);
+                if (run_status != IBAUDIO_STATUS_OK) {
+                    throw std::runtime_error(std::string("provider TTS failed: ") + ibaudio_status_string(run_status));
+                }
                 session->model->runtime->metrics.audio_frames_out.fetch_add(output.info.frame_count, std::memory_order_relaxed);
                 return std::make_pair(make_audio(session->model->runtime, std::move(output)), processed);
             });
@@ -437,14 +476,23 @@ ibaudio_status_t ibaudio_job_start_vad(
         const ibaudio_status_t acquired = acquire_session(session, __func__);
         if (acquired != IBAUDIO_STATUS_OK) return acquired;
         BusyGuard reservation(session);
+        ibaudio::Provider *provider = session->model->provider;
+        if (provider == nullptr) {
+            return ibaudio::set_error(IBAUDIO_STATUS_UNAVAILABLE, IBAUDIO_ERROR_DOMAIN_MODEL,
+                                      __func__, "no provider resolved for this model", true);
+        }
         std::vector<float> samples = copy_job_audio(session, *audio);
         ibaudio_audio_view_v1 copied = *audio;
         const ibaudio_status_t status = start_job(session, out_job,
-            [session, samples = std::move(samples), copied](ibaudio_job *job) mutable {
+            [session, provider, samples = std::move(samples), copied](ibaudio_job *job) mutable {
                 copied.interleaved_f32 = samples.data();
                 ibaudio::AudioData prepared = prepare_audio(session, copied, 16000u, &job->cancellation);
                 uint64_t processed = 0u;
-                auto segments = ibaudio::run_energy_vad(prepared, session->vad, &job->cancellation, &processed);
+                std::vector<ibaudio_vad_segment_v1> segments;
+                const ibaudio_status_t run_status = provider->run_vad(prepared, session->vad, &job->cancellation, &processed, segments);
+                if (run_status != IBAUDIO_STATUS_OK) {
+                    throw std::runtime_error(std::string("provider VAD failed: ") + ibaudio_status_string(run_status));
+                }
                 session->model->runtime->metrics.audio_frames_in.fetch_add(copied.frame_count, std::memory_order_relaxed);
                 return std::make_pair(make_segments(session->model->runtime, std::move(segments)), processed);
             });

@@ -1,0 +1,12 @@
+{
+  "pack": "en-IN",
+  "version": "1.0.0",
+  "description": "User-approved pronunciation and entity corrections. Local, inspectable, reversible. Applied to ASR output without retraining any model.",
+  "entries": [
+    { "entity": "Reeturaj", "pronunciation": "ree-tu-raaj", "type": "person" },
+    { "entity": "Guwahati", "pronunciation": "gu-waa-haa-tee", "type": "place" },
+    { "entity": "Nagaon", "pronunciation": "naa-gaav", "type": "place" },
+    { "entity": "Tezpur", "pronunciation": "tez-pur", "type": "place" },
+    { "entity": "Bhaswati", "pronunciation": "bhaa-swaa-tee", "type": "person" }
+  ]
+}

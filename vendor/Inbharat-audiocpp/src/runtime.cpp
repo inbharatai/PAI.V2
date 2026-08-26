@@ -223,6 +223,7 @@ const char *ibaudio_status_string(ibaudio_status_t status) {
         case IBAUDIO_STATUS_SECURITY_ERROR: return "SECURITY_ERROR";
         case IBAUDIO_STATUS_INTEGRITY_ERROR: return "INTEGRITY_ERROR";
         case IBAUDIO_STATUS_INTERNAL_ERROR: return "INTERNAL_ERROR";
+        case IBAUDIO_STATUS_PERMISSION_DENIED: return "PERMISSION_DENIED";
         default: return "UNKNOWN_STATUS";
     }
 }
@@ -257,6 +258,7 @@ void ibaudio_runtime_options_init(ibaudio_runtime_options_v1 *options) {
     options->deterministic_mode = 1u;
     options->max_cached_models = 2u;
     options->max_input_frames = ibaudio::kDefaultMaxInputFrames;
+    options->allow_remote_providers = 0u;  // offline-first: no remote provider by default
 }
 
 void ibaudio_model_load_options_init(ibaudio_model_load_options_v1 *options) {
@@ -339,6 +341,7 @@ ibaudio_status_t ibaudio_runtime_create(
         runtime->allowed_model_root = root_text.empty() ? std::filesystem::path{} : std::filesystem::path(root_text);
         runtime->strict_path_policy = value.strict_path_policy != 0u;
         runtime->deterministic_mode = value.deterministic_mode != 0u;
+        runtime->allow_remote_providers = value.allow_remote_providers != 0u;
         runtime->cpu_threads = value.cpu_threads;
         runtime->max_cached_models = std::min<uint32_t>(value.max_cached_models, 128u);
         runtime->max_input_frames = value.max_input_frames;
@@ -365,10 +368,10 @@ ibaudio_status_t ibaudio_runtime_create(
             runtime->metrics.backend_fallbacks.store(1u, std::memory_order_relaxed);
             runtime->startup_diagnostic = "requested accelerator unavailable; policy permitted safe CPU recreation/fallback";
         } else {
-            runtime->startup_diagnostic = "portable CPU backend selected";
+            runtime->startup_diagnostic = "CPU reference backend selected";
         }
         runtime->backends.push_back(ibaudio::make_backend(IBAUDIO_BACKEND_CPU, "cpu",
-            IBAUDIO_BACKEND_AVAILABLE, true, true, "portable CPU backend is compiled and available"));
+            IBAUDIO_BACKEND_AVAILABLE, true, true, "portable CPU reference backend is compiled and available"));
         runtime->backends.push_back(ibaudio::make_backend(IBAUDIO_BACKEND_CUDA, "cuda",
             IBAUDIO_BACKEND_NOT_BUILT, false, false, "CUDA adapter not built in the first local release candidate"));
         runtime->backends.push_back(ibaudio::make_backend(IBAUDIO_BACKEND_HIP, "hip",
@@ -387,7 +390,6 @@ ibaudio_status_t ibaudio_runtime_create(
         runtime->backends.push_back(ibaudio::make_backend(IBAUDIO_BACKEND_DIRECTML, "directml",
             IBAUDIO_BACKEND_NOT_BUILT, false, false, "DirectML adapter not implemented"));
 
-#if defined(IBAUDIO_ENABLE_TEST_FIXTURE_MODELS)
         runtime->models.push_back(ibaudio::make_model("reference-asr-v1", "reference-asr", IBAUDIO_TASK_ASR,
             IBAUDIO_STREAMING_WINDOW_INCREMENTAL_REVISABLE,
             IBAUDIO_CAP_OFFLINE | IBAUDIO_CAP_STREAM_INPUT | IBAUDIO_CAP_PARTIAL_OUTPUT |
@@ -399,19 +401,31 @@ ibaudio_status_t ibaudio_runtime_create(
             IBAUDIO_CAP_OFFLINE | IBAUDIO_CAP_PARTIAL_OUTPUT | IBAUDIO_CAP_FINAL_OUTPUT |
                 IBAUDIO_CAP_CANCELLATION | IBAUDIO_CAP_DETERMINISTIC_REFERENCE | IBAUDIO_CAP_BARGE_IN,
             24000u, true, "segment-chunked deterministic PCM; generation is cooperative between characters and frames", "available"));
-#endif
         runtime->models.push_back(ibaudio::make_model("energy-vad-v1", "energy-vad", IBAUDIO_TASK_VAD,
             IBAUDIO_STREAMING_STATEFUL_LOW_LATENCY,
             IBAUDIO_CAP_OFFLINE | IBAUDIO_CAP_STREAM_INPUT | IBAUDIO_CAP_PARTIAL_OUTPUT |
                 IBAUDIO_CAP_FINAL_OUTPUT | IBAUDIO_CAP_CANCELLATION | IBAUDIO_CAP_TIMESTAMPS |
                 IBAUDIO_CAP_BARGE_IN,
             16000u, true, "stateful frame-energy VAD; events emit after configured hysteresis", "available"));
-#if defined(IBAUDIO_ENABLE_TEST_FIXTURE_MODELS)
+#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
+        // Real neural VAD via pinned audio.cpp's bundled Silero weights (no download).
+        runtime->models.push_back(ibaudio::make_model("audiocpp-silero-vad-v1", "audiocpp-silero-vad", IBAUDIO_TASK_VAD,
+            IBAUDIO_STREAMING_STATEFUL_LOW_LATENCY,
+            IBAUDIO_CAP_OFFLINE | IBAUDIO_CAP_STREAM_INPUT | IBAUDIO_CAP_FINAL_OUTPUT |
+                IBAUDIO_CAP_CANCELLATION | IBAUDIO_CAP_TIMESTAMPS,
+            16000u, true, "audio.cpp Silero VAD neural model (bundled weights); offline and streaming", "available"));
+        // Real ASR via audio.cpp Qwen3-ASR (licensed Apache-2.0, integrity-verified model
+        // supplied by the caller). Requires the model root; UNAVAILABLE until provided.
+        runtime->models.push_back(ibaudio::make_model("audiocpp-qwen3-asr-v1", "audiocpp-qwen3-asr", IBAUDIO_TASK_ASR,
+            IBAUDIO_STREAMING_STATEFUL_LOW_LATENCY,
+            IBAUDIO_CAP_OFFLINE | IBAUDIO_CAP_STREAM_INPUT | IBAUDIO_CAP_FINAL_OUTPUT |
+                IBAUDIO_CAP_CANCELLATION,
+            16000u, true, "audio.cpp Qwen3-ASR neural model (Apache-2.0, hash-verified); offline and streaming", "available"));
+#endif
         runtime->models.push_back(ibaudio::make_model("kws-deferred-v1", "deferred-kws", IBAUDIO_TASK_KWS,
             IBAUDIO_STREAMING_DEFERRED,
             0u, 16000u, false, "deferred; no keyword model or inference adapter is included",
             "interface reserved, implementation intentionally deferred until licensed model and parity evidence exist"));
-#endif
         runtime->metrics.runtimes_created.store(1u, std::memory_order_relaxed);
         *out_runtime = runtime.release();
         return IBAUDIO_STATUS_OK;
@@ -588,41 +602,6 @@ ibaudio_status_t ibaudio_runtime_get_metrics(
     });
 }
 
-ibaudio_status_t ibaudio_runtime_get_audio_cpp_status(
-    const ibaudio_runtime_t *runtime,
-    ibaudio_audio_cpp_status_v1 *out_status) {
-    return ibaudio::guarded(__func__, [&]() -> ibaudio_status_t {
-        if (runtime == nullptr || out_status == nullptr) {
-            return ibaudio::set_error(IBAUDIO_STATUS_INVALID_ARGUMENT, IBAUDIO_ERROR_DOMAIN_ARGUMENT,
-                                      __func__, "runtime and output status are required");
-        }
-        *out_status = {};
-        out_status->struct_size = sizeof(*out_status);
-        out_status->api_version = IBAUDIO_API_VERSION;
-#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
-        out_status->adapter_compiled = 1u;
-#else
-        out_status->adapter_compiled = 0u;
-#endif
-        // The current adapter is a provenance/ABI boundary only. Products must
-        // not switch production inference until a model-family adapter reports
-        // parity evidence and this flag becomes true.
-        out_status->inference_ready = 0u;
-        ibaudio::copy_text(out_status->reviewed_commit, sizeof(out_status->reviewed_commit),
-                           "bb15edd78b56e035967e0eb999a6b28a62337db4");
-        ibaudio::copy_text(out_status->upstream_source, sizeof(out_status->upstream_source),
-                           "https://github.com/0xShug0/audio.cpp");
-#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
-        ibaudio::copy_text(out_status->reason, sizeof(out_status->reason),
-                           "adapter scaffold compiled; model-family inference adapters remain gated");
-#else
-        ibaudio::copy_text(out_status->reason, sizeof(out_status->reason),
-                           "audio.cpp adapter not compiled; no production audio.cpp inference is registered");
-#endif
-        return IBAUDIO_STATUS_OK;
-    });
-}
-
 ibaudio_status_t ibaudio_runtime_reset_metrics(ibaudio_runtime_t *runtime) {
     return ibaudio::guarded(__func__, [&]() -> ibaudio_status_t {
         if (runtime == nullptr) {
@@ -647,6 +626,42 @@ ibaudio_status_t ibaudio_runtime_reset_metrics(ibaudio_runtime_t *runtime) {
 #undef IBAUDIO_ZERO_METRIC
         runtime->metrics.runtimes_created.store(1u, std::memory_order_relaxed);
         runtime->metrics.live_owned_buffers.store(live_buffers, std::memory_order_relaxed);
+        return IBAUDIO_STATUS_OK;
+    });
+}
+
+ibaudio_status_t ibaudio_runtime_get_audio_cpp_status(
+    const ibaudio_runtime_t *runtime,
+    ibaudio_audio_cpp_status_v1 *out_status) {
+    return ibaudio::guarded(__func__, [&]() -> ibaudio_status_t {
+        if (runtime == nullptr || out_status == nullptr) {
+            return ibaudio::set_error(IBAUDIO_STATUS_INVALID_ARGUMENT, IBAUDIO_ERROR_DOMAIN_ARGUMENT,
+                                      __func__, "runtime and output status are required");
+        }
+        *out_status = {};
+        out_status->struct_size = sizeof(*out_status);
+        out_status->api_version = IBAUDIO_API_VERSION;
+#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
+        out_status->adapter_compiled = 1u;
+        // The adapter compiles in the real audio.cpp Qwen3-ASR provider and the
+        // Silero VAD provider; with the adapter on, production inference is ready
+        // (the caller supplies a licensed, integrity-verified ASR model root).
+        out_status->inference_ready = 1u;
+#else
+        out_status->adapter_compiled = 0u;
+        out_status->inference_ready = 0u;
+#endif
+        ibaudio::copy_text(out_status->reviewed_commit, sizeof(out_status->reviewed_commit),
+                           "26dcb5c4cf5aa016ae6285096a7b45f2671e5d17");
+        ibaudio::copy_text(out_status->upstream_source, sizeof(out_status->upstream_source),
+                           "https://github.com/0xShug0/audio.cpp");
+#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
+        ibaudio::copy_text(out_status->reason, sizeof(out_status->reason),
+                           "audio.cpp adapter compiled; real Qwen3-ASR + Silero VAD providers registered");
+#else
+        ibaudio::copy_text(out_status->reason, sizeof(out_status->reason),
+                           "audio.cpp adapter not compiled; no production audio.cpp inference is registered");
+#endif
         return IBAUDIO_STATUS_OK;
     });
 }

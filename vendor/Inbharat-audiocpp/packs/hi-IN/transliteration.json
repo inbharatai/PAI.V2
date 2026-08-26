@@ -1,0 +1,16 @@
+{
+  "pack": "hi-IN",
+  "version": "1.0.0",
+  "script_policy": {
+    "default_output_script": "devanagari",
+    "allowed_output_scripts": ["devanagari", "roman"],
+    "caller_selectable": true
+  },
+  "transliteration": {
+    "direction": "devanagari-to-roman",
+    "scheme": "deterministic-phonemic",
+    "lossy": true,
+    "lossy_notes": "Inherent schwa inserted after bare consonants; nukta and some conjuncts approximated. This is a rule mapping, not a learned transliterator.",
+    "custom_overrides": {}
+  }
+}

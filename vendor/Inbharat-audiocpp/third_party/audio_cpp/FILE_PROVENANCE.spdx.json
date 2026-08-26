@@ -13,8 +13,8 @@
     {
       "name": "audio.cpp-reference-only",
       "SPDXID": "SPDXRef-Package-audio-cpp",
-      "versionInfo": "bb15edd78b56e035967e0eb999a6b28a62337db4",
-      "downloadLocation": "https://github.com/0xShug0/audio.cpp.git",
+      "versionInfo": "26dcb5c4cf5aa016ae6285096a7b45f2671e5d17",
+      "downloadLocation": "https://github.com/ShugoAI/audio.cpp.git",
       "filesAnalyzed": false,
       "licenseConcluded": "NOASSERTION",
       "licenseDeclared": "Apache-2.0",

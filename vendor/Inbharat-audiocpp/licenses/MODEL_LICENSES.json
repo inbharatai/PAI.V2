@@ -28,6 +28,22 @@
       "redistribution_state": "no external model artifact"
     },
     {
+      "model_id": "audiocpp-silero-vad-v1",
+      "artifact_type": "bundled neural VAD weights (audio.cpp Silero VAD, silero_vad_16k.safetensors)",
+      "spdx_license": "Apache-2.0",
+      "immutable_revision": "release-0.6",
+      "sha256": "142a393a520efa05b661033b47a03d8de312ebe47591bd4d057b0f4841089f95",
+      "redistribution_state": "weights ship inside the pinned audio.cpp checkout; not vendored into the default build"
+    },
+    {
+      "model_id": "audiocpp-qwen3-asr-v1",
+      "artifact_type": "external neural ASR model (Qwen/Qwen3-ASR-0.6B, model.safetensors)",
+      "spdx_license": "Apache-2.0",
+      "immutable_revision": "5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
+      "sha256": "79d6cbd4c98c7bbffe9db2edac07f56cd6637d0d5944b27f6c2b8353840323ea",
+      "redistribution_state": "not vendored; caller supplies the model; SHA-256 verified against the publisher's HF LFS object id"
+    },
+    {
       "model_id": "kws-deferred-v1",
       "artifact_type": "none",
       "spdx_license": "Apache-2.0",
