@@ -297,8 +297,11 @@ export interface HarnessChatResult {
 }
 
 // InBharat Audio adapter status. production_ready is true only when the real
-// audio.cpp CLI passes its hash-bound readiness + acceptance gate; otherwise
-// the legacy Whisper/Piper voice path is retained.
+// audio.cpp CLI passes its hash-bound readiness + acceptance gate (including a
+// runtime-probed inference_ready — never compile-time truth); otherwise the
+// legacy Whisper/Piper voice path is retained. streaming_class states the
+// honest semantics: "buffered-final" means one result per complete utterance,
+// never stateful streaming.
 export interface BharatAudioStatus {
   configured: boolean;
   enabled: boolean;
@@ -307,6 +310,8 @@ export interface BharatAudioStatus {
   upstream_commit: string | null;
   asr_family: string | null;
   tts_family: string | null;
+  inference_ready: boolean;
+  streaming_class: string;
 }
 
 export interface SecurityVerificationResult {

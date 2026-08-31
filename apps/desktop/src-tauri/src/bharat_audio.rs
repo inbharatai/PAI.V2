@@ -107,6 +107,16 @@ pub struct BharatAudioStatus {
     pub upstream_commit: Option<String>,
     pub asr_family: Option<String>,
     pub tts_family: Option<String>,
+    /// Runtime facts straight from the universal library's status API, which
+    /// derives readiness from an actual probe of usable local model assets
+    /// (never compile-time truth). Surfaced even when the full production
+    /// gate fails so the UI can show WHY: missing weights read differently
+    /// from a disabled manifest or a stale attestation.
+    pub inference_ready: bool,
+    /// Honest streaming semantics for this route, from the shared contracts
+    /// crate — "buffered-final" means the engine buffers the whole utterance
+    /// and emits one final result; it must never be claimed as streaming.
+    pub streaming_class: String,
 }
 
 #[derive(Debug, Clone)]
@@ -580,10 +590,50 @@ fn verify_pocket_ai_package(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_production_ready(
+/// The three runtime-fact gates every production request must pass. Split out
+/// so tests can exercise the semantics without a real CLI package: the
+/// runtime status must say the adapter was compiled against the reviewed
+/// checkout, the reviewed commit must match the speech pack, and — the fix
+/// for the compile-time-truth bug — the runtime must report
+/// `inference_ready=true`, which the universal library now derives from an
+/// actual probe of usable local model assets, not from the fact that the
+/// adapter was compiled in.
+fn check_runtime_status(
+    manifest: &InBharatAudioManifest,
+    status: &AudioCppReadiness,
+) -> Result<(), String> {
+    if !status.adapter_compiled {
+        return Err(format!(
+            "InBharat Audio was not built against its reviewed audio.cpp checkout: {}",
+            status.reason
+        ));
+    }
+    if !status
+        .reviewed_commit
+        .eq_ignore_ascii_case(&manifest.upstream_commit)
+    {
+        return Err(format!(
+            "audio.cpp commit mismatch: runtime={} config={}",
+            status.reviewed_commit, manifest.upstream_commit
+        ));
+    }
+    if !status.inference_ready {
+        return Err(format!(
+            "audio.cpp inference is not ready on this machine: {}",
+            status.reason
+        ));
+    }
+    Ok(())
+}
+
+/// Manifest sanity + package integrity gate + CLI resolution + the runtime
+/// readiness query. Order is fail-closed: the readiness CLI is only spawned
+/// AFTER `verify_pocket_ai_package` has passed — an unverified package must
+/// never get process execution.
+fn preflight_speech_gate(
     root: &Path,
     manifest: &InBharatAudioManifest,
-) -> Result<AudioCppReadiness, String> {
+) -> Result<(PathBuf, PathBuf, AudioCppReadiness), String> {
     if !manifest.enabled {
         return Err("InBharat Audio is installed but not enabled for production".to_string());
     }
@@ -603,21 +653,15 @@ fn ensure_production_ready(
     let ibaudio_path = ibaudio_cli(root)?;
     let audiocpp_path = audio_cpp_cli(root)?;
     let status = query_readiness(root)?;
-    if !status.adapter_compiled {
-        return Err(format!(
-            "InBharat Audio was not built against its reviewed audio.cpp checkout: {}",
-            status.reason
-        ));
-    }
-    if !status
-        .reviewed_commit
-        .eq_ignore_ascii_case(&manifest.upstream_commit)
-    {
-        return Err(format!(
-            "audio.cpp commit mismatch: runtime={} config={}",
-            status.reviewed_commit, manifest.upstream_commit
-        ));
-    }
+    Ok((ibaudio_path, audiocpp_path, status))
+}
+
+fn ensure_production_ready(
+    root: &Path,
+    manifest: &InBharatAudioManifest,
+) -> Result<AudioCppReadiness, String> {
+    let (ibaudio_path, audiocpp_path, status) = preflight_speech_gate(root, manifest)?;
+    check_runtime_status(manifest, &status)?;
     // The universal library deliberately does not claim its internal model-family
     // adapter is production-ready yet. Pocket AI uses the real upstream CLI path
     // and requires a hash-bound end-to-end ASR+TTS acceptance attestation instead.
@@ -665,6 +709,9 @@ pub fn get_bharat_audio_status(vault_root: String) -> BharatAudioStatus {
 }
 
 pub fn status(vault_root: &str) -> BharatAudioStatus {
+    let streaming_class = unoone_speech_contracts::StreamingClass::BufferedFinal
+        .as_str()
+        .to_string();
     let Ok((root, manifest)) = read_manifest(vault_root) else {
         return BharatAudioStatus {
             configured: false,
@@ -674,9 +721,23 @@ pub fn status(vault_root: &str) -> BharatAudioStatus {
             upstream_commit: None,
             asr_family: None,
             tts_family: None,
+            inference_ready: false,
+            streaming_class,
         };
     };
-    let readiness = ensure_production_ready(&root, &manifest);
+    // One preflight feeds both the surfaced runtime facts and the production
+    // gate, so a status poll never spawns the readiness CLI twice — and the
+    // CLI is only ever spawned after the package integrity gate passed.
+    let (inference_ready, readiness) = match preflight_speech_gate(&root, &manifest) {
+        Ok((ibaudio_path, audiocpp_path, runtime)) => {
+            let ready = runtime.inference_ready;
+            let gate = check_runtime_status(&manifest, &runtime).and_then(|_| {
+                verify_acceptance(&root, &manifest, &ibaudio_path, &audiocpp_path).map(|_| runtime)
+            });
+            (ready, gate)
+        }
+        Err(error) => (false, Err(error)),
+    };
     BharatAudioStatus {
         configured: true,
         enabled: manifest.enabled,
@@ -687,6 +748,8 @@ pub fn status(vault_root: &str) -> BharatAudioStatus {
         upstream_commit: Some(manifest.upstream_commit.clone()),
         asr_family: manifest.asr.as_ref().map(|a| a.family.clone()),
         tts_family: manifest.tts.as_ref().map(|a| a.family.clone()),
+        inference_ready,
+        streaming_class,
     }
 }
 
@@ -871,6 +934,54 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         assert!(ensure_production_ready(&root, &manifest).is_err());
+    }
+
+    fn runtime_readiness(adapter_compiled: bool, inference_ready: bool) -> AudioCppReadiness {
+        AudioCppReadiness {
+            schema: "inbharat.ibaudio.audio_cpp_status.v1".to_string(),
+            adapter_compiled,
+            inference_ready,
+            reviewed_commit: "a".repeat(40),
+            upstream_source: "test://audio.cpp".to_string(),
+            reason: "test reason".to_string(),
+        }
+    }
+
+    /// Req 12/15 regression: a compiled adapter whose local model assets are
+    /// missing must NOT be production-ready. The runtime status API derives
+    /// inference_ready from a real probe; the desktop gate must honor a false
+    /// verdict regardless of the adapter having compiled in.
+    #[test]
+    fn compiled_adapter_with_missing_models_is_not_production_ready() {
+        let manifest = language_manifest(&["en"]);
+        let status = runtime_readiness(true, false);
+        let error = check_runtime_status(&manifest, &status)
+            .expect_err("compiled adapter without usable assets must fail the gate");
+        assert!(error.contains("inference is not ready"), "got: {error}");
+    }
+
+    /// The inverse regression: inference_ready=1 with adapter_compiled=0 is
+    /// compile-time truth again — impossible from the real runtime, but the
+    /// gate must reject the combination defensively, and a non-compiled
+    /// adapter must never pass.
+    #[test]
+    fn not_compiled_adapter_never_passes_even_if_marked_ready() {
+        let manifest = language_manifest(&["en"]);
+        let status = runtime_readiness(false, true);
+        let error = check_runtime_status(&manifest, &status)
+            .expect_err("adapter_compiled=0 must fail the gate");
+        assert!(error.contains("was not built against"), "got: {error}");
+    }
+
+    /// A pin mismatch is rejected before any readiness verdict matters.
+    #[test]
+    fn commit_mismatch_is_rejected() {
+        let manifest = language_manifest(&["en"]);
+        let mut status = runtime_readiness(true, true);
+        status.reviewed_commit = "b".repeat(40);
+        let error = check_runtime_status(&manifest, &status)
+            .expect_err("commit mismatch must fail the gate");
+        assert!(error.contains("commit mismatch"), "got: {error}");
     }
 
     /// The 1 MiB read buffer in `sha256_file` MUST be heap allocated: a stack

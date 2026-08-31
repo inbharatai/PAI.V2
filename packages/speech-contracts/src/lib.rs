@@ -267,6 +267,19 @@ pub enum StreamingClass {
     BufferedFinal,
 }
 
+impl StreamingClass {
+    /// Stable machine-readable name for status surfaces (Tauri commands,
+    /// logs, UI). `BUFFERED_FINAL` serializes as `BUFFERED_FINAL` for
+    /// serde consumers; this is the human-facing spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StreamingClass::StatefulStreaming => "stateful-streaming",
+            StreamingClass::SegmentChunked => "segment-chunked",
+            StreamingClass::BufferedFinal => "buffered-final",
+        }
+    }
+}
+
 /// Failures of a speech backend. Speech fails closed: every failure is
 /// explicit, never a silent fallback or an error string smuggled into a
 /// transcript.
@@ -519,5 +532,19 @@ mod tests {
         assert!(provider_serves("whisper_cpp", SpeechTask::Asr, &english));
         assert!(!provider_serves("omnivoice_tts", SpeechTask::Asr, &english));
         assert!(provider_serves("omnivoice_tts", SpeechTask::Tts, &english));
+    }
+
+    // ---- Streaming-class labels ----
+
+    #[test]
+    fn streaming_class_labels_are_stable() {
+        // These strings are surfaced to UIs and logs (BharatAudioStatus
+        // .streaming_class); they are a contract, not free text.
+        assert_eq!(
+            StreamingClass::StatefulStreaming.as_str(),
+            "stateful-streaming"
+        );
+        assert_eq!(StreamingClass::SegmentChunked.as_str(), "segment-chunked");
+        assert_eq!(StreamingClass::BufferedFinal.as_str(), "buffered-final");
     }
 }
