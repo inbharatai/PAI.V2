@@ -6,7 +6,12 @@ plugins {
 android {
     namespace = "org.inbharat.audio"
     compileSdk = 35
-    ndkVersion = "27.2.12479018"
+    // NDK version is property-overridable so hosts with a different installed
+    // NDK can build without editing the scaffold:
+    //   ./gradlew -Pibaudio.ndkVersion=27.2.12479018 assembleRelease
+    // The default matches the NDK this scaffold is BUILD-ONLY-verified with
+    // (r25.1.8937393, Windows host cross-compile, arm64-v8a).
+    ndkVersion = providers.gradleProperty("ibaudio.ndkVersion").orElse("25.1.8937393").get()
 
     defaultConfig {
         minSdk = 26
