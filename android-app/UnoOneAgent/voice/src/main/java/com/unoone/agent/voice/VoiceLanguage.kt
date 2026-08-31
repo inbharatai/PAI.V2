@@ -28,6 +28,95 @@ object VoiceLanguage {
         Lang("hi", "Hindi")
     )
 
+    // -------------------------------------------------------------------------
+    // Canonical language contract — Kotlin mirror of the PAI speech table.
+    //
+    // This table MUST stay byte-identical to `packages/speech-contracts/
+    // languages.v1.json` (the single source of truth shared with the desktop
+    // Rust route). CI enforces it with `scripts/check_speech_language_sync.py`;
+    // Android and desktop must never disagree on what a language tag means.
+    //
+    // Contract semantics (identical to the Rust canonicalize()):
+    // - alias lookup is ASCII case-insensitive; the canonical form is
+    //   returned verbatim (`as`, `as-in`, `as-IN` all → `as-IN`),
+    // - tags absent from the table pass through with BCP-47 case normalization
+    //   and are NEVER re-rooted to a region (`fr` stays `fr`, `en-US` stays
+    //   `en-US`),
+    // - malformed or empty tags are rejected (null), never guessed,
+    // - `auto` is the reserved detect sentinel.
+    // -------------------------------------------------------------------------
+
+    // canonical-aliases-begin (sync-checked against languages.v1.json)
+    val CANONICAL_ALIASES: Map<String, String> = mapOf(
+        "as" to "as-IN",
+        "as-in" to "as-IN",
+        "as-IN" to "as-IN",
+        "hi" to "hi-IN",
+        "hi-in" to "hi-IN",
+        "hi-IN" to "hi-IN",
+        "hinglish" to "hi-en-codemix",
+        "hi-en-codemix" to "hi-en-codemix",
+        "en" to "en-IN",
+        "en-in" to "en-IN",
+        "en-IN" to "en-IN",
+        "auto" to "auto"
+    )
+    // canonical-aliases-end
+
+    /**
+     * Canonicalizes a user- or manifest-supplied language tag. Returns null for
+     * empty or malformed tags — the caller must fail closed, never guess.
+     */
+    fun canonicalize(code: String?): String? {
+        val trimmed = code?.trim().orEmpty()
+        if (trimmed.isEmpty()) return null
+        CANONICAL_ALIASES[asciiLower(trimmed)]?.let { return it }
+        return normalizePassthrough(trimmed)
+    }
+
+    /** True when the tag is `auto`, the reserved detect-language sentinel. */
+    fun isAuto(canonical: String?): Boolean = canonical == AUTO_SENTINEL
+
+    const val AUTO_SENTINEL = "auto"
+
+    /**
+     * BCP-47 pass-through normalization for tags outside the alias table.
+     * Mirrors the Rust `normalize_passthrough` exactly: subtags are `-`
+     * separated, 1–8 ASCII alphanumeric characters, first subtag 2–8 letters;
+     * language lowercase, script Titlecase, region UPPERCASE. Null on any
+     * violation.
+     */
+    private fun normalizePassthrough(tag: String): String? {
+        val normalized = mutableListOf<String>()
+        tag.split('-').forEachIndexed { index, subtag ->
+            val ascii = subtag.all { it.isAsciiAlphanumeric() }
+            when {
+                subtag.isEmpty() || subtag.length > 8 || !ascii -> return null
+                index == 0 -> {
+                    if (subtag.length < 2 || !subtag.all { it.isAsciiLetter() }) return null
+                    normalized += asciiLower(subtag)
+                }
+                subtag.length == 2 -> normalized +=
+                    if (subtag.all { it.isAsciiLetter() }) asciiUpper(subtag) else asciiLower(subtag)
+                subtag.length == 4 && subtag.all { it.isAsciiLetter() } ->
+                    normalized += asciiUpper(subtag.take(1)) + asciiLower(subtag.drop(1))
+                else -> normalized += asciiLower(subtag)
+            }
+        }
+        return normalized.joinToString("-")
+    }
+
+    private fun asciiLower(text: String): String =
+        text.map { if (it in 'A'..'Z') it + 32 else it }.joinToString("")
+
+    private fun asciiUpper(text: String): String =
+        text.map { if (it in 'a'..'z') it - 32 else it }.joinToString("")
+
+    private fun Char.isAsciiLetter(): Boolean = this in 'a'..'z' || this in 'A'..'Z'
+
+    private fun Char.isAsciiAlphanumeric(): Boolean =
+        isAsciiLetter() || this in '0'..'9'
+
     private val ttsFolderByCode: Map<String, String> = mapOf(
         "en" to "speech/languages/en-IN/tts",
         "hi" to "speech/languages/hi-IN/tts"
