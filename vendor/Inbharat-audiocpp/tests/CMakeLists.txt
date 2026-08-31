@@ -172,6 +172,24 @@ ibaudio_test_sanitizers(ibaudio_provider_tests)
 add_test(NAME ibaudio.provider COMMAND ibaudio_provider_tests)
 set_tests_properties(ibaudio.provider PROPERTIES TIMEOUT 30 LABELS "rc;provider")
 
+# audio.cpp runtime-status semantics tests (req 12/15 of the speech audit):
+# a compiled adapter with missing local model assets must report
+# inference_ready=0. The probe is an internal hidden-visibility module, so the
+# test compiles its source directly; the status C ABI comes from the library.
+add_executable(ibaudio_audio_cpp_status_tests
+    audio_cpp_status_tests.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/adapters/audio_cpp/audio_cpp_probe.cpp)
+target_include_directories(ibaudio_audio_cpp_status_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(ibaudio_audio_cpp_status_tests PRIVATE InBharat::Audio)
+target_compile_definitions(ibaudio_audio_cpp_status_tests PRIVATE
+    $<$<BOOL:${IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER}>:IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER=1>)
+ibaudio_test_sanitizers(ibaudio_audio_cpp_status_tests)
+add_test(NAME ibaudio.audio-cpp-status COMMAND ibaudio_audio_cpp_status_tests)
+set_tests_properties(ibaudio.audio-cpp-status PROPERTIES TIMEOUT 30 LABELS "rc;readiness;probe")
+
 # Innovation module tests (default-build heuristic modules)
 add_executable(ibaudio_innovation_tests innovation/innovation_tests.cpp)
 target_link_libraries(ibaudio_innovation_tests PRIVATE InBharat::Audio)
@@ -201,6 +219,7 @@ if(IBAUDIO_BUILD_SHARED AND WIN32)
             ibaudio_transport_tests ibaudio_speech_to_speech_tests
             ibaudio_personal_adaptation_tests ibaudio_speech_mesh_tests
             ibaudio_pack_registry_tests ibaudio_provider_tests
+            ibaudio_audio_cpp_status_tests
             ibaudio_innovation_tests ibaudio_innovation_experimental_tests
             ibaudio_wav_fuzzer)
         if(TARGET ${test_target})

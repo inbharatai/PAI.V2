@@ -39,6 +39,7 @@ ibaudio_model_load
 ibaudio_model_load_options_init
 ibaudio_model_release
 ibaudio_runtime_create
+ibaudio_runtime_get_audio_cpp_status
 ibaudio_runtime_get_backend_count
 ibaudio_runtime_get_backend_info
 ibaudio_runtime_get_capabilities

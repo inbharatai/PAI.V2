@@ -1,4 +1,5 @@
 #include "internal.hpp"
+#include "adapters/audio_cpp/audio_cpp_probe.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -643,25 +644,26 @@ ibaudio_status_t ibaudio_runtime_get_audio_cpp_status(
         out_status->api_version = IBAUDIO_API_VERSION;
 #ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
         out_status->adapter_compiled = 1u;
-        // The adapter compiles in the real audio.cpp Qwen3-ASR provider and the
-        // Silero VAD provider; with the adapter on, production inference is ready
-        // (the caller supplies a licensed, integrity-verified ASR model root).
-        out_status->inference_ready = 1u;
+        // Readiness is a runtime fact about usable local assets, NEVER
+        // compile-time truth. A compiled adapter with a missing, empty, or
+        // unreadable model root reports inference_ready=0 with the exact
+        // reason — a build can no longer be DEFERRED-or-unavailable in the
+        // adapter while simultaneously READY here.
+        char probe_reason[192];
+        const bool assets_usable =
+            ibaudio::audio_cpp_adapter::probe_assets(probe_reason, sizeof(probe_reason));
+        out_status->inference_ready = assets_usable ? 1u : 0u;
+        ibaudio::copy_text(out_status->reason, sizeof(out_status->reason), probe_reason);
 #else
         out_status->adapter_compiled = 0u;
         out_status->inference_ready = 0u;
+        ibaudio::copy_text(out_status->reason, sizeof(out_status->reason),
+                           "audio.cpp adapter not compiled; no production audio.cpp inference is registered");
 #endif
         ibaudio::copy_text(out_status->reviewed_commit, sizeof(out_status->reviewed_commit),
                            "26dcb5c4cf5aa016ae6285096a7b45f2671e5d17");
         ibaudio::copy_text(out_status->upstream_source, sizeof(out_status->upstream_source),
                            "https://github.com/0xShug0/audio.cpp");
-#ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
-        ibaudio::copy_text(out_status->reason, sizeof(out_status->reason),
-                           "audio.cpp adapter compiled; real Qwen3-ASR + Silero VAD providers registered");
-#else
-        ibaudio::copy_text(out_status->reason, sizeof(out_status->reason),
-                           "audio.cpp adapter not compiled; no production audio.cpp inference is registered");
-#endif
         return IBAUDIO_STATUS_OK;
     });
 }

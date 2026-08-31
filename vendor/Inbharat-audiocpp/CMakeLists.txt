@@ -114,6 +114,10 @@ if(IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER)
         message(FATAL_ERROR "audio.cpp adapter refuses a modified upstream checkout")
     endif()
     list(APPEND IBAUDIO_SOURCES src/adapters/audio_cpp/audio_cpp_adapter.cpp)
+    # Runtime asset probe: the single authority for inference_ready. Compiles
+    # alongside the adapter (the runtime status API calls it), self-contained
+    # so it never drags in upstream audio.cpp headers.
+    list(APPEND IBAUDIO_SOURCES src/adapters/audio_cpp/audio_cpp_probe.cpp)
 
     # Real audio.cpp provider (VAD via bundled Silero weights; ASR/TTS gated). Requires
     # the pinned upstream to have been built already (scripts/build_audio_cpp_provider.sh
