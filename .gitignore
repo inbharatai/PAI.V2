@@ -57,3 +57,5 @@ Thumbs.db
 # --- Screenshots / local media ---
 screenshots/
 *.local.png
+# Claude Code session scratch space (fixtures, candidates)
+.claude-scratch/

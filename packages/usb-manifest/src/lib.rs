@@ -61,6 +61,26 @@ pub struct WindowsPackage {
     pub models: Vec<AssetSpec>,
     #[serde(default)]
     pub voice: Vec<AssetSpec>,
+    /// The InBharat Audio speech plane (SPEECH/ tree + RUNTIMES/WINDOWS/AUDIO).
+    /// Optional: a package without a speech section declares no speech assets
+    /// at all. When present, the section is integrity-bound like every other
+    /// asset: sizes and SHA-256 digests are swept by the desktop app's
+    /// background `DesktopLaunch` validation, never by the fast
+    /// `PackageIdentity` launch path.
+    #[serde(default)]
+    pub speech: Option<SpeechPackage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeechPackage {
+    #[serde(default)]
+    pub models: Vec<AssetSpec>,
+    #[serde(default)]
+    pub configs: Vec<AssetSpec>,
+    #[serde(default)]
+    pub acceptance: Vec<AssetSpec>,
+    #[serde(default)]
+    pub runtimes: Vec<AssetSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +114,18 @@ pub enum AssetKind {
     PiperModel,
     MobileModel,
     VoiceRuntime,
+    /// Speech inference weights under SPEECH/models (e.g. qwen3-asr.gguf,
+    /// omnivoice.gguf, future IndicConformer .onnx packs).
+    SpeechModel,
+    /// Speech configuration under SPEECH/config (the InBharat Audio manifest,
+    /// model specs, language pack metadata).
+    SpeechConfig,
+    /// Speech acceptance attestations under SPEECH/acceptance, hashed into
+    /// the package manifest so the attestation tree is tamper-evident too.
+    Acceptance,
+    /// The InBharat Audio runtime under RUNTIMES/WINDOWS/AUDIO
+    /// (ibaudio.exe, ibaudio.dll, audiocpp_cli.exe).
+    SpeechRuntime,
     Other,
 }
 
@@ -357,12 +389,37 @@ pub fn validate_package(root: &Path, scope: ValidationScope) -> ValidationReport
             &mut failures,
         );
     }
+    if let Some(speech) = windows.speech.as_ref() {
+        for model in &speech.models {
+            validate_asset_kind(model, &[AssetKind::SpeechModel], &mut failures);
+        }
+        for config in &speech.configs {
+            validate_asset_kind(config, &[AssetKind::SpeechConfig], &mut failures);
+        }
+        for acceptance in &speech.acceptance {
+            validate_asset_kind(acceptance, &[AssetKind::Acceptance], &mut failures);
+        }
+        for runtime in &speech.runtimes {
+            validate_asset_kind(runtime, &[AssetKind::SpeechRuntime], &mut failures);
+        }
+    }
 
     let mut assets: Vec<&AssetSpec> = vec![&windows.desktop];
     if scope == ValidationScope::DesktopLaunch {
         assets.extend(windows.runtimes.iter().filter(|asset| asset.required));
         assets.extend(windows.models.iter().filter(|asset| asset.required));
         assets.extend(windows.voice.iter().filter(|asset| asset.required));
+        if let Some(speech) = windows.speech.as_ref() {
+            assets.extend(
+                speech
+                    .models
+                    .iter()
+                    .chain(&speech.configs)
+                    .chain(&speech.acceptance)
+                    .chain(&speech.runtimes)
+                    .filter(|asset| asset.required),
+            );
+        }
     }
     if let Some(starter) = windows.starter.as_ref() {
         assets.push(starter);
@@ -693,11 +750,77 @@ mod tests {
                         architecture: None,
                     }],
                     voice: vec![],
+                    speech: None,
                 },
                 mobile: None,
             },
         };
         (temp, manifest)
+    }
+
+    /// Writes the InBharat Audio speech plane (SPEECH/ tree + AUDIO runtimes)
+    /// into the fixture root and declares it in the manifest.
+    fn stage_speech(temp: &TempDir, manifest: &mut PocketManifest) {
+        let root = temp.path();
+        fs::create_dir_all(root.join("SPEECH/models/asr")).unwrap();
+        fs::create_dir_all(root.join("SPEECH/config")).unwrap();
+        fs::create_dir_all(root.join("SPEECH/acceptance")).unwrap();
+        fs::create_dir_all(root.join("RUNTIMES/WINDOWS/AUDIO")).unwrap();
+        fs::write(
+            root.join("SPEECH/models/asr/qwen3-asr.gguf"),
+            b"asr-weights",
+        )
+        .unwrap();
+        fs::write(
+            root.join("SPEECH/config/inbharat-audio.v1.json"),
+            b"audio-config",
+        )
+        .unwrap();
+        fs::write(
+            root.join("SPEECH/acceptance/audio-cpp.acceptance.v1.json"),
+            b"acceptance",
+        )
+        .unwrap();
+        fs::write(root.join("RUNTIMES/WINDOWS/AUDIO/ibaudio.dll"), b"ibaudio").unwrap();
+
+        manifest.platforms.windows.speech = Some(SpeechPackage {
+            models: vec![AssetSpec {
+                id: "speech-model-qwen3-asr".to_string(),
+                kind: AssetKind::SpeechModel,
+                path: "SPEECH/models/asr/qwen3-asr.gguf".to_string(),
+                size_bytes: 11,
+                sha256: sha(b"asr-weights"),
+                required: true,
+                architecture: None,
+            }],
+            configs: vec![AssetSpec {
+                id: "speech-config-inbharat-audio".to_string(),
+                kind: AssetKind::SpeechConfig,
+                path: "SPEECH/config/inbharat-audio.v1.json".to_string(),
+                size_bytes: 12,
+                sha256: sha(b"audio-config"),
+                required: true,
+                architecture: None,
+            }],
+            acceptance: vec![AssetSpec {
+                id: "speech-acceptance-audio-cpp".to_string(),
+                kind: AssetKind::Acceptance,
+                path: "SPEECH/acceptance/audio-cpp.acceptance.v1.json".to_string(),
+                size_bytes: 10,
+                sha256: sha(b"acceptance"),
+                required: true,
+                architecture: None,
+            }],
+            runtimes: vec![AssetSpec {
+                id: "speech-runtime-ibaudio".to_string(),
+                kind: AssetKind::SpeechRuntime,
+                path: "RUNTIMES/WINDOWS/AUDIO/ibaudio.dll".to_string(),
+                size_bytes: 7,
+                sha256: sha(b"ibaudio"),
+                required: true,
+                architecture: Some(current_architecture().to_string()),
+            }],
+        });
     }
 
     fn write_manifest(root: &Path, manifest: &PocketManifest) {
@@ -792,5 +915,117 @@ mod tests {
             .failures
             .iter()
             .any(|failure| failure.code == ValidationFailureCode::ArchitectureIncompatible));
+    }
+
+    // ---- Speech plane integrity (background-verified, never launch-blocking) ----
+
+    #[test]
+    fn speech_assets_pass_the_background_sweep() {
+        let (temp, mut manifest) = fixture();
+        stage_speech(&temp, &mut manifest);
+        write_manifest(temp.path(), &manifest);
+        let report = validate_package(temp.path(), ValidationScope::DesktopLaunch);
+        assert!(report.valid, "{:?}", report.failures);
+    }
+
+    #[test]
+    fn tampered_speech_model_fails_the_background_sweep() {
+        let (temp, mut manifest) = fixture();
+        stage_speech(&temp, &mut manifest);
+        write_manifest(temp.path(), &manifest);
+        fs::write(
+            temp.path().join("SPEECH/models/asr/qwen3-asr.gguf"),
+            b"swapped-weights",
+        )
+        .unwrap();
+        let report = validate_package(temp.path(), ValidationScope::DesktopLaunch);
+        assert!(report.failures.iter().any(|failure| {
+            matches!(
+                failure.code,
+                ValidationFailureCode::AssetSizeMismatch | ValidationFailureCode::AssetHashMismatch
+            )
+        }));
+    }
+
+    #[test]
+    fn package_identity_scope_skips_speech_hashes_but_checks_kinds() {
+        // The fast launch path must not hash 2.5 GiB of speech weights;
+        // the desktop app runs the full sweep in the background instead.
+        let (temp, mut manifest) = fixture();
+        stage_speech(&temp, &mut manifest);
+        write_manifest(temp.path(), &manifest);
+        fs::write(
+            temp.path().join("SPEECH/models/asr/qwen3-asr.gguf"),
+            b"swapped-weights",
+        )
+        .unwrap();
+        let report = validate_package(temp.path(), ValidationScope::PackageIdentity);
+        assert!(report.valid, "{:?}", report.failures);
+
+        // Kind rules still apply even in the fast scope: a speech model slot
+        // may not silently carry a launcher kind.
+        manifest.platforms.windows.speech.as_mut().unwrap().models[0].kind =
+            AssetKind::DesktopExecutable;
+        write_manifest(temp.path(), &manifest);
+        let report = validate_package(temp.path(), ValidationScope::PackageIdentity);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == ValidationFailureCode::AssetKindMismatch));
+    }
+
+    #[test]
+    fn tampered_acceptance_attestation_is_detected_by_the_sweep() {
+        // The acceptance tree is integrity-bound through the manifest, so an
+        // edited attestation can no longer masquerade as the recorded one.
+        let (temp, mut manifest) = fixture();
+        stage_speech(&temp, &mut manifest);
+        write_manifest(temp.path(), &manifest);
+        fs::write(
+            temp.path()
+                .join("SPEECH/acceptance/audio-cpp.acceptance.v1.json"),
+            b"edited-attestation",
+        )
+        .unwrap();
+        let report = validate_package(temp.path(), ValidationScope::DesktopLaunch);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == ValidationFailureCode::AssetHashMismatch));
+    }
+
+    #[test]
+    fn speech_path_may_not_shadow_a_desktop_model() {
+        let (temp, mut manifest) = fixture();
+        stage_speech(&temp, &mut manifest);
+        let speech = manifest.platforms.windows.speech.as_mut().unwrap();
+        let desktop_model = &mut manifest.platforms.windows.models[0];
+        speech.models[0].path = desktop_model.path.clone();
+        speech.models[0].size_bytes = desktop_model.size_bytes;
+        speech.models[0].sha256 = desktop_model.sha256.clone();
+        write_manifest(temp.path(), &manifest);
+        let report = validate_package(temp.path(), ValidationScope::DesktopLaunch);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == ValidationFailureCode::DuplicateAssetPath));
+    }
+
+    #[test]
+    fn speech_section_is_optional() {
+        // A package without a speech section declares no speech assets;
+        // absence is not a failure.
+        let (temp, manifest) = fixture();
+        write_manifest(temp.path(), &manifest);
+        let report = validate_package(temp.path(), ValidationScope::DesktopLaunch);
+        assert!(report.valid, "{:?}", report.failures);
+        assert!(report
+            .package
+            .unwrap()
+            .manifest
+            .platforms
+            .windows
+            .speech
+            .is_none());
     }
 }
