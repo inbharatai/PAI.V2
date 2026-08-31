@@ -22,11 +22,18 @@ mod llama;
 mod recording;
 mod safety;
 mod security;
+// The product speech plane: SpeechBackend implementations (InBharat Audio +
+// wrapped legacy Whisper/Piper) behind the explicit SpeechRouter policy. Not
+// yet registered as Tauri commands until C7 gates the UI on real
+// inference_ready; the trait implementations and router are unit-tested here.
+#[allow(dead_code)]
+mod speech;
 mod startup;
 mod voice;
 
 use base64::Engine;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use unoone_vault_core::{PrivacyLevel, Record, RecordType, Vault};
@@ -357,27 +364,76 @@ fn validate_vault_root(vault_root: &str) -> Result<(String, String), String> {
     Ok((package.root.to_string_lossy().to_string(), package.vault_id))
 }
 
+/// Guards against stacking background DesktopLaunch validations: the sweep is
+/// expensive (it hashes every package asset), so only one may run at a time.
+static ASSET_VALIDATION_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Run the full DesktopLaunch asset sweep on a background thread. The launch
+/// path only validates package identity (`ValidationScope::PackageIdentity`)
+/// so the unlock screen appears fast; this thread is what actually verifies
+/// every runtime, model, and voice asset — and the model server refuses to
+/// start until it completes (see `llama::start_model_server`).
+fn start_background_asset_validation(app_handle: tauri::AppHandle, root: &std::path::Path) {
+    if ASSET_VALIDATION_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let report = unoone_usb_manifest::validate_package(
+            &root,
+            unoone_usb_manifest::ValidationScope::DesktopLaunch,
+        );
+        let startup_state = app_handle.state::<startup::StartupCoordinator>();
+        if let Some(package) = report.package {
+            startup_state.connect(&package);
+            startup_state.set_phase(startup::StartupPhase::PaiConnected);
+        } else {
+            startup_state.reject(report.failures.clone());
+        }
+        ASSET_VALIDATION_RUNNING.store(false, Ordering::SeqCst);
+    });
+}
+
 #[tauri::command]
 #[allow(unexpected_cfgs)]
 fn detect_vault(
+    app_handle: tauri::AppHandle,
     startup_state: tauri::State<'_, startup::StartupCoordinator>,
 ) -> Result<VaultInfo, String> {
-    startup_state.set_phase(startup::StartupPhase::ValidatingPai);
+    // An already-connected, identity-validated Pocket AI is reported directly
+    // without re-scanning drives (and without blocking on the background
+    // asset sweep, whose progress the UI observes via get_startup_status).
+    if let Some(status) = startup_state.connected_status() {
+        return Ok(VaultInfo {
+            detected: true,
+            vault_root: status.vault_root.unwrap_or_default(),
+            vault_id: status.vault_id.unwrap_or_default(),
+            startup_state: status.phase,
+            validation_failures: status.validation_failures,
+        });
+    }
+
+    if !startup_state.is_validating_assets() {
+        startup_state.set_phase(startup::StartupPhase::ValidatingPai);
+    }
 
     if let Some(supplied_root) = startup_state.take_supplied_root() {
+        // Identity-only here: fast launch. The background sweep below does the
+        // full asset verification.
         startup_state.set_phase(startup::StartupPhase::CheckingAssets);
         let report = unoone_usb_manifest::validate_package(
             &supplied_root,
-            unoone_usb_manifest::ValidationScope::DesktopLaunch,
+            unoone_usb_manifest::ValidationScope::PackageIdentity,
         );
         if let Some(package) = report.package {
             startup_state.connect(&package);
-            startup_state.set_phase(startup::StartupPhase::WaitingForUnlock);
+            startup_state.set_phase(startup::StartupPhase::CheckingAssets);
+            start_background_asset_validation(app_handle, &package.root);
             return Ok(VaultInfo {
                 detected: true,
                 vault_root: package.root.to_string_lossy().to_string(),
                 vault_id: package.vault_id,
-                startup_state: startup::StartupPhase::WaitingForUnlock,
+                startup_state: startup::StartupPhase::CheckingAssets,
                 validation_failures: Vec::new(),
             });
         }
@@ -400,18 +456,20 @@ fn detect_vault(
         else {
             continue;
         };
+        // Identity-only here as well: fast launch, background full sweep.
         let report = unoone_usb_manifest::validate_package(
             &candidate,
-            unoone_usb_manifest::ValidationScope::DesktopLaunch,
+            unoone_usb_manifest::ValidationScope::PackageIdentity,
         );
         if let Some(package) = report.package {
             startup_state.connect(&package);
-            startup_state.set_phase(startup::StartupPhase::WaitingForUnlock);
+            startup_state.set_phase(startup::StartupPhase::CheckingAssets);
+            start_background_asset_validation(app_handle, &package.root);
             return Ok(VaultInfo {
                 detected: true,
                 vault_root: package.root.to_string_lossy().to_string(),
                 vault_id: package.vault_id,
-                startup_state: startup::StartupPhase::WaitingForUnlock,
+                startup_state: startup::StartupPhase::CheckingAssets,
                 validation_failures: Vec::new(),
             });
         }

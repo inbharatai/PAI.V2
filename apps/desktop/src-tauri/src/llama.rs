@@ -1748,6 +1748,13 @@ pub async fn start_model_server(
     state: tauri::State<'_, ModelManagerState>,
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Result<u16, String> {
+    // The model server is the inference gate: refuse to start until the
+    // background DesktopLaunch asset sweep has actually completed, so
+    // inference is never served on unverified binaries/models.
+    if !startup.is_asset_validation_complete() {
+        startup.set_phase(crate::startup::StartupPhase::LimitedMode);
+        return Err("Pocket AI assets have not completed DesktopLaunch validation.".to_string());
+    }
     startup.set_phase(crate::startup::StartupPhase::StartingModel);
     let manager = ModelManager::new();
     // Default to the best detected backend.

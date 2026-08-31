@@ -71,6 +71,10 @@ unoone-text = { path = "../../../packages/text-util" }
 # Backend-preference and model-identity decisions as pure, tested logic.
 # Fixes the insert(0) precedence bug and the fail-open identity check.
 unoone-runtime-select = { path = "../../../packages/runtime-select" }
+# Shared speech contracts: language canonicalization (as/as-IN, hi, hinglish,
+# BCP-47 passthrough) and the SpeechBackend interface both speech routes sit
+# behind. Same rules on every host, testable without the Tauri shell.
+unoone-speech-contracts = { path = "../../../packages/speech-contracts" }
 # Reusable InBharat Harness (sibling workspace) + Pocket AI product adapter.
 # The Harness is the unified text plane; pai-harness-adapter holds all
 # product-specific glue (vault memory, localhost llama provider, host/model

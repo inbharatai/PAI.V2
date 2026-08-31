@@ -100,10 +100,11 @@ pub enum AssetKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationScope {
     /// Validate identity, version, desktop executable, all required runtimes,
-    /// models, and voice assets. Dock must use this before launch.
+    /// models, and voice assets. The desktop app runs this before inference.
     DesktopLaunch,
-    /// Validate identity, version, and the starter itself. Used only while
-    /// generating/staging a package before the desktop assets are populated.
+    /// Validate identity, version, and the launcher itself. Used by Starter
+    /// and Dock for a fast launch; the full asset sweep runs separately in the
+    /// desktop app's background DesktopLaunch validation.
     PackageIdentity,
 }
 
@@ -710,6 +711,17 @@ mod tests {
         let (temp, manifest) = fixture();
         write_manifest(temp.path(), &manifest);
         let report = validate_package(temp.path(), ValidationScope::DesktopLaunch);
+        assert!(report.valid, "{:?}", report.failures);
+        assert_eq!(report.package.unwrap().vault_id, "test-vault");
+    }
+
+    #[test]
+    fn package_identity_accepts_without_launch_assets() {
+        let (temp, mut manifest) = fixture();
+        manifest.platforms.windows.runtimes.clear();
+        manifest.platforms.windows.models.clear();
+        write_manifest(temp.path(), &manifest);
+        let report = validate_package(temp.path(), ValidationScope::PackageIdentity);
         assert!(report.valid, "{:?}", report.failures);
         assert_eq!(report.package.unwrap().vault_id, "test-vault");
     }

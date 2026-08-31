@@ -52,7 +52,26 @@ export function ChatView() {
   }, []);
 
   useEffect(() => {
-    checkModelStatus();
+    // Poll until the model server is actually up (it now starts only after
+    // the background asset sweep completes), instead of probing once and
+    // leaving the input permanently disabled.
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const poll = async () => {
+      const ok = await checkModelStatus();
+      if (cancelled) return;
+      if (!ok) {
+        timer = window.setTimeout(poll, 1000);
+      }
+    };
+
+    void poll();
+
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [checkModelStatus]);
 
   const handleSend = async () => {

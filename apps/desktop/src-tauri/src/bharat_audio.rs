@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use unoone_speech_contracts::LanguageTag;
 
 const CONFIG_RELATIVE_PATH: &str = "SPEECH/config/inbharat-audio.v1.json";
 const ACCEPTANCE_RELATIVE_PATH: &str = "SPEECH/acceptance/audio-cpp.acceptance.v1.json";
@@ -188,6 +189,42 @@ fn canonical_under(root: &Path, relative: &str, must_exist: bool) -> Result<Path
     Ok(canonical)
 }
 
+/// Confine a caller-supplied audio input path. Accepted inputs are exactly:
+/// a regular, non-symlink file of at most `MAX_INPUT_AUDIO_BYTES` that lives
+/// under the verified Pocket AI root or under the OS capture subdirectory
+/// (`<temp>/unoone-stt`) where `recording::transcribe_transiently` writes its
+/// transient WAV captures. Anything else — including files merely anywhere in
+/// OS temp, paths that escape via symlink canonicalization, or traversal — is
+/// rejected before any subprocess sees it.
+fn confine_audio_input(root: &Path, audio_path: &str) -> Result<PathBuf, String> {
+    let candidate = Path::new(audio_path);
+    let symlink_meta = std::fs::symlink_metadata(candidate)
+        .map_err(|e| format!("cannot stat audio input: {e}"))?;
+    if symlink_meta.file_type().is_symlink() {
+        return Err("refusing symlinked audio input".to_string());
+    }
+    let input = candidate
+        .canonicalize()
+        .map_err(|e| format!("audio input is unavailable: {e}"))?;
+    let meta = std::fs::metadata(&input).map_err(|e| format!("cannot stat audio input: {e}"))?;
+    if !meta.is_file() || meta.len() > MAX_INPUT_AUDIO_BYTES {
+        return Err("audio input is not a regular file or exceeds 512 MiB".to_string());
+    }
+    let capture_root = std::env::temp_dir().join("unoone-stt");
+    std::fs::create_dir_all(&capture_root)
+        .map_err(|e| format!("cannot prepare the OS capture temp area: {e}"))?;
+    let capture_root = capture_root
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize the OS capture temp area: {e}"))?;
+    if !input.starts_with(root) && !input.starts_with(&capture_root) {
+        return Err(format!(
+            "audio input must live under the Pocket AI root or the unoone-stt capture area: {}",
+            input.display()
+        ));
+    }
+    Ok(input)
+}
+
 fn read_manifest(vault_root: &str) -> Result<(PathBuf, InBharatAudioManifest), String> {
     let root = canonical_root(vault_root)?;
     let path = canonical_under(&root, CONFIG_RELATIVE_PATH, true)?;
@@ -316,7 +353,12 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| format!("cannot open {} for SHA-256: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // Heap-allocate the read buffer: a 1 MiB stack array overflows the 1 MiB
+    // default Windows thread stack (STATUS_STACK_OVERFLOW 0xC00000FD) — the
+    // same defect the C++ twin already fixed in
+    // vendor/Inbharat-audiocpp/src/sha256.cpp (heap std::vector). Proven by
+    // `sha256_file_runs_on_small_stack_thread`.
+    let mut buffer = vec![0u8; 512 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -583,22 +625,38 @@ fn ensure_production_ready(
     Ok(status)
 }
 
-fn validate_language(manifest: &InBharatAudioManifest, requested: &str) -> Result<(), String> {
-    if requested.trim().is_empty() || manifest.allowed_languages.is_empty() {
-        return Ok(());
+/// Validate a user- or manifest-supplied language against the speech pack's
+/// allowlist, using BCP-47 canonicalization from `unoone-speech-contracts`
+/// (`as`/`as-IN` → `as-IN`, `hi` → `hi-IN`, `hinglish` → `hi-en-codemix`;
+/// global tags like `fr` pass through and are never re-rooted).
+///
+/// Fail-closed by construction: an empty request is an error and an empty
+/// allowlist is an error — the previous silent-bypass (both returned Ok) is
+/// gone. Returns the canonical tag the caller should report in results; the
+/// CLI boundary keeps the original alias string because that is the exact
+/// vocabulary the acceptance attestation pinned.
+fn validate_language(
+    manifest: &InBharatAudioManifest,
+    requested: &str,
+) -> Result<LanguageTag, String> {
+    let tag = unoone_speech_contracts::canonicalize(requested)
+        .map_err(|e| format!("cannot use speech language '{requested}': {e}"))?;
+    if manifest.allowed_languages.is_empty() {
+        return Err(
+            "production speech manifest must explicitly declare allowed_languages".to_string(),
+        );
     }
-    if manifest
-        .allowed_languages
-        .iter()
-        .any(|lang| lang.eq_ignore_ascii_case(requested))
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "language '{}' is not enabled in the Pocket AI speech pack",
-            requested
-        ))
+    for entry in &manifest.allowed_languages {
+        let entry_tag = unoone_speech_contracts::canonicalize(entry)
+            .map_err(|e| format!("speech manifest language '{entry}' is invalid: {e}"))?;
+        if entry_tag == tag {
+            return Ok(tag);
+        }
     }
+    Err(format!(
+        "language '{}' is not enabled in the Pocket AI speech pack",
+        tag
+    ))
 }
 
 #[tauri::command]
@@ -647,14 +705,7 @@ pub fn transcribe(
     let model = canonical_under(&root, &task.model_relative_path, true)?;
     let cli = audio_cpp_cli(&root)?;
 
-    let input = PathBuf::from(audio_path)
-        .canonicalize()
-        .map_err(|e| format!("audio input is unavailable: {e}"))?;
-    let input_meta =
-        std::fs::metadata(&input).map_err(|e| format!("cannot stat audio input: {e}"))?;
-    if !input_meta.is_file() || input_meta.len() > MAX_INPUT_AUDIO_BYTES {
-        return Err("audio input is not a regular file or exceeds 512 MiB".to_string());
-    }
+    let input = confine_audio_input(&root, audio_path)?;
 
     let transcript_rel = format!(
         "VAULT/recordings/transcripts/inbharat_asr_{}.txt",
@@ -674,18 +725,30 @@ pub fn transcribe(
         .arg(&input)
         .arg("--text-out")
         .arg(&transcript_path);
-    let selected_language = if language.trim().is_empty() {
-        task.default_language.as_deref().unwrap_or("")
+    let trimmed = language.trim();
+    let (cli_language, language_tag) = if trimmed.is_empty() {
+        // Pack default: the speech pack's own declared value. Canonicalized
+        // for the result, but exempt from the user-facing allowlist check —
+        // it is the pack speaking, not a user claim (this is what allows the
+        // truthful "auto" detect directive as a default).
+        let default = task
+            .default_language
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
+        if default.is_empty() {
+            return Err(
+                "ASR language must be explicit or provided by the speech manifest".to_string(),
+            );
+        }
+        let tag = unoone_speech_contracts::canonicalize(default)
+            .map_err(|e| format!("speech manifest default language is invalid: {e}"))?;
+        (default.to_string(), tag)
     } else {
-        language
+        let tag = validate_language(&manifest, trimmed)?;
+        (trimmed.to_string(), tag)
     };
-    if selected_language.is_empty() {
-        return Err("ASR language must be explicit or provided by the speech manifest".to_string());
-    }
-    validate_language(&manifest, selected_language)?;
-    if !selected_language.is_empty() {
-        cmd.arg("--language").arg(selected_language);
-    }
+    cmd.arg("--language").arg(&cli_language);
     let _ = run_command_timeout(cmd, INFERENCE_TIMEOUT)?;
     let transcript = std::fs::read_to_string(&transcript_path)
         .map_err(|e| format!("audio.cpp ASR did not produce its declared transcript file: {e}"))?
@@ -697,7 +760,7 @@ pub fn transcribe(
     }
     Ok(BharatAsrResult {
         transcript,
-        language: selected_language.to_string(),
+        language: language_tag.as_str().to_string(),
         processing_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
 }
@@ -734,16 +797,28 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         .arg(text)
         .arg("--out")
         .arg(&output);
-    let selected_language = if language.trim().is_empty() {
-        task.default_language.as_deref().unwrap_or("")
+    let trimmed = language.trim();
+    let (cli_language, _language_tag) = if trimmed.is_empty() {
+        // Pack default (see transcribe): canonicalized but exempt from the
+        // user-facing allowlist check.
+        let default = task
+            .default_language
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
+        if default.is_empty() {
+            return Err(
+                "TTS language must be explicit or provided by the speech manifest".to_string(),
+            );
+        }
+        let tag = unoone_speech_contracts::canonicalize(default)
+            .map_err(|e| format!("speech manifest default language is invalid: {e}"))?;
+        (default.to_string(), tag)
     } else {
-        language
+        let tag = validate_language(&manifest, trimmed)?;
+        (trimmed.to_string(), tag)
     };
-    if selected_language.is_empty() {
-        return Err("TTS language must be explicit or provided by the speech manifest".to_string());
-    }
-    validate_language(&manifest, selected_language)?;
-    cmd.arg("--language").arg(selected_language);
+    cmd.arg("--language").arg(&cli_language);
     let _ = run_command_timeout(cmd, INFERENCE_TIMEOUT)?;
     if !output.is_file() {
         return Err(
@@ -796,5 +871,113 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         assert!(ensure_production_ready(&root, &manifest).is_err());
+    }
+
+    /// The 1 MiB read buffer in `sha256_file` MUST be heap allocated: a stack
+    /// array overflows the 1 MiB default Windows thread stack. Run the hash
+    /// on a thread with a deliberately small (128 KiB) stack over a 4 MiB
+    /// file — with a stack buffer this aborts the process; with the heap
+    /// buffer it returns a digest.
+    #[test]
+    fn sha256_file_runs_on_small_stack_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("4mib.bin");
+        let payload = vec![0xA5u8; 4 * 1024 * 1024];
+        std::fs::write(&file, &payload).unwrap();
+        let path = file.clone();
+        let worker = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || sha256_file(&path))
+            .expect("spawn small-stack thread");
+        let digest = worker
+            .join()
+            .expect("small-stack thread must not crash")
+            .expect("hash must succeed");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    fn language_manifest(languages: &[&str]) -> InBharatAudioManifest {
+        InBharatAudioManifest {
+            schema: "inbharat.pai.speech.v1".to_string(),
+            enabled: true,
+            upstream_commit: "a".repeat(40),
+            backend: "cpu".to_string(),
+            allowed_languages: languages.iter().map(|s| s.to_string()).collect(),
+            asr: None,
+            tts: None,
+        }
+    }
+
+    /// The old `validate_language` silently passed on an empty request or an
+    /// empty allowlist. Both must now fail closed.
+    #[test]
+    fn empty_language_and_empty_allowlist_fail_closed() {
+        let manifest = language_manifest(&["en", "hi", "hinglish"]);
+        assert!(validate_language(&manifest, "   ").is_err());
+        assert!(validate_language(&manifest, "").is_err());
+
+        let empty = language_manifest(&[]);
+        assert!(validate_language(&empty, "hi").is_err());
+    }
+
+    /// BCP-47 canonicalization reaches the speech pack gate: `as`/`as-IN`
+    /// address Assamese, `hi`/`hi-IN` address Hindi, and aliases match an
+    /// allowlist written in either form.
+    #[test]
+    fn validate_language_canonicalizes_aliases() {
+        let manifest = language_manifest(&["en", "hi", "hinglish"]);
+        assert_eq!(
+            validate_language(&manifest, "hi-IN").unwrap().as_str(),
+            "hi-IN"
+        );
+        assert_eq!(
+            validate_language(&manifest, "hi").unwrap().as_str(),
+            "hi-IN"
+        );
+        assert_eq!(
+            validate_language(&manifest, "HINGLISH").unwrap().as_str(),
+            "hi-en-codemix"
+        );
+        // Global languages pass through and never join the pack.
+        assert!(validate_language(&manifest, "fr").is_err());
+        assert!(validate_language(&manifest, "en-US").is_err());
+        // Assamese is never enabled by the Qwen3-era pack allowlist.
+        assert!(validate_language(&manifest, "as").is_err());
+        assert!(validate_language(&manifest, "as-IN").is_err());
+        // Malformed tags are rejected, not guessed.
+        assert!(validate_language(&manifest, "french--").is_err());
+    }
+
+    #[test]
+    fn audio_input_is_confined_to_root_or_capture_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        // Inside the root: allowed.
+        let inside = root.join("capture.wav");
+        std::fs::write(&inside, b"RIFF").unwrap();
+        assert!(confine_audio_input(&root, inside.to_str().unwrap()).is_ok());
+
+        // Inside the unoone-stt capture area: allowed (recording writes its
+        // transient WAV captures there).
+        let capture_dir = std::env::temp_dir().join("unoone-stt");
+        std::fs::create_dir_all(&capture_dir).unwrap();
+        let capture = capture_dir.join("unoone-stt-test-confine.wav");
+        std::fs::write(&capture, b"RIFF").unwrap();
+        assert!(confine_audio_input(&root, capture.to_str().unwrap()).is_ok());
+
+        // Merely anywhere else in OS temp is NOT enough — the whole temp root
+        // is untrusted scratch space.
+        let loose_temp = tempfile::tempdir().unwrap();
+        let loose = loose_temp.path().join("loose.wav");
+        std::fs::write(&loose, b"RIFF").unwrap();
+        assert!(
+            confine_audio_input(&root, loose.to_str().unwrap()).is_err(),
+            "a WAV outside the root and outside unoone-stt must be rejected"
+        );
+
+        // Missing file: rejected.
+        assert!(confine_audio_input(&root, "Z:\\does\\not\\exist.wav").is_err());
     }
 }

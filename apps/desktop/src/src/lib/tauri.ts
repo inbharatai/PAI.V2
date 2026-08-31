@@ -463,8 +463,8 @@ export const tauriApi = {
     invoke<SafetyVerdict>('review_tool_action', { action, security_level: securityLevel }),
 
   // Recording
-  startRecording: (recordingType: string, privacyLevel: string, vaultRoot: string) =>
-    invoke<RecordingSession>('start_recording', { recording_type: recordingType, privacy_level: privacyLevel, vault_root: vaultRoot }),
+  startRecording: (recordingType: string, privacyLevel: string, vaultRoot: string, language?: string) =>
+    invoke<RecordingSession>('start_recording', { recording_type: recordingType, privacy_level: privacyLevel, vault_root: vaultRoot, language }),
   pauseRecording: () => invoke<RecordingSession>('pause_recording'),
   resumeRecording: () => invoke<RecordingSession>('resume_recording'),
   stopRecording: () => invoke<RecordingSession>('stop_recording'),

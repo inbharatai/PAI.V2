@@ -16,7 +16,10 @@ fn main() {
 
 fn run(args: &[String]) -> Result<(), String> {
     let root = own_usb_root()?;
-    let report = validate_package(&root, ValidationScope::DesktopLaunch);
+    // PackageIdentity (not DesktopLaunch): the starter must reach the unlock
+    // screen fast; the full asset sweep runs in the desktop app's background
+    // DesktopLaunch validation, which gates the model server.
+    let report = validate_package(&root, ValidationScope::PackageIdentity);
     if args.iter().any(|arg| arg == "--verify-only") {
         // Do not serialize `report.package`: it embeds the complete manifest and
         // can contain hundreds of runtime/voice assets. The verification CLI
