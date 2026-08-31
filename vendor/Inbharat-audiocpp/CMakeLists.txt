@@ -21,6 +21,7 @@ option(IBAUDIO_WARNINGS_AS_ERRORS "Treat first-party warnings as errors" ON)
 option(IBAUDIO_ENABLE_ELF_VERSION_SCRIPT "Apply GNU-compatible ELF symbol version script" OFF)
 option(IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES "Compile experimental research modules (neural_codec, prosody_controller, voice_clone_engine) that are placeholders and not production-honest" OFF)
 option(IBAUDIO_REMOTE_PROVIDERS "Compile remote providers (e.g. Sarvam). OFF by default; an offline deployment contains no remote code path at all." OFF)
+option(IBAUDIO_ENABLE_SHERPA_ONNX "Compile the native sherpa-onnx IndicConformer ASR seam (fail-closed; no native inference wired in this cycle)" OFF)
 set(IBAUDIO_AUDIO_CPP_SOURCE_DIR "" CACHE PATH "Pristine audio.cpp checkout at the pinned commit")
 set(IBAUDIO_PINNED_AUDIO_CPP_COMMIT "26dcb5c4cf5aa016ae6285096a7b45f2671e5d17" CACHE STRING "Reviewed audio.cpp pin (release-0.6.1)")
 
@@ -89,6 +90,16 @@ endif()
 # Remote providers (e.g. Sarvam) are excluded from the default build entirely.
 if(IBAUDIO_REMOTE_PROVIDERS)
     list(APPEND IBAUDIO_SOURCES src/providers/sarvam_provider.cpp)
+endif()
+
+# Native sherpa-onnx IndicConformer seam: establishes the local-native route
+# for the `indicconformer-asr` family (Assamese + verified IndicConformer
+# languages) with a fail-closed asset probe. NO native sherpa-onnx runtime is
+# linked in this cycle — run_asr returns UNAVAILABLE; no inference is faked.
+if(IBAUDIO_ENABLE_SHERPA_ONNX)
+    list(APPEND IBAUDIO_SOURCES src/providers/sherpa_onnx_provider.cpp)
+    set(IBAUDIO_SHERPA_ONNX_INDICCONFORMER_ROOT "" CACHE PATH
+        "Local IndicConformer ONNX pack root (probed at runtime; empty = unconfigured = fail closed)")
 endif()
 
 if(IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER)
@@ -203,7 +214,9 @@ target_compile_definitions(ibaudio PRIVATE
     $<$<BOOL:${IBAUDIO_ENABLE_VULKAN_PROBE}>:IBAUDIO_ENABLE_VULKAN_PROBE=1>
     $<$<BOOL:${IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER}>:IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER=1>
     $<$<BOOL:${IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES}>:IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES=1>
-    $<$<BOOL:${IBAUDIO_REMOTE_PROVIDERS}>:IBAUDIO_REMOTE_PROVIDERS=1>)
+    $<$<BOOL:${IBAUDIO_REMOTE_PROVIDERS}>:IBAUDIO_REMOTE_PROVIDERS=1>
+    $<$<BOOL:${IBAUDIO_ENABLE_SHERPA_ONNX}>:IBAUDIO_ENABLE_SHERPA_ONNX=1>
+    $<$<BOOL:${IBAUDIO_ENABLE_SHERPA_ONNX}>:IBAUDIO_SHERPA_ONNX_INDICCONFORMER_ROOT="${IBAUDIO_SHERPA_ONNX_INDICCONFORMER_ROOT}">)
 
 # audio.cpp provider: static libs and the bundled Silero VAD model root. Upstream headers
 # are added as SYSTEM below (they are third-party and trip -Wshadow/-Wconversion).

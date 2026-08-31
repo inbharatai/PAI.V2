@@ -172,6 +172,23 @@ ibaudio_test_sanitizers(ibaudio_provider_tests)
 add_test(NAME ibaudio.provider COMMAND ibaudio_provider_tests)
 set_tests_properties(ibaudio.provider PROPERTIES TIMEOUT 30 LABELS "rc;provider")
 
+# sherpa-onnx IndicConformer seam tests (req 6/15 of the speech audit):
+# Assamese routes to the IndicConformer family (never Qwen3), missing
+# IndicConformer assets fail closed, and the local-native route survives an
+# offline policy. The provider + registry are internal hidden-visibility
+# modules, so the test compiles their sources directly.
+add_executable(ibaudio_sherpa_provider_tests
+    sherpa_provider_tests.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/provider.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/providers/sherpa_onnx_provider.cpp)
+target_include_directories(ibaudio_sherpa_provider_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+ibaudio_test_sanitizers(ibaudio_sherpa_provider_tests)
+add_test(NAME ibaudio.sherpa-provider COMMAND ibaudio_sherpa_provider_tests)
+set_tests_properties(ibaudio.sherpa-provider PROPERTIES TIMEOUT 30 LABELS "rc;provider;readiness;routing;stt")
+
 # audio.cpp runtime-status semantics tests (req 12/15 of the speech audit):
 # a compiled adapter with missing local model assets must report
 # inference_ready=0. The probe is an internal hidden-visibility module, so the
@@ -219,7 +236,7 @@ if(IBAUDIO_BUILD_SHARED AND WIN32)
             ibaudio_transport_tests ibaudio_speech_to_speech_tests
             ibaudio_personal_adaptation_tests ibaudio_speech_mesh_tests
             ibaudio_pack_registry_tests ibaudio_provider_tests
-            ibaudio_audio_cpp_status_tests
+            ibaudio_audio_cpp_status_tests ibaudio_sherpa_provider_tests
             ibaudio_innovation_tests ibaudio_innovation_experimental_tests
             ibaudio_wav_fuzzer)
         if(TARGET ${test_target})

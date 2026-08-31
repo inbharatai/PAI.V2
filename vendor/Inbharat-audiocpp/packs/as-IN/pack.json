@@ -22,6 +22,7 @@
   },
   "providers": {
     "stt_candidates": [
+      "sherpa-onnx-indicconformer",
       "ai4bharat-indicconformer-600m"
     ],
     "tts_candidates": [
