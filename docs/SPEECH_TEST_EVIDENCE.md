@@ -48,7 +48,8 @@ BUILD-ONLY-verified r25.1.
 
 | Claim | Evidence | Tier |
 |---|---|---|
-| Rust desktop speech code compiles on Linux | planned `ubuntu-latest` lane in desktop CI | CI |
+| Rust desktop speech code compiles + unit tests on Linux | `ubuntu-latest` matrix lane in desktop CI (tauri webkit2gtk deps installed) | CI |
+| Universal InBharat Audio library builds on Linux: all release-candidate test suites + ELF exports match the ABI v1 core manifest | `vendor-audio-linux` job in desktop CI (cmake/Ninja, adapter OFF, `check_abi.py` on `libibaudio.so`) | CI |
 | macOS desktop speech code compiles + unit tests | existing `macos-latest` lane in desktop CI | CI |
 | Raspberry Pi speech runtime | `distribution/pocket-ai-pi/` scripts (network-default-deny, real-artifacts-only) | SOURCE |
 
@@ -63,9 +64,14 @@ are fail-closed", nothing more.
 - **android-ci.yml** — runs `scripts/check_speech_language_sync.py` as a hard
   gate (Kotlin table == Rust/JSON table) and the voice unit tests.
 - **desktop-ci.yml** — Rust speech-contract + desktop gate tests on
-  windows-latest and macos-latest.
-- ABI invariant checks (export list == manifest) run wherever a matching
-  toolchain exists; on Windows this was a host dumpbin comparison, not CI.
+  windows-latest, ubuntu-latest, and macos-latest; `speech-language-sync` job
+  (same sync check, catching Rust/JSON-side table edits); `vendor-audio-linux`
+  job building the universal library, running all release-candidate test
+  suites, and ABI-checking `libibaudio.so` against the v1 core manifest.
+- ABI invariant checks now run in CI on ELF (Linux). The Windows-side export
+  comparison (dumpbin vs core manifest, 80/80) remains a host verification;
+  MSVC is not available on hosted runners for this project's BuildTools
+  configuration.
 
 ## Known limitations (do not silently "fix" in docs)
 
