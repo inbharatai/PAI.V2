@@ -172,7 +172,11 @@ if(IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER)
             "${_acb}/libyaml_vendor.a")
     endif()
     # The bundled Silero VAD model root (weights ship inside the pristine checkout).
-    set(IBAUDIO_AUDIO_CPP_SILERO_VAD_ROOT "${_ac}/assets/framework/models/silero_vad")
+    # CACHE so production builds can bake a package-local path instead: a drive
+    # binary probing the build host's checkout would report readiness only on
+    # the machine that built it. Defaults to the bundled checkout weights.
+    set(IBAUDIO_AUDIO_CPP_SILERO_VAD_ROOT "${_ac}/assets/framework/models/silero_vad" CACHE PATH
+        "Silero VAD model root (bundled pinned-checkout weights by default; production packages override with their own staged root)")
     # Licensed, integrity-verified ASR model root (e.g. Qwen/Qwen3-ASR-0.6B, Apache-2.0,
     # SHA-256 verified against the official LFS object id). Empty = ASR provider UNAVAILABLE.
     set(IBAUDIO_AUDIO_CPP_QWEN3_ASR_ROOT "" CACHE PATH "Licensed, hash-verified ASR model directory (e.g. Qwen3-ASR-0.6B)")
