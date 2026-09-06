@@ -39,6 +39,16 @@ class VoiceService : Service() {
     @Volatile
     private var monitoringStarted = false
 
+    /**
+     * True once startForeground() has run at least once. Finding A5: this
+     * service is started via startForegroundService(), so the system demands a
+     * startForeground() call within ~5 s EVEN IF the service stops itself
+     * immediately — calling only stopSelf() crashes with
+     * ForegroundServiceDidNotStartInTimeException on Android 12+.
+     */
+    @Volatile
+    private var foregroundStarted = false
+
     /** Serializes runtime STT/TTS rebuilds so rapid language switches never overlap on the IO pool. */
     private val reinitLock = Mutex()
 
@@ -153,10 +163,14 @@ class VoiceService : Service() {
         super.onCreate()
         createNotificationChannel()
         if (!AgentRuntimeGate.isEnabled()) {
-            stopSelf()
+            // Finding A5: startForegroundService() was used to launch us, so we
+            // must pass through startForeground() before stopping or the system
+            // raises ForegroundServiceDidNotStartInTimeException (crash on
+            // Android 12+). Promote briefly, then stop.
+            stopForegroundAndShutdown()
             return
         }
-        startForeground(NOTIFICATION_ID, createNotification("Listening locally — Mic active. Say 'UnoOne' or 'Listen' to give a command."))
+        startForegroundWithNotification("Listening locally — Mic active. Say 'UnoOne' or 'Listen' to give a command.")
         VoiceAgentRuntime.transition(VoiceAgentState.INITIALISING, "voice service created")
         Logger.i("VoiceService: Created")
     }
@@ -164,6 +178,9 @@ class VoiceService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (!AgentRuntimeGate.isEnabled()) {
             if (recorder.isRecording()) recorder.stop()
+            // Finding A5: same requirement as onCreate — a startForegroundService()
+            // launch must see startForeground() before stopSelf(startId).
+            startForegroundWithNotification("UnoOne voice is disabled")
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -575,6 +592,18 @@ class VoiceService : Service() {
     private fun updateNotification(text: String) {
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, createNotification(text))
+    }
+
+    private fun startForegroundWithNotification(text: String) {
+        if (foregroundStarted) return
+        startForeground(NOTIFICATION_ID, createNotification(text))
+        foregroundStarted = true
+    }
+
+    /** Gate-closed shutdown that still satisfies the FGS start contract (finding A5). */
+    private fun stopForegroundAndShutdown() {
+        runCatching { startForegroundWithNotification("UnoOne voice is disabled") }
+        stopSelf()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

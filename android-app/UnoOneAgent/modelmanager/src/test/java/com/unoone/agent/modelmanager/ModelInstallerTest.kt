@@ -289,10 +289,12 @@ class ModelInstallerTest {
 
     @Test
     fun skipsAssetArchiveWhenAlreadyExtracted() {
-        // Idempotent: a previously extracted archive directory means no asset copy is needed and the
-        // asset reader is never invoked.
+        // Idempotent: a fully extracted archive is proven by the completion
+        // marker (finding A2), so no asset copy is needed and the asset
+        // reader is never invoked.
         File(modelDir, "tts/espeak-ng-data").mkdirs()
         File(modelDir, "tts/espeak-ng-data/phondata").writeText("already")
+        File(modelDir, "tts/espeak-ng-data/${ModelInstaller.EXTRACTION_MARKER}").createNewFile()
         var reads = 0
         val assetInstaller = ModelInstaller(modelDir, dao = null) { _ ->
             reads++
@@ -353,11 +355,14 @@ class ModelInstallerTest {
 
     @Test
     fun skipsTarBz2ArchiveWhenAlreadyExtractedViaExtractsTo() {
-        // Idempotent: when the extractsTo directory already exists with content, the installer must
-        // skip without invoking the asset reader. This exercises archiveAlreadyExtracted with
-        // extractsTo (the strip-last-extension fallback would look for "pkg.tar" and never match).
+        // Idempotent: when the extractsTo directory exists AND carries the
+        // completion marker (finding A2), the installer must skip without
+        // invoking the asset reader. This exercises archiveAlreadyExtracted
+        // with extractsTo (the strip-last-extension fallback would look for
+        // "pkg.tar" and never match).
         val top = File(modelDir, "sherpa-asr-whisper/sherpa-onnx-whisper-tiny").apply { mkdirs() }
         File(top, "tiny-encoder.int8.onnx").writeText("already")
+        File(top, ModelInstaller.EXTRACTION_MARKER).createNewFile()
         var reads = 0
         val assetInstaller = ModelInstaller(modelDir, dao = null) { _ ->
             reads++
@@ -377,6 +382,52 @@ class ModelInstallerTest {
         assertTrue(result is ModelInstaller.InstallResult.Success)
         assertEquals(0, reads) // asset reader never invoked
         assertEquals("already", File(top, "tiny-encoder.int8.onnx").readText())
+    }
+
+    @Test
+    fun reextractsArchiveAfterInterruptedExtraction() {
+        // Finding A2 regression lock: an interrupted extraction leaves a
+        // PARTIAL output directory with no completion marker. The next
+        // install must re-extract (and re-verify the archive) instead of
+        // treating the partial directory as a complete install — the old
+        // "directory exists and is non-empty" check made the model
+        // unrecoverable once the archive was deleted.
+        val tarBytes = tarBz2(
+            mapOf(
+                "sherpa-onnx-whisper-tiny/tiny-encoder.int8.onnx" to "ENC".toByteArray(),
+                "sherpa-onnx-whisper-tiny/tiny-tokens.txt" to "TOK".toByteArray()
+            )
+        )
+        val assets = mapOf("sherpa-onnx-whisper-tiny.tar.bz2" to tarBytes)
+        val assetInstaller = ModelInstaller(modelDir, dao = null) { name ->
+            assets[name]?.let { ByteArrayInputStream(it) }
+        }
+        // Simulate the interrupted state: partial extraction, no marker.
+        val top = File(modelDir, "sherpa-asr-whisper/sherpa-onnx-whisper-tiny").apply { mkdirs() }
+        File(top, "tiny-encoder.int8.onnx").writeText("partial-garbage")
+
+        val descriptor = ModelDescriptor(
+            id = "sherpa-asr-whisper", folder = "sherpa-asr-whisper", type = ModelType.asr,
+            version = "whisper-tiny-int8", minRamMb = 0, backend = ModelBackend.cpu,
+            defaultLanguage = "multi",
+            files = listOf(
+                ModelFile(
+                    name = "sherpa-onnx-whisper-tiny.tar.bz2",
+                    url = "", sha256 = "", sizeBytes = tarBytes.size.toLong(),
+                    archive = true, asset = "sherpa-onnx-whisper-tiny.tar.bz2",
+                    extractsTo = "sherpa-onnx-whisper-tiny"
+                )
+            )
+        )
+        val result = runBlocking { assetInstaller.install(descriptor) }
+        assertTrue(result is ModelInstaller.InstallResult.Success)
+        // The partial file was overwritten by the fresh extraction and the
+        // completion marker now exists.
+        assertEquals("ENC", File(top, "tiny-encoder.int8.onnx").readText())
+        assertEquals("TOK", File(top, "tiny-tokens.txt").readText())
+        assertTrue(File(top, ModelInstaller.EXTRACTION_MARKER).exists())
+        // Archive deleted after the complete extraction.
+        assertFalse(File(modelDir, "sherpa-asr-whisper/sherpa-onnx-whisper-tiny.tar.bz2").exists())
     }
 
     // ---- helpers ----

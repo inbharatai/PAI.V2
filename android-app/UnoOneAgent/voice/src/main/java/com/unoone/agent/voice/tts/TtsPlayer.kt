@@ -8,9 +8,11 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.util.Logger
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
-import kotlin.coroutines.resume
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Universal, highly robust TextToSpeech engine supporting English and Indian languages (Hindi, Tamil, etc.).
@@ -23,8 +25,19 @@ class TtsPlayer : TextToSpeech.OnInitListener {
     private var pendingText: String? = null
     private var activeTrack: AudioTrack? = null
 
-    // 0C-9: UtteranceProgressListener for tracking TTS completion
-    private var onUtteranceDone: ((String) -> Unit)? = null
+    /**
+     * Finding A6: per-utterance completion callbacks keyed by the utterance id
+     * handed to speak(). The old single `onUtteranceDone` slot was clobbered by
+     * any concurrent await, and it was compared against an id speak() never
+     * used, so the fallback startsWith() match resumed the WRONG await.
+     */
+    private val awaitListeners = ConcurrentHashMap<String, (Boolean) -> Unit>()
+    private val utteranceCounter = AtomicLong()
+
+    private fun finishUtterance(utteranceId: String?, success: Boolean) {
+        val id = utteranceId ?: return
+        awaitListeners.remove(id)?.invoke(success)
+    }
 
     fun initialize(context: Context): Result<Unit> {
         return try {
@@ -44,18 +57,20 @@ class TtsPlayer : TextToSpeech.OnInitListener {
                 tts?.setLanguage(Locale.getDefault())
             }
 
-            // 0C-9: Register UtteranceProgressListener to track TTS completion
+            // 0C-9: Register UtteranceProgressListener to track TTS completion.
+            // Finding A6: done/error both complete the awaiting caller, but with
+            // distinct outcomes so a failed playback never reads as success.
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     Logger.d("TTS Player: Utterance started: $utteranceId")
                 }
                 override fun onDone(utteranceId: String?) {
                     Logger.d("TTS Player: Utterance completed: $utteranceId")
-                    onUtteranceDone?.invoke(utteranceId ?: "")
+                    finishUtterance(utteranceId, success = true)
                 }
                 override fun onError(utteranceId: String?) {
                     Logger.w("TTS Player: Utterance error: $utteranceId")
-                    onUtteranceDone?.invoke(utteranceId ?: "")
+                    finishUtterance(utteranceId, success = false)
                 }
             })
 
@@ -74,8 +89,16 @@ class TtsPlayer : TextToSpeech.OnInitListener {
 
     /**
      * Synthesize and speak text. Automatically detects Indian language context or falls back to English.
+     *
+     * @param utteranceId the id the UtteranceProgressListener reports for this
+     * utterance. [speakAwait] passes its own unique id so it resumes on exactly
+     * the utterance it started (finding A6).
      */
-    fun speak(text: String, languageCode: String = "en-IN"): Result<Unit> {
+    fun speak(
+        text: String,
+        languageCode: String = "en-IN",
+        utteranceId: String = DEFAULT_UTTERANCE_ID
+    ): Result<Unit> {
         val t = tts
         if (!isReady || t == null) {
             pendingText = text
@@ -95,7 +118,7 @@ class TtsPlayer : TextToSpeech.OnInitListener {
                 text,
                 TextToSpeech.QUEUE_FLUSH,
                 null,
-                "UnoOne_TTS_Playback"
+                utteranceId
             )
             if (speakResult == TextToSpeech.ERROR) {
                 Result.Error("System TTS rejected the utterance")
@@ -170,26 +193,35 @@ class TtsPlayer : TextToSpeech.OnInitListener {
 
     /**
      * 0C-9: Suspends until TTS finishes speaking the given text.
-     * Falls back to a 10-second timeout if UtteranceProgressListener doesn't fire.
+     *
+     * Finding A6: the awaited id and the id passed to speak() are now the SAME
+     * string, so this resumes on exactly the utterance it started. A failed
+     * playback ([UtteranceProgressListener.onError]) resumes as an Error. The
+     * safety timeout remains: if the listener never fires the await resumes
+     * (hands-free callers must not wedge on a silent engine), with a warning —
+     * and via a cancellable [withTimeoutOrNull] instead of a leaked raw timer
+     * thread per call.
      */
     suspend fun speakAwait(text: String, languageCode: String = "en-IN", timeoutMs: Long = 10_000L): Result<Unit> {
-        val result = speak(text, languageCode)
+        val utteranceId = "UnoOne_TTS_Await_${utteranceCounter.incrementAndGet()}"
+        val result = speak(text, languageCode, utteranceId)
         if (result is Result.Error) return result
 
-        return suspendCancellableCoroutine { cont ->
-            val utteranceId = "UnoOne_TTS_Await_${System.currentTimeMillis()}"
-            onUtteranceDone = { id ->
-                if (id == utteranceId || id.startsWith("UnoOne_TTS")) {
-                    onUtteranceDone = null
-                    if (cont.isActive) cont.resume(Result.Success(Unit))
+        val done = CompletableDeferred<Boolean>()
+        awaitListeners[utteranceId] = { success -> done.complete(success) }
+        return try {
+            val completed = withTimeoutOrNull(timeoutMs) { done.await() }
+            when (completed) {
+                true -> Result.Success(Unit)
+                false -> Result.Error("System TTS playback failed")
+                // Timeout: resume rather than wedge the hands-free flow, but say so loudly.
+                null -> {
+                    Logger.w("TTS Player: speakAwait timed out after ${timeoutMs}ms; resuming without a completion event")
+                    Result.Success(Unit)
                 }
             }
-            // Safety timeout: if the listener never fires, resume anyway
-            Thread {
-                Thread.sleep(timeoutMs)
-                onUtteranceDone = null
-                if (cont.isActive) cont.resume(Result.Success(Unit))
-            }.start()
+        } finally {
+            awaitListeners.remove(utteranceId)
         }
     }
 
@@ -205,7 +237,10 @@ class TtsPlayer : TextToSpeech.OnInitListener {
     fun release() {
         stop()
         stopPcmTrack()
-        onUtteranceDone = null
+        // Finding A6: fail any pending await instead of stranding it until the
+        // timeout — the engine it is waiting on is being shut down right now.
+        for (listener in awaitListeners.values) runCatching { listener.invoke(false) }
+        awaitListeners.clear()
         try {
             tts?.shutdown()
         } catch (e: Exception) {
@@ -227,5 +262,10 @@ class TtsPlayer : TextToSpeech.OnInitListener {
             Logger.e("TTS Player: Error releasing AudioTrack", e)
         }
         activeTrack = null
+    }
+
+    companion object {
+        /** Utterance id for fire-and-forget [speak] calls nobody is awaiting. */
+        const val DEFAULT_UTTERANCE_ID = "UnoOne_TTS_Playback"
     }
 }

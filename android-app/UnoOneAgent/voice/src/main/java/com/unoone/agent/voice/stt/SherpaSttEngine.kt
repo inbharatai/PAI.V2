@@ -212,6 +212,14 @@ class SherpaSttEngine(
         return try {
             stream = rec.createStream()
             stream.acceptWaveform(samples, 16000)
+            // Tail flush (finding A1): the streaming zipformer keeps a look-ahead
+            // window inside the encoder, so the trailing ~0.5 s of the utterance
+            // used to stay queued and was silently dropped — commands lost their
+            // last word. Follow the official sherpa-onnx whole-file recipe: pad
+            // 0.8 s of trailing silence and mark the input finished so the
+            // encoder flushes everything it has seen, then drain and read.
+            stream.acceptWaveform(FloatArray(TAIL_FLUSH_PAD_SAMPLES), 16000)
+            stream.inputFinished()
             // Drain the streaming decoder: feed the whole utterance at once, then keep decoding
             // while frames remain queued. This turns the streaming recognizer into a single-shot
             // transcriber (equivalent to offline decoding) for a complete captured clip.
@@ -272,6 +280,14 @@ class SherpaSttEngine(
     companion object {
         /** The top directory the whisper-tiny tarball extracts to inside a model folder. */
         const val WHISPER_TOP_DIR = "sherpa-onnx-whisper-tiny"
+
+        /**
+         * Trailing silence appended before [OnlineStream.inputFinished] on the
+         * streaming transducer (0.8 s at 16 kHz) — the official sherpa-onnx
+         * whole-utterance recipe, so the encoder's look-ahead flushes the
+         * final ~0.5 s of speech instead of silently dropping it (finding A1).
+         */
+        const val TAIL_FLUSH_PAD_SAMPLES = 12800
 
         data class WhisperFiles(
             val encoder: File,

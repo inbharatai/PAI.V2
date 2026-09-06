@@ -113,13 +113,33 @@ class VoiceLanguageCanonicalizeTest {
         assertEquals(12, VoiceLanguage.CANONICAL_ALIASES.size)
     }
 
-    // ---- The mirror must not disturb the existing short-code runtime paths ----
+    // ---- normalize() now routes through the canonical contract (finding A8) ----
     @Test
-    fun canonicalContractDoesNotChangeShortCodeNormalization() {
-        // `normalize` remains the app-internal en/hi runtime selector;
-        // `canonicalize` is the cross-platform contract beside it.
+    fun normalizeRoutesThroughCanonicalize() {
+        // `normalize` is the app-internal en/hi policy selector, but it derives
+        // from `canonicalize` — it must never re-root a valid alias of a
+        // supported language to the wrong voice.
         assertEquals("hi", VoiceLanguage.normalize("hi"))
+        assertEquals("hi", VoiceLanguage.normalize("hi-IN"))
+        assertEquals("hi", VoiceLanguage.normalize("hi-in"))
+        assertEquals("hi", VoiceLanguage.normalize("hinglish"))
+        assertEquals("hi", VoiceLanguage.normalize("hi-en-codemix"))
+        assertEquals("en", VoiceLanguage.normalize("en"))
+        assertEquals("en", VoiceLanguage.normalize("en-IN"))
         assertEquals("en", VoiceLanguage.normalize(null))
         assertEquals("hi-IN", VoiceLanguage.canonicalize("hi"))
+    }
+
+    @Test
+    fun normalizeStillFallsBackForUnenabledLanguages() {
+        // Well-formed but not an enabled Android voice (as-IN has no production
+        // IndicConformer engine yet; fr is global) — policy falls back to the
+        // default voice rather than pretending to speak it.
+        assertEquals("en", VoiceLanguage.normalize("as-IN"))
+        assertEquals("en", VoiceLanguage.normalize("as"))
+        assertEquals("en", VoiceLanguage.normalize("fr"))
+        // Malformed tags fall back too — the pref must always yield a language.
+        assertEquals("en", VoiceLanguage.normalize("french café"))
+        assertEquals("en", VoiceLanguage.normalize(""))
     }
 }

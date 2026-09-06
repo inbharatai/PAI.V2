@@ -1,5 +1,6 @@
 package com.unoone.agent.voice
 
+import com.unoone.agent.core.util.Logger
 import com.unoone.agent.voice.stt.SttMode
 
 /**
@@ -143,8 +144,35 @@ object VoiceLanguage {
 
     fun isSupported(code: String): Boolean = SUPPORTED.any { it.code == code }
 
-    fun normalize(code: String?): String =
-        if (!code.isNullOrBlank() && isSupported(code)) code else DEFAULT
+    /**
+     * Production routing gateway: maps a stored pref, pack, or command tag to one
+     * of the enabled short codes ("en"/"hi").
+     *
+     * Finding A8: this used to be a bare `isSupported(code) ? code : DEFAULT`,
+     * which silently re-rooted valid alias forms of a SUPPORTED language — a
+     * pref of "hi-IN" or "hinglish" became the English voice, with no signal.
+     * It now routes through [canonicalize], so every alias in the shared
+     * speech table resolves to its real voice; only genuinely unknown or
+     * malformed tags fall back to the default, and that decision is logged so
+     * a corrupted pref is visible in diagnostics instead of silent.
+     */
+    fun normalize(code: String?): String {
+        val canonical = canonicalize(code)
+        if (canonical == null) {
+            Logger.w("VoiceLanguage: malformed or empty language tag \"$code\"; using default voice")
+            return DEFAULT
+        }
+        return when (canonical) {
+            "hi-IN", "hi-en-codemix" -> "hi"
+            "en-IN" -> "en"
+            // Unknown-but-well-formed (e.g. "as-IN", "fr") or the auto sentinel:
+            // no enabled Android voice matches, so the policy layer falls back.
+            else -> {
+                Logger.w("VoiceLanguage: \"$canonical\" is not an enabled voice language; using default voice")
+                DEFAULT
+            }
+        }
+    }
 
     fun displayName(code: String): String =
         SUPPORTED.firstOrNull { it.code == code }?.display ?: displayName(DEFAULT)
