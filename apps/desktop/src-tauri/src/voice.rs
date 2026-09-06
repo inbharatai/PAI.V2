@@ -236,7 +236,14 @@ impl VoiceModule {
             }
         }
 
-        let output_prefix = temp_dir.join("transcription").to_string_lossy().to_string();
+        // Unique per-call output prefix: two concurrent transcriptions used
+        // to share `transcription.txt`, each reading (and deleting) the
+        // other's transcript — a cross-request leak and a lost-result race.
+        let call_id = uuid::Uuid::new_v4().simple().to_string();
+        let output_prefix = temp_dir
+            .join(format!("transcription-{call_id}"))
+            .to_string_lossy()
+            .to_string();
         // The session language is a canonical BCP-47 tag; the Whisper CLI
         // wants the base code (en, hi, …). `auto` passes through.
         let cli_language = legacy_cli_language(&self.config.language);
@@ -262,23 +269,41 @@ impl VoiceModule {
         match result {
             Ok(output) => {
                 if output.status.success() {
-                    // Read the transcription output file (Whisper appends .txt)
-                    let output_file = temp_dir.join("transcription.txt");
-                    let text = std::fs::read_to_string(&output_file)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string();
-
-                    // Clean up temp file
+                    // Read the transcription output file (Whisper appends .txt).
+                    let output_file = temp_dir.join(format!("transcription-{call_id}.txt"));
+                    let read = std::fs::read_to_string(&output_file);
+                    // Always clean up, success or not — the transcript is
+                    // transient user speech and must not linger in temp.
                     let _ = std::fs::remove_file(&output_file);
-
-                    SttResult {
-                        text,
-                        language: self.config.language.clone(),
-                        confidence: None,
-                        processing_time_ms: start.elapsed().as_millis() as u64,
-                        status: VoiceCapabilityStatus::Available,
-                        error: None,
+                    match read {
+                        Ok(raw) if !raw.trim().is_empty() => SttResult {
+                            text: raw.trim().to_string(),
+                            language: self.config.language.clone(),
+                            confidence: None,
+                            processing_time_ms: start.elapsed().as_millis() as u64,
+                            status: VoiceCapabilityStatus::Available,
+                            error: None,
+                        },
+                        // A successful exit with a missing or empty output
+                        // file is a failure, never a silent empty success.
+                        Ok(_) => SttResult {
+                            text: String::new(),
+                            language: self.config.language.clone(),
+                            confidence: None,
+                            processing_time_ms: start.elapsed().as_millis() as u64,
+                            status: VoiceCapabilityStatus::Error,
+                            error: Some(
+                                "Whisper produced no transcript text".to_string(),
+                            ),
+                        },
+                        Err(e) => SttResult {
+                            text: String::new(),
+                            language: self.config.language.clone(),
+                            confidence: None,
+                            processing_time_ms: start.elapsed().as_millis() as u64,
+                            status: VoiceCapabilityStatus::Error,
+                            error: Some(format!("Whisper output unreadable: {}", e)),
+                        },
                     }
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -353,8 +378,12 @@ impl VoiceModule {
             }
         };
 
-        let output_file =
-            output_dir.join(format!("tts_{}.wav", chrono::Utc::now().timestamp_millis()));
+        // Unique per-call output name: the old millisecond timestamp collided
+        // for concurrent requests.
+        let output_file = output_dir.join(format!(
+            "tts_{}.wav",
+            uuid::Uuid::new_v4().simple()
+        ));
 
         let model_path = match &self.config.piper_model_path {
             Some(path) => path.clone(),
@@ -437,26 +466,56 @@ impl VoiceModule {
         };
 
         if output.status.success() && output_file.exists() {
-            // Estimate duration from file size (WAV at 22050 Hz, 16-bit mono ≈ 44100 bytes/sec)
-            let file_size = std::fs::metadata(&output_file)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            let duration = file_size as f32 / 44100.0;
-
-            TtsResult {
-                audio_path: Some(output_file.to_string_lossy().to_string()),
-                duration_seconds: Some(duration),
-                sample_rate: 22050,
-                status: VoiceCapabilityStatus::Available,
-                error: None,
-                processing_time_ms: start.elapsed().as_millis() as u64,
+            // Parse the actual WAV header instead of assuming 22050 Hz mono
+            // 16-bit: Piper voices have per-model sample rates (16000, 22050,
+            // 44100…) and the file-size heuristic produced wrong durations
+            // and wrong rates for every voice that is not 22050.
+            match hound::WavReader::open(&output_file) {
+                Ok(reader) => {
+                    let spec = reader.spec();
+                    if spec.sample_rate == 0 || reader.duration() == 0 {
+                        let _ = std::fs::remove_file(&output_file);
+                        return TtsResult {
+                            audio_path: None,
+                            duration_seconds: None,
+                            sample_rate: 0,
+                            status: VoiceCapabilityStatus::Error,
+                            error: Some("Piper produced an empty WAV stream".to_string()),
+                            processing_time_ms: start.elapsed().as_millis() as u64,
+                        };
+                    }
+                    let duration = reader.duration() as f32 / spec.sample_rate as f32;
+                    let sample_rate = spec.sample_rate;
+                    drop(reader);
+                    TtsResult {
+                        audio_path: Some(output_file.to_string_lossy().to_string()),
+                        duration_seconds: Some(duration),
+                        sample_rate,
+                        status: VoiceCapabilityStatus::Available,
+                        error: None,
+                        processing_time_ms: start.elapsed().as_millis() as u64,
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&output_file);
+                    TtsResult {
+                        audio_path: None,
+                        duration_seconds: None,
+                        sample_rate: 0,
+                        status: VoiceCapabilityStatus::Error,
+                        error: Some(format!("Piper produced an invalid WAV file: {}", e)),
+                        processing_time_ms: start.elapsed().as_millis() as u64,
+                    }
+                }
             }
         } else {
+            // A failed run may still have written a partial WAV — remove it.
+            let _ = std::fs::remove_file(&output_file);
             let stderr = String::from_utf8_lossy(&output.stderr);
             TtsResult {
                 audio_path: None,
                 duration_seconds: None,
-                sample_rate: 22050,
+                sample_rate: 0,
                 status: VoiceCapabilityStatus::Error,
                 error: Some(format!("Piper synthesis failed: {}", stderr.trim())),
                 processing_time_ms: start.elapsed().as_millis() as u64,
@@ -574,24 +633,34 @@ pub(crate) fn discover_voice_assets(vault_root: &str, language: &str) -> VoiceCo
         &["piper.exe"],
     );
 
-    // Model discovery from manifest or default paths
-    let whisper_model = discover_model_path(
-        vault_root,
-        &[
-            "models.desktop.whisper.path",
-            "models.desktop.whisper_model.path",
-        ],
-        "MODELS/DESKTOP/whisper-base.en.bin",
-    );
+    // Model discovery from the package manifest or default paths. The
+    // manifest lookup now reads the schema-v2 structure first
+    // (`platforms.<os>.voice` entries with kinds WHISPER_MODEL /
+    // PIPER_MODEL) — the old dotted keys belong to schema-v1 manifests the
+    // product no longer ships, so they never matched and discovery silently
+    // ran on hardcoded defaults that merely happened to coincide with the
+    // staged layout.
+    let whisper_model = discover_model_path_v2(vault_root, &["WHISPER_MODEL"]).unwrap_or_else(|| {
+        discover_model_path(
+            vault_root,
+            &[
+                "models.desktop.whisper.path",
+                "models.desktop.whisper_model.path",
+            ],
+            "MODELS/DESKTOP/whisper-base.en.bin",
+        )
+    });
 
-    let piper_model = discover_model_path(
-        vault_root,
-        &[
-            "models.desktop.piper.path",
-            "models.desktop.piper_model.path",
-        ],
-        "MODELS/DESKTOP/voice.onnx",
-    );
+    let piper_model = discover_model_path_v2(vault_root, &["PIPER_MODEL"]).unwrap_or_else(|| {
+        discover_model_path(
+            vault_root,
+            &[
+                "models.desktop.piper.path",
+                "models.desktop.piper_model.path",
+            ],
+            "MODELS/DESKTOP/voice.onnx",
+        )
+    });
 
     let piper_config = if piper_model.ends_with(".onnx") {
         Some(piper_model.clone() + ".json")
@@ -650,6 +719,46 @@ fn discover_model_path(vault_root: &str, manifest_keys: &[&str], default: &str) 
     default.to_string()
 }
 
+/// Schema-v2 model discovery: the package manifest lists the legacy voice
+/// models as `platforms.<os>.voice` entries with `kind` WHISPER_MODEL /
+/// PIPER_MODEL and a package-relative `path`. Returns the first entry whose
+/// file actually exists; a manifest naming a missing file is ignored rather
+/// than trusted.
+fn discover_model_path_v2(vault_root: &str, kinds: &[&str]) -> Option<String> {
+    let section = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let manifest_path = PathBuf::from(vault_root).join("manifest.json");
+    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let entries = manifest
+        .get("platforms")?
+        .get(section)?
+        .get("voice")?
+        .as_array()?;
+    for entry in entries {
+        // Entries without a kind or path are skipped, not treated as a
+        // failed lookup.
+        let Some(kind) = entry.get("kind").and_then(|k| k.as_str()) else {
+            continue;
+        };
+        if !kinds.contains(&kind) {
+            continue;
+        }
+        let Some(path) = entry.get("path").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        if PathBuf::from(vault_root).join(path).exists() {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
 fn get_nested_string<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a str> {
     let mut current = value;
     for segment in path.split('.') {
@@ -684,16 +793,52 @@ pub async fn transcribe_audio(
     vault_root: String,
     language: String,
 ) -> SttResult {
-    let config = discover_voice_assets(&vault_root, &language);
-    let module = VoiceModule::new(config);
-    module.transcribe(&audio_path)
+    // Production speech goes through the SpeechRouter: InBharat Audio
+    // (audio.cpp / Qwen3-ASR) first, the legacy Whisper plane only as the
+    // explicit, coverage-gated fallback. Calling VoiceModule directly here
+    // was the router bypass the audit flagged.
+    let router = crate::speech::product_router(&vault_root);
+    match router.transcribe(std::path::Path::new(&audio_path), &language) {
+        Ok(result) => SttResult {
+            text: result.text,
+            language: result.language.as_str().to_string(),
+            confidence: None,
+            processing_time_ms: result.processing_time_ms,
+            status: VoiceCapabilityStatus::Available,
+            error: None,
+        },
+        Err(error) => SttResult {
+            text: String::new(),
+            language,
+            confidence: None,
+            processing_time_ms: 0,
+            status: VoiceCapabilityStatus::Error,
+            error: Some(error.to_string()),
+        },
+    }
 }
 
 #[tauri::command]
 pub async fn synthesize_speech(text: String, vault_root: String, language: String) -> TtsResult {
-    let config = discover_voice_assets(&vault_root, &language);
-    let module = VoiceModule::new(config);
-    module.synthesize(&text)
+    let router = crate::speech::product_router(&vault_root);
+    match router.synthesize(&text, &language) {
+        Ok(result) => TtsResult {
+            audio_path: Some(result.audio_path.to_string_lossy().to_string()),
+            duration_seconds: result.duration_seconds,
+            sample_rate: result.sample_rate,
+            status: VoiceCapabilityStatus::Available,
+            error: None,
+            processing_time_ms: result.processing_time_ms,
+        },
+        Err(error) => TtsResult {
+            audio_path: None,
+            duration_seconds: None,
+            sample_rate: 0,
+            status: VoiceCapabilityStatus::Error,
+            error: Some(error.to_string()),
+            processing_time_ms: 0,
+        },
+    }
 }
 
 /// Map a canonical BCP-47 tag from `unoone-speech-contracts` to the legacy
@@ -914,6 +1059,73 @@ mod legacy_voice_tests {
         assert_eq!(legacy_cli_language("as-IN"), "as");
         assert_eq!(legacy_cli_language("en-US"), "en");
         assert_eq!(legacy_cli_language("auto"), "auto");
+    }
+
+    /// Schema-v2 manifest discovery: the shipped package manifest lists the
+    /// legacy voice models under `platforms.windows.voice` with kinds
+    /// WHISPER_MODEL / PIPER_MODEL. Discovery must read that structure —
+    /// the old schema-v1 dotted keys never matched, so the manifest lookup
+    /// was dead code and the hardcoded defaults carried the product.
+    #[test]
+    fn discover_model_path_reads_schema_v2_voice_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // Stage two model files at NON-default paths so the test can tell
+        // manifest-driven discovery apart from the hardcoded fallback.
+        let whisper_rel = "MODELS/DESKTOP/custom/whisper-custom.bin";
+        let piper_rel = "MODELS/DESKTOP/custom/piper-custom.onnx";
+        for rel in [whisper_rel, piper_rel] {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"model").unwrap();
+        }
+        let voice_entries = serde_json::json!([
+            {"id": "model-whisper-base.en", "kind": "WHISPER_MODEL",
+             "path": whisper_rel, "sha256": "x", "required": true},
+            {"id": "model-voice", "kind": "PIPER_MODEL",
+             "path": piper_rel, "sha256": "y", "required": true},
+            {"id": "some-other-entry", "kind": "VOICE_RUNTIME",
+             "path": "RUNTIMES/WINDOWS/VOICE/piper.exe", "sha256": "z", "required": true},
+            // Entries without a kind or path must be skipped, not
+            // treated as a failed lookup.
+            {"id": "kindless", "path": "whatever"}
+        ]);
+        // The lookup is sectioned by host OS — provide the same entries under
+        // every platform so the test is host-agnostic.
+        let manifest = serde_json::json!({
+            "schema_version": "2",
+            "platforms": {
+                "windows": {"voice": voice_entries},
+                "macos": {"voice": voice_entries},
+                "linux": {"voice": voice_entries}
+            }
+        });
+        std::fs::write(root.join("manifest.json"), manifest.to_string()).unwrap();
+        let root_str = root.to_string_lossy().to_string();
+        assert_eq!(
+            discover_model_path_v2(&root_str, &["WHISPER_MODEL"]).unwrap(),
+            whisper_rel
+        );
+        assert_eq!(
+            discover_model_path_v2(&root_str, &["PIPER_MODEL"]).unwrap(),
+            piper_rel
+        );
+        // A manifest naming a missing file is ignored.
+        std::fs::remove_file(root.join(piper_rel)).unwrap();
+        assert_eq!(discover_model_path_v2(&root_str, &["PIPER_MODEL"]), None);
+
+        // End to end: discover_voice_assets uses the manifest paths.
+        let config = discover_voice_assets(&root_str, "en-IN");
+        assert_eq!(
+            config.whisper_model_path.as_deref(),
+            Some(root.join(whisper_rel).to_str().unwrap())
+        );
+        // The piper model fell back once its manifest entry stopped
+        // resolving — it must not stay pinned to a deleted manifest path.
+        assert_ne!(
+            config.piper_model_path.as_deref(),
+            Some(root.join(piper_rel).to_str().unwrap())
+        );
     }
 
     #[test]

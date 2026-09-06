@@ -35,6 +35,33 @@ pub enum SpeechRoutePolicy {
     InbharatAudioThenLegacy,
 }
 
+/// The product policy used by every production speech entry point (Tauri
+/// voice commands, transient recording transcription): InBharat Audio first —
+/// the audio.cpp/Qwen3/OmniVoice plane the pendrive stages and acceptance-
+/// tests — with the legacy Whisper/Piper plane as an explicit fallback for
+/// the languages it actually serves (English only, per the provider table).
+/// Nothing reaches the legacy plane without passing through the InBharat
+/// gate first, and no backend ever serves a language outside its declared
+/// coverage.
+pub fn product_router(vault_root: &str) -> SpeechRouter {
+    SpeechRouter::new(vault_root, SpeechRoutePolicy::InbharatAudioThenLegacy)
+}
+
+/// Does the legacy backend's declared coverage include the canonical form of
+/// `language`? The legacy plane must never silently serve a language its
+/// provider table does not list (whisper-base.en is English-only).
+fn legacy_serves(backend: &LegacyVoiceBackend, asr: bool, language: &str) -> bool {
+    let Ok(tag) = unoone_speech_contracts::canonicalize(language) else {
+        return false;
+    };
+    let coverage = if asr {
+        backend.asr_languages()
+    } else {
+        backend.tts_languages()
+    };
+    coverage.iter().any(|lang| lang.as_str() == tag.as_str())
+}
+
 /// The product-facing speech router.
 pub struct SpeechRouter {
     vault_root: String,
@@ -78,7 +105,15 @@ impl SpeechRouter {
             Err(inbharat_error) => match self.policy {
                 SpeechRoutePolicy::InbharatAudioOnly => Err(inbharat_error),
                 SpeechRoutePolicy::InbharatAudioThenLegacy => {
-                    self.legacy_backend(language)
+                    let legacy = self.legacy_backend(language);
+                    // The legacy plane serves only the languages its provider
+                    // table declares (whisper-base.en: English). Falling back
+                    // for, say, Hindi would silently transcribe with the wrong
+                    // engine and present the result as if it were authoritative.
+                    if !legacy_serves(&legacy, true, language) {
+                        return Err(inbharat_error);
+                    }
+                    legacy
                         .transcribe(audio_path, language)
                         .map_err(|legacy_error| {
                             SpeechError::Backend(format!(
@@ -97,7 +132,14 @@ impl SpeechRouter {
             Err(inbharat_error) => match self.policy {
                 SpeechRoutePolicy::InbharatAudioOnly => Err(inbharat_error),
                 SpeechRoutePolicy::InbharatAudioThenLegacy => {
-                    self.legacy_backend(language)
+                    let legacy = self.legacy_backend(language);
+                    // Same coverage rule as transcription: Piper serves
+                    // English only; never fall back for a language the
+                    // legacy plane does not declare.
+                    if !legacy_serves(&legacy, false, language) {
+                        return Err(inbharat_error);
+                    }
+                    legacy
                         .synthesize(text, language)
                         .map_err(|legacy_error| {
                             SpeechError::Backend(format!(
@@ -410,6 +452,41 @@ mod tests {
         assert_eq!(status.backend_name, "inbharat-audio");
         assert!(backend.asr_languages().is_empty());
         assert!(backend.tts_languages().is_empty());
+    }
+
+    #[test]
+    fn fallback_refuses_languages_the_legacy_plane_does_not_serve() {
+        let root = empty_root();
+        let root_str = root.path().to_string_lossy().to_string();
+        let router = SpeechRouter::new(root_str, SpeechRoutePolicy::InbharatAudioThenLegacy);
+
+        // InBharat gate fails (no SPEECH config) AND the language is outside
+        // the legacy plane's declared coverage (whisper-base.en is English
+        // only). The legacy plane must NOT be consulted — the surfaced error
+        // is the InBharat one alone.
+        let audio = root.path().join("capture.wav");
+        std::fs::write(&audio, b"RIFF").unwrap();
+        let err = router.transcribe(&audio, "hi-IN").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            !message.contains("legacy voice plane also failed"),
+            "legacy must not run for an uncovered language, got: {message}"
+        );
+        let err = router.synthesize("hello", "hi").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            !message.contains("legacy voice plane also failed"),
+            "legacy must not run for an uncovered language, got: {message}"
+        );
+
+        // English IS inside the legacy coverage, so the fallback path runs
+        // (and fails closed on the missing assets — proving it was reached).
+        let err = router.transcribe(&audio, "en-IN").unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("legacy voice plane also failed"),
+            "fallback must run for a covered language, got: {message}"
+        );
     }
 
     #[test]

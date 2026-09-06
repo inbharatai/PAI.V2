@@ -251,7 +251,11 @@ impl ModelManager {
         let mut file = std::fs::File::open(path)
             .map_err(|e| format!("Failed to open {} for hashing: {}", path.display(), e))?;
         let mut hasher = sha2::Sha256::new();
-        let mut buffer = [0u8; 8192];
+        // Heap buffer, 512 KiB: hashed files are multi-GB models on removable
+        // media, where 8 KiB reads turn one hash into ~1M syscalls. Heap, not
+        // stack, mirrors the bharat_audio.rs hardening so deep call stacks
+        // cannot overflow.
+        let mut buffer = vec![0u8; 512 * 1024];
         loop {
             let n = file
                 .read(&mut buffer)
@@ -359,6 +363,7 @@ impl ModelManager {
         port: u16,
         model_path: &str,
         vault_root: &str,
+        disk_sha256: Option<String>,
     ) -> Result<ServerIdentity, String> {
         let client = reqwest::Client::new();
         let base = format!("http://127.0.0.1:{}", port);
@@ -407,12 +412,11 @@ impl ModelManager {
         // The manifest SHA-256 is compared case-insensitively. Under MODEL_IDENTITY_POLICY
         // a declared hash is enforced; the previous code SKIPPED the check when
         // the manifest carried no hash, so a substituted model passed silently.
-        let model_full_path = PathBuf::from(model_path);
-        let disk_hash = if model_full_path.exists() {
-            Some(Self::sha256_file(&model_full_path)?)
-        } else {
-            None
-        };
+        // The disk hash is computed once by start_server BEFORE the server
+        // spawns, so a tampered model never gets an inference process. Do not
+        // re-hash here: the poll loop would re-read the multi-GB model off
+        // removable media on every attempt while it is already loaded.
+        let disk_hash = disk_sha256;
         let expected_hash = Self::read_manifest_model_hash(vault_root, model_path);
         unoone_runtime_select::verify_model_identity(
             &unoone_runtime_select::ModelIdentityFacts {
@@ -806,6 +810,22 @@ impl ModelManager {
             return Err(format!("Model file not found: {:?}", config.model_path));
         }
 
+        // Strict identity policy requires a disk hash compared against the
+        // manifest hash. Hash the model ONCE here, BEFORE spawning
+        // llama-server:
+        //   (a) a tampered model is refused before any inference process is
+        //       even started on it;
+        //   (b) the verification poll loop below must never re-read a
+        //       multi-GB file off removable media — re-hashing after the
+        //       model is already loaded saturates the USB drive for minutes
+        //       while the UI is stuck showing "no model loaded" even though
+        //       the server is up and healthy.
+        *self.status.lock().unwrap() = ModelStatus::Loading;
+        let disk_sha256 = Some(Self::sha256_file(&model_path).map_err(|e| {
+            *self.status.lock().unwrap() = ModelStatus::Error;
+            e
+        })?);
+
         // Find an available port dynamically so multiple runs cannot collide.
         let port = Self::find_free_port()?;
 
@@ -922,7 +942,7 @@ impl ModelManager {
             .is_ok()
             {
                 // Port is open. Verify the server identity before claiming LOADED.
-                match Self::verify_server_identity(port, &config.model_path, vault_root).await {
+                match Self::verify_server_identity(port, &config.model_path, vault_root, disk_sha256.clone()).await {
                     Ok(mut identity) => {
                         identity.pid = pid;
                         *self.server_identity.lock().unwrap() = Some(identity);
@@ -1432,11 +1452,14 @@ mod tests {
             .parse::<u16>()
             .unwrap();
 
-        // Verify that the manifest hash mismatch is caught even though the server looks healthy.
+        // Verify that the manifest hash mismatch is caught even though the
+        // server looks healthy. start_server hashes the model before spawn;
+        // mirror that by passing the true disk hash.
         let result = ModelManager::verify_server_identity(
             port,
             model_path.to_str().unwrap(),
             vault_dir.to_str().unwrap(),
+            Some(ModelManager::sha256_file(&model_path).unwrap()),
         )
         .await;
         assert!(result.is_err(), "Expected hash mismatch error");
@@ -1481,6 +1504,7 @@ mod tests {
             port,
             "/nonexistent/model.gguf",
             vault_dir.to_str().unwrap(),
+            None,
         )
         .await;
         assert!(result.is_err(), "Expected missing model id error");
@@ -1536,6 +1560,7 @@ mod tests {
             port,
             model_path.to_str().unwrap(),
             vault_dir.to_str().unwrap(),
+            Some(expected_hash.clone()),
         )
         .await;
         assert!(
@@ -1586,6 +1611,7 @@ mod tests {
             port,
             model_path.to_str().unwrap(),
             vault_dir.to_str().unwrap(),
+            Some(ModelManager::sha256_file(&model_path).unwrap()),
         )
         .await;
         assert!(

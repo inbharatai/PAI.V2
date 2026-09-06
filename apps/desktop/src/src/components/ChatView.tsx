@@ -25,7 +25,12 @@ export function ChatView() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
-  const [modelStatus, setModelStatus] = useState<'unknown' | 'loaded' | 'not_loaded' | 'error'>('unknown');
+  // 'loading' = the model server is provably on its way up (startup phase
+  // still inside the pre-Ready model path). check_model_health rejects with
+  // "manager not initialized" during that whole window, so a plain failure
+  // must NOT be shown as "no model loaded" — that's the bug where the chat
+  // claimed nothing was loaded while Gemma was actually up.
+  const [modelStatus, setModelStatus] = useState<'unknown' | 'loaded' | 'loading' | 'not_loaded' | 'error'>('unknown');
   const [serverError, setServerError] = useState('');
   const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
   // Stable Harness conversation namespace for this chat session. Harness memory
@@ -46,6 +51,31 @@ export function ChatView() {
       return true;
     } catch (err) {
       console.error('[ChatView] check_model_health failed:', err);
+      // Before declaring "no model loaded", ask the startup coordinator
+      // whether the model path is still in progress. During asset sweep,
+      // backend selection and model start/verify, the health command has
+      // no manager to report on yet — that is "loading", not "not loaded".
+      try {
+        const status = await tauriApi.getStartupStatus();
+        const modelPathPhases = [
+          'STARTING',
+          'VALIDATING_PAI',
+          'PAI_CONNECTED',
+          'CHECKING_ASSETS',
+          'WAITING_FOR_UNLOCK',
+          'UNLOCKING',
+          'SCANNING_HOST',
+          'SELECTING_BACKEND',
+          'STARTING_MODEL',
+          'VERIFYING_MODEL',
+        ];
+        if (modelPathPhases.includes(status.phase)) {
+          setModelStatus('loading');
+          return false;
+        }
+      } catch {
+        // Startup status unavailable — fall through to not_loaded below.
+      }
       setModelStatus('not_loaded');
       return false;
     }
@@ -246,6 +276,11 @@ export function ChatView() {
             <p style={{ color: 'var(--text-secondary, #888)', fontSize: '14px' }}>
               Private AI, running on your encrypted USB. Ask anything.
             </p>
+            {(modelStatus === 'loading' || modelStatus === 'unknown') && (
+              <div style={{ marginTop: '12px', padding: '12px 16px', background: 'var(--bg-tertiary, #1a1a2e)', borderRadius: '8px', fontSize: '13px', color: 'var(--text-secondary, #888)' }}>
+                Model loading… validating the USB package and starting Gemma 4. First load can take a few minutes.
+              </div>
+            )}
             {modelStatus === 'not_loaded' && (
               <div style={{ marginTop: '12px', padding: '12px 16px', background: 'var(--bg-tertiary, #1a1a2e)', borderRadius: '8px', fontSize: '13px', color: 'var(--text-secondary, #888)' }}>
                 No model loaded. Open <strong>Model Manager</strong> to load Gemma 4.

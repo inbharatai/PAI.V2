@@ -626,14 +626,17 @@ fn check_runtime_status(
     Ok(())
 }
 
-/// Manifest sanity + package integrity gate + CLI resolution + the runtime
-/// readiness query. Order is fail-closed: the readiness CLI is only spawned
-/// AFTER `verify_pocket_ai_package` has passed — an unverified package must
-/// never get process execution.
+/// Manifest sanity + package integrity gate + CLI resolution + acceptance
+/// hash verification + the runtime readiness query. Order is fail-closed, and
+/// the order is the security property: `verify_acceptance` hashes the two
+/// runtime executables (and the ASR/TTS models) against the acceptance
+/// attestation BEFORE `query_readiness` spawns `ibaudio.exe`. Nothing gets
+/// process execution until its bytes have been verified — the audit found the
+/// CLIs were executed first and hash-checked only afterwards.
 fn preflight_speech_gate(
     root: &Path,
     manifest: &InBharatAudioManifest,
-) -> Result<(PathBuf, PathBuf, AudioCppReadiness), String> {
+) -> Result<(PathBuf, PathBuf, AudioCppAcceptance, AudioCppReadiness), String> {
     if !manifest.enabled {
         return Err("InBharat Audio is installed but not enabled for production".to_string());
     }
@@ -652,20 +655,23 @@ fn preflight_speech_gate(
     verify_pocket_ai_package(root)?;
     let ibaudio_path = ibaudio_cli(root)?;
     let audiocpp_path = audio_cpp_cli(root)?;
+    // Hash-verify the executables and models BEFORE the first spawn.
+    let acceptance = verify_acceptance(root, manifest, &ibaudio_path, &audiocpp_path)?;
     let status = query_readiness(root)?;
-    Ok((ibaudio_path, audiocpp_path, status))
+    Ok((ibaudio_path, audiocpp_path, acceptance, status))
 }
 
 fn ensure_production_ready(
     root: &Path,
     manifest: &InBharatAudioManifest,
 ) -> Result<AudioCppReadiness, String> {
-    let (ibaudio_path, audiocpp_path, status) = preflight_speech_gate(root, manifest)?;
+    let (_ibaudio_path, _audiocpp_path, _acceptance, status) =
+        preflight_speech_gate(root, manifest)?;
     check_runtime_status(manifest, &status)?;
     // The universal library deliberately does not claim its internal model-family
     // adapter is production-ready yet. Pocket AI uses the real upstream CLI path
-    // and requires a hash-bound end-to-end ASR+TTS acceptance attestation instead.
-    let _acceptance = verify_acceptance(root, manifest, &ibaudio_path, &audiocpp_path)?;
+    // and requires a hash-bound end-to-end ASR+TTS acceptance attestation instead,
+    // verified inside the preflight gate before any process spawn.
     Ok(status)
 }
 
@@ -727,13 +733,12 @@ pub fn status(vault_root: &str) -> BharatAudioStatus {
     };
     // One preflight feeds both the surfaced runtime facts and the production
     // gate, so a status poll never spawns the readiness CLI twice — and the
-    // CLI is only ever spawned after the package integrity gate passed.
+    // CLI is only ever spawned after the package integrity gate AND the
+    // acceptance hash verification of the executables passed.
     let (inference_ready, readiness) = match preflight_speech_gate(&root, &manifest) {
-        Ok((ibaudio_path, audiocpp_path, runtime)) => {
+        Ok((_ibaudio_path, _audiocpp_path, _acceptance, runtime)) => {
             let ready = runtime.inference_ready;
-            let gate = check_runtime_status(&manifest, &runtime).and_then(|_| {
-                verify_acceptance(&root, &manifest, &ibaudio_path, &audiocpp_path).map(|_| runtime)
-            });
+            let gate = check_runtime_status(&manifest, &runtime).map(|_| runtime);
             (ready, gate)
         }
         Err(error) => (false, Err(error)),
@@ -770,9 +775,12 @@ pub fn transcribe(
 
     let input = confine_audio_input(&root, audio_path)?;
 
+    // Unique per-call transcript name: a millisecond timestamp collided for
+    // concurrent requests, and the transcript is user speech — a collision
+    // let one request read (and keep or leak) another's words.
     let transcript_rel = format!(
         "VAULT/recordings/transcripts/inbharat_asr_{}.txt",
-        chrono::Utc::now().timestamp_millis()
+        uuid::Uuid::new_v4().simple()
     );
     let transcript_path = canonical_under(&root, &transcript_rel, false)?;
     let mut cmd = Command::new(cli);
@@ -812,15 +820,27 @@ pub fn transcribe(
         (trimmed.to_string(), tag)
     };
     cmd.arg("--language").arg(&cli_language);
-    let _ = run_command_timeout(cmd, INFERENCE_TIMEOUT)?;
-    let transcript = std::fs::read_to_string(&transcript_path)
-        .map_err(|e| format!("audio.cpp ASR did not produce its declared transcript file: {e}"))?
-        .trim()
-        .to_string();
-    let _ = std::fs::remove_file(&transcript_path);
-    if transcript.is_empty() {
-        return Err("audio.cpp ASR returned an empty transcript".to_string());
-    }
+    let transcript = {
+        // The transcript file must be deleted on EVERY path — CLI failure,
+        // unreadable output, or success. The old code returned early on the
+        // CLI/read error paths and left the (possibly partial) user speech
+        // file behind in the vault scratch area.
+        let outcome = (|| -> Result<String, String> {
+            run_command_timeout(cmd, INFERENCE_TIMEOUT)?;
+            let transcript = std::fs::read_to_string(&transcript_path)
+                .map_err(|e| {
+                    format!("audio.cpp ASR did not produce its declared transcript file: {e}")
+                })?
+                .trim()
+                .to_string();
+            if transcript.is_empty() {
+                return Err("audio.cpp ASR returned an empty transcript".to_string());
+            }
+            Ok(transcript)
+        })();
+        let _ = std::fs::remove_file(&transcript_path);
+        outcome?
+    };
     Ok(BharatAsrResult {
         transcript,
         language: language_tag.as_str().to_string(),
@@ -842,8 +862,9 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
     let model = canonical_under(&root, &task.model_relative_path, true)?;
     let cli = audio_cpp_cli(&root)?;
     let relative_output = format!(
+        // Unique per-call output name (see the ASR transcript note above).
         "VAULT/recordings/tts/inbharat_tts_{}.wav",
-        chrono::Utc::now().timestamp_millis()
+        uuid::Uuid::new_v4().simple()
     );
     let output = canonical_under(&root, &relative_output, false)?;
 
@@ -882,7 +903,12 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         (trimmed.to_string(), tag)
     };
     cmd.arg("--language").arg(&cli_language);
-    let _ = run_command_timeout(cmd, INFERENCE_TIMEOUT)?;
+    if let Err(error) = run_command_timeout(cmd, INFERENCE_TIMEOUT) {
+        // A failed run may still have written a partial WAV — remove it so
+        // the vault scratch area never accumulates broken output.
+        let _ = std::fs::remove_file(&output);
+        return Err(error);
+    }
     if !output.is_file() {
         return Err(
             "audio.cpp TTS completed without producing its declared output file".to_string(),

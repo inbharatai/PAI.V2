@@ -761,24 +761,24 @@ fn transcribe_transiently(
         );
     }
 
-    let config = crate::voice::discover_voice_assets(vault_root, language);
-    let module = crate::voice::VoiceModule::new(config);
-    let result = module.transcribe(&temp_path.to_string_lossy());
+    // Production speech goes through the SpeechRouter — InBharat Audio
+    // first, legacy Whisper only as the coverage-gated fallback. The old
+    // code constructed a legacy VoiceModule directly, bypassing the router.
+    let router = crate::speech::product_router(vault_root);
+    let result = router.transcribe(&temp_path, language);
 
     // Delete first, then prove it is gone.
     let _ = std::fs::remove_file(&temp_path);
     let deletion_confirmed = !temp_path.exists();
 
-    let warning = match result.status {
-        crate::voice::VoiceCapabilityStatus::Available => None,
-        other => Some(format!(
-            "STT_UNAVAILABLE:{:?}:{}",
-            other,
-            result.error.unwrap_or_default()
-        )),
-    };
-
-    (result.text, deletion_confirmed, warning)
+    match result {
+        Ok(transcription) => (transcription.text, deletion_confirmed, None),
+        Err(error) => (
+            String::new(),
+            deletion_confirmed,
+            Some(format!("STT_UNAVAILABLE:{}", error)),
+        ),
+    }
 }
 
 #[tauri::command]
