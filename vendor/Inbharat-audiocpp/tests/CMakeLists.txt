@@ -193,9 +193,12 @@ set_tests_properties(ibaudio.sherpa-provider PROPERTIES TIMEOUT 30 LABELS "rc;pr
 # a compiled adapter with missing local model assets must report
 # inference_ready=0. The probe is an internal hidden-visibility module, so the
 # test compiles its source directly; the status C ABI comes from the library.
+# sha256.cpp is compiled in too: the probe's content-hash gate calls
+# ibaudio::sha256_file_path, which the DLL does not export.
 add_executable(ibaudio_audio_cpp_status_tests
     audio_cpp_status_tests.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/adapters/audio_cpp/audio_cpp_probe.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/adapters/audio_cpp/audio_cpp_probe.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sha256.cpp)
 target_include_directories(ibaudio_audio_cpp_status_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_CURRENT_SOURCE_DIR}/../src

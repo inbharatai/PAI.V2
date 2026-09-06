@@ -303,23 +303,41 @@ void process_vad_frames(ibaudio_stream *stream, bool flush) {
 
 void process_asr_partials(ibaudio_stream *stream) {
     if (stream->options.emit_partial_results == 0u) return;
+    // Each partial transcribes only the NEW 3200-frame window (200 ms) since
+    // the previous one, not the whole stream from frame 0 — re-transcribing
+    // the prefix every window made cumulative inference O(n²) and held the
+    // stream mutex for the entire growing transcript on every push. With
+    // per-window work the lock hold per push is bounded by one window's
+    // inference. Consumers position each partial via start_frame/end_frame
+    // and concatenate in order; the FINAL_TEXT at finish remains the single
+    // authoritative transcript of the whole utterance.
     while (stream->canonical_mono.size() >= stream->next_asr_partial_frame) {
+        const uint64_t window_end = stream->next_asr_partial_frame;
+        const uint64_t window_begin = window_end - 3200u;
         ibaudio::AudioData audio;
-        audio.samples.assign(stream->canonical_mono.begin(),
-            stream->canonical_mono.begin() + static_cast<std::ptrdiff_t>(stream->next_asr_partial_frame));
+        audio.samples.assign(
+            stream->canonical_mono.begin() + static_cast<std::ptrdiff_t>(window_begin),
+            stream->canonical_mono.begin() + static_cast<std::ptrdiff_t>(window_end));
         audio.sample_rate = 16000u;
         audio.channels = 1u;
         std::string provisional;
         ibaudio::Provider *provider = stream->session->model->provider;
         if (provider == nullptr ||
             provider->run_asr(audio, nullptr, nullptr, provisional) != IBAUDIO_STATUS_OK) {
-            provisional = "[reference-asr unavailable]";
+            // A failed partial must not masquerade as transcript text: emit a
+            // diagnostic (callers already treat DIAGNOSTIC as non-text) and
+            // skip the partial for this window. Fabricating a placeholder
+            // string here would be indistinguishable from real speech once a
+            // consumer concatenates partials.
+            emit_diagnostic(stream, "asr partial unavailable: provider failed for this window");
+            stream->next_asr_partial_frame += 3200u;
+            continue;
         }
         provisional += " [provisional]";
         ibaudio_stream_event_v1 event{};
         event.type = IBAUDIO_EVENT_PARTIAL_TEXT;
-        event.start_frame = 0u;
-        event.end_frame = stream->next_asr_partial_frame;
+        event.start_frame = window_begin;
+        event.end_frame = window_end;
         event.payload = text_buffer(stream->session->model->runtime, provisional);
         enqueue_event(stream, event);
         stream->next_asr_partial_frame += 3200u;
@@ -527,7 +545,25 @@ ibaudio_status_t ibaudio_stream_finish(ibaudio_stream_t *stream) {
             ibaudio::Provider *provider = stream->session->model->provider;
             if (provider == nullptr ||
                 provider->run_asr(audio, nullptr, nullptr, final_text) != IBAUDIO_STATUS_OK) {
-                final_text = "[reference-asr unavailable]";
+                // The stream must reach a coherent terminal state, but it
+                // must NEVER invent a transcript: a fabricated placeholder
+                // string used to be emitted as FINAL_TEXT with a success
+                // code, which downstream consumers treated as real speech.
+                // Instead, emit a diagnostic plus the terminal FINAL event
+                // (no FINAL_TEXT), and fail the call so the caller knows no
+                // transcript exists.
+                emit_diagnostic(stream, "asr final unavailable: provider failed; no transcript was produced");
+                ibaudio_stream_event_v1 failed_terminal{};
+                failed_terminal.type = IBAUDIO_EVENT_FINAL;
+                failed_terminal.is_final = 1u;
+                failed_terminal.start_frame = 0u;
+                failed_terminal.end_frame = stream->canonical_mono.size();
+                enqueue_event(stream, failed_terminal);
+                stream->finished = true;
+                release_session_busy(stream);
+                return ibaudio::set_error(IBAUDIO_STATUS_UNAVAILABLE, IBAUDIO_ERROR_DOMAIN_MODEL,
+                                          __func__,
+                                          "ASR provider failed during final transcription; no transcript was produced");
             }
             ibaudio_stream_event_v1 event{};
             event.type = IBAUDIO_EVENT_FINAL_TEXT;

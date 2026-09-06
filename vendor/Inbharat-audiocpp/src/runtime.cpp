@@ -347,11 +347,14 @@ ibaudio_status_t ibaudio_runtime_create(
         runtime->max_cached_models = std::min<uint32_t>(value.max_cached_models, 128u);
         runtime->max_input_frames = value.max_input_frames;
         runtime->requested_backend = value.requested_backend;
-        std::filesystem::create_directories(runtime->cache_directory);
-        if (!std::filesystem::is_directory(runtime->cache_directory)) {
-            return ibaudio::set_error(IBAUDIO_STATUS_IO_ERROR, IBAUDIO_ERROR_DOMAIN_IO,
-                                      __func__, "cache path is not a directory");
-        }
+        // The cache directory is recorded, never eagerly created: this
+        // release candidate writes no cache entries, and eagerly creating
+        // `.ibaudio-cache` (a) mutated the caller's CWD as a side effect of
+        // a read-only status query, and (b) failed with IO_ERROR on
+        // write-protected media (the staged pendrive) before the status
+        // facts it exists to report were ever probed. Any future feature
+        // that actually writes cache entries must create the directory at
+        // that point, with an error_code, and fail soft.
         if (!runtime->allowed_model_root.empty() && !std::filesystem::is_directory(runtime->allowed_model_root)) {
             return ibaudio::set_error(IBAUDIO_STATUS_IO_ERROR, IBAUDIO_ERROR_DOMAIN_IO,
                                       __func__, "allowed model root is not a directory");
@@ -409,19 +412,35 @@ ibaudio_status_t ibaudio_runtime_create(
                 IBAUDIO_CAP_BARGE_IN,
             16000u, true, "stateful frame-energy VAD; events emit after configured hysteresis", "available"));
 #ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
+        // Adapter model availability is a runtime fact about usable local
+        // assets, NEVER compile-time truth: derive each descriptor's
+        // `available` flag from the same asset probe that gates
+        // inference_ready, and carry the exact probe reason when the weights
+        // are missing. A compiled adapter with absent weights must never
+        // advertise an available model.
+        char asr_probe_reason[192];
+        const bool asr_ready = ibaudio::audio_cpp_adapter::probe_model_root(
+            IBAUDIO_AUDIO_CPP_QWEN3_ASR_ROOT, "audio.cpp ASR", ".gguf",
+            asr_probe_reason, sizeof(asr_probe_reason));
+        char vad_probe_reason[192];
+        const bool vad_ready = ibaudio::audio_cpp_adapter::probe_model_root(
+            IBAUDIO_AUDIO_CPP_SILERO_VAD_ROOT, "audio.cpp VAD", nullptr,
+            vad_probe_reason, sizeof(vad_probe_reason), "silero_vad_16k.safetensors");
         // Real neural VAD via pinned audio.cpp's bundled Silero weights (no download).
         runtime->models.push_back(ibaudio::make_model("audiocpp-silero-vad-v1", "audiocpp-silero-vad", IBAUDIO_TASK_VAD,
             IBAUDIO_STREAMING_STATEFUL_LOW_LATENCY,
             IBAUDIO_CAP_OFFLINE | IBAUDIO_CAP_STREAM_INPUT | IBAUDIO_CAP_FINAL_OUTPUT |
                 IBAUDIO_CAP_CANCELLATION | IBAUDIO_CAP_TIMESTAMPS,
-            16000u, true, "audio.cpp Silero VAD neural model (bundled weights); offline and streaming", "available"));
+            16000u, vad_ready, "audio.cpp Silero VAD neural model (bundled weights); offline and streaming",
+            vad_ready ? "available" : vad_probe_reason));
         // Real ASR via audio.cpp Qwen3-ASR (licensed Apache-2.0, integrity-verified model
         // supplied by the caller). Requires the model root; UNAVAILABLE until provided.
         runtime->models.push_back(ibaudio::make_model("audiocpp-qwen3-asr-v1", "audiocpp-qwen3-asr", IBAUDIO_TASK_ASR,
             IBAUDIO_STREAMING_STATEFUL_LOW_LATENCY,
             IBAUDIO_CAP_OFFLINE | IBAUDIO_CAP_STREAM_INPUT | IBAUDIO_CAP_FINAL_OUTPUT |
                 IBAUDIO_CAP_CANCELLATION,
-            16000u, true, "audio.cpp Qwen3-ASR neural model (Apache-2.0, hash-verified); offline and streaming", "available"));
+            16000u, asr_ready, "audio.cpp Qwen3-ASR neural model (Apache-2.0, hash-verified); offline and streaming",
+            asr_ready ? "available" : asr_probe_reason));
 #endif
         runtime->models.push_back(ibaudio::make_model("kws-deferred-v1", "deferred-kws", IBAUDIO_TASK_KWS,
             IBAUDIO_STREAMING_DEFERRED,

@@ -20,14 +20,50 @@
 #include "../../provider.hpp"
 #include "../../internal.hpp"
 
+#include "audio_cpp_probe.hpp"
+
 #include "engine/models/silero_vad/session.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 
 namespace ibaudio {
 namespace {
+
+// Applies the caller's duration tuning to the neural VAD output (finding
+// V12): the facade validates VadConfig and used to hand it to this provider,
+// which dropped it on the floor. min_speech_ms / min_silence_ms have a
+// faithful meaning here — drop sub-minimum blips, merge segments split by
+// less than the caller's minimum silence. threshold_dbfs, frame_ms and
+// hop_ms remain inapplicable by design: Silero is a probability model over
+// fixed 512-sample windows, not an energy detector over caller-sized frames,
+// so pretending to honor an energy threshold would fabricate behavior.
+void apply_vad_config_post_processing(const VadConfig &config,
+                                      std::vector<ibaudio_vad_segment_v1> &segments) {
+    if (segments.empty()) return;
+    const uint64_t min_speech_frames = static_cast<uint64_t>(config.min_speech_ms) * 16u;
+    const uint64_t min_silence_frames = static_cast<uint64_t>(config.min_silence_ms) * 16u;
+    // Segment spans are absolute 16 kHz sample indices; 1 ms = 16 samples.
+    std::vector<ibaudio_vad_segment_v1> merged;
+    for (const auto &segment : segments) {
+        if (!merged.empty() && segment.start_frame >= merged.back().end_frame &&
+            segment.start_frame - merged.back().end_frame < min_silence_frames) {
+            merged.back().end_frame = segment.end_frame;
+            merged.back().confidence = std::max(merged.back().confidence, segment.confidence);
+        } else {
+            merged.push_back(segment);
+        }
+    }
+    segments.clear();
+    for (const auto &segment : merged) {
+        if (segment.end_frame - segment.start_frame >= min_speech_frames) {
+            segments.push_back(segment);
+        }
+    }
+}
 
 // Lazily-loaded shared handle to the bundled Silero VAD model. Loaded once, reused
 // across calls (audio.cpp sessions are heavy to spin up; the weights are read-only).
@@ -63,7 +99,11 @@ public:
                              const CancellationToken *cancel,
                              uint64_t *processed_frames,
                              std::vector<ibaudio_vad_segment_v1> &out_segments) override {
-        (void)config;  // Silero VAD uses its own model config; the InBharat VadConfig is not plumbed through yet
+        // Silero owns its detection model (fixed 512-sample windows,
+        // probability output); the caller's VadConfig is applied where it
+        // has faithful meaning — see apply_vad_config_post_processing.
+        // threshold_dbfs/frame_ms/hop_ms are energy-VAD tunables with no
+        // neural equivalent and are deliberately not honored.
         out_segments.clear();
         if (mono_audio.sample_rate != 16000 || mono_audio.channels != 1) {
             return IBAUDIO_STATUS_INVALID_ARGUMENT;  // Silero VAD 16k expects mono 16 kHz
@@ -72,17 +112,7 @@ public:
             return IBAUDIO_STATUS_CANCELLED;
         }
         try {
-            engine::models::silero_vad::SileroVADLoadedModel *model = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(model_mutex_);
-                if (model_ == nullptr) {
-                    engine::runtime::ModelLoadRequest request;
-                    request.model_path = model_root_;
-                    request.family_hint = std::string("silero_vad");
-                    model_ = engine::models::silero_vad::load_silero_vad_model(request);
-                }
-                model = model_.get();
-            }
+            engine::models::silero_vad::SileroVADLoadedModel *model = ensure_model_loaded();
             if (model == nullptr) return IBAUDIO_STATUS_UNAVAILABLE;
 
             engine::runtime::TaskSpec task;
@@ -128,6 +158,7 @@ public:
                 out.peak_dbfs = 0.0f;  // not provided by audio.cpp VAD; left neutral, not invented
                 out_segments.push_back(out);
             }
+            apply_vad_config_post_processing(config, out_segments);
             return IBAUDIO_STATUS_OK;
         } catch (const std::exception &) {
             return IBAUDIO_STATUS_INTERNAL_ERROR;  // upstream exception contained at the boundary
@@ -137,27 +168,25 @@ public:
     }
 
     // --- Streaming VAD (Silero's true incremental path) -------------------------
+    // Silero VAD at 16 kHz consumes exactly 512-sample windows. The stream
+    // layer may push any chunk size, so push() buffers incoming samples and
+    // feeds the model complete, contiguous windows only; a partial window at
+    // the end of the audio is dropped (it cannot be classified, and padding
+    // it with zeros would invent audio).
+    static constexpr size_t kSileroWindowSamples = 512u;
+
     struct VadStreamState {
         std::unique_ptr<engine::runtime::IVoiceTaskSession> base;
         engine::runtime::IStreamingVoiceTaskSession *streaming = nullptr;  // non-owning
-        uint64_t start_sample = 0;  // cumulative samples pushed so far
+        uint64_t start_sample = 0;  // absolute sample index of the next sample to be processed
+        std::vector<float> pending;  // sub-window leftovers held between pushes
     };
 
     ibaudio_status_t vad_stream_create(void **out_state) override {
         if (out_state == nullptr) return IBAUDIO_STATUS_INVALID_ARGUMENT;
         *out_state = nullptr;
         try {
-            engine::models::silero_vad::SileroVADLoadedModel *model = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(model_mutex_);
-                if (model_ == nullptr) {
-                    engine::runtime::ModelLoadRequest request;
-                    request.model_path = model_root_;
-                    request.family_hint = std::string("silero_vad");
-                    model_ = engine::models::silero_vad::load_silero_vad_model(request);
-                }
-                model = model_.get();
-            }
+            engine::models::silero_vad::SileroVADLoadedModel *model = ensure_model_loaded();
             if (model == nullptr) return IBAUDIO_STATUS_UNAVAILABLE;
             engine::runtime::TaskSpec task;
             task.task = engine::runtime::VoiceTaskKind::Vad;
@@ -168,6 +197,16 @@ public:
             if (state->base == nullptr) return IBAUDIO_STATUS_UNAVAILABLE;
             state->streaming = dynamic_cast<engine::runtime::IStreamingVoiceTaskSession *>(state->base.get());
             if (state->streaming == nullptr) return IBAUDIO_STATUS_UNAVAILABLE;
+            // audio.cpp requires prepare() before use — the same contract the
+            // offline path declares. reset() on an unprepared session was a
+            // latent ordering bug: the session had no audio contract yet.
+            engine::runtime::SessionPreparationRequest prep;
+            engine::runtime::AudioPreparationContract contract;
+            contract.sample_rate = 16000;
+            contract.channels = 1;
+            contract.max_input_samples = static_cast<int64_t>(kSileroWindowSamples);
+            prep.audio = contract;
+            state->base->prepare(prep);
             state->streaming->reset();
             *out_state = state.release();
             return IBAUDIO_STATUS_OK;
@@ -186,21 +225,27 @@ public:
         if (s == nullptr || s->streaming == nullptr || samples == nullptr) return IBAUDIO_STATUS_INVALID_ARGUMENT;
         if (sample_rate != 16000) return IBAUDIO_STATUS_INVALID_ARGUMENT;
         try {
-            engine::runtime::AudioChunk chunk;
-            chunk.sample_rate = 16000;
-            chunk.channels = 1;
-            chunk.start_sample = static_cast<int64_t>(s->start_sample);
-            chunk.samples.assign(samples, samples + frame_count);
-            s->start_sample += frame_count;
-            engine::runtime::StreamEvent event = s->streaming->process_audio_chunk(chunk);
-            for (const auto &va : event.voice_activity) {
-                if (va.segment.has_value()) {
-                    ibaudio_vad_segment_v1 out{};
-                    out.start_frame = static_cast<uint64_t>(va.segment->span.start_sample < 0 ? 0 : va.segment->span.start_sample);
-                    out.end_frame = static_cast<uint64_t>(va.segment->span.end_sample < 0 ? 0 : va.segment->span.end_sample);
-                    out.confidence = va.segment->confidence;
-                    out.peak_dbfs = 0.0f;
-                    out_segments.push_back(out);
+            s->pending.insert(s->pending.end(), samples, samples + frame_count);
+            while (s->pending.size() >= kSileroWindowSamples) {
+                engine::runtime::AudioChunk chunk;
+                chunk.sample_rate = 16000;
+                chunk.channels = 1;
+                chunk.start_sample = static_cast<int64_t>(s->start_sample);
+                chunk.samples.assign(s->pending.begin(),
+                                     s->pending.begin() + static_cast<std::ptrdiff_t>(kSileroWindowSamples));
+                s->pending.erase(s->pending.begin(),
+                                 s->pending.begin() + static_cast<std::ptrdiff_t>(kSileroWindowSamples));
+                s->start_sample += kSileroWindowSamples;
+                engine::runtime::StreamEvent event = s->streaming->process_audio_chunk(chunk);
+                for (const auto &va : event.voice_activity) {
+                    if (va.segment.has_value()) {
+                        ibaudio_vad_segment_v1 out{};
+                        out.start_frame = static_cast<uint64_t>(va.segment->span.start_sample < 0 ? 0 : va.segment->span.start_sample);
+                        out.end_frame = static_cast<uint64_t>(va.segment->span.end_sample < 0 ? 0 : va.segment->span.end_sample);
+                        out.confidence = va.segment->confidence;
+                        out.peak_dbfs = 0.0f;
+                        out_segments.push_back(out);
+                    }
                 }
             }
             return IBAUDIO_STATUS_OK;
@@ -235,10 +280,43 @@ public:
     }
 
 private:
+    // Lazily loads the bundled Silero model under the mutex, with negative
+    // caching (finding V11): a failed load used to be retried in full on
+    // EVERY inference call — a missing-weights deployment paid a heavy load
+    // attempt per utterance. While the readiness probe still fails, calls
+    // fail fast; the expensive load is retried only after the probe passes
+    // again, i.e. when the weights were genuinely replaced. Returns the
+    // loaded model or nullptr (UNAVAILABLE at the call sites).
+    engine::models::silero_vad::SileroVADLoadedModel *ensure_model_loaded() {
+        std::lock_guard<std::mutex> lock(model_mutex_);
+        if (model_ == nullptr) {
+            if (model_load_failed_) {
+                char probe_reason[192];
+                if (!ibaudio::audio_cpp_adapter::probe_model_root(
+                        model_root_.c_str(), "audio.cpp VAD", nullptr, probe_reason,
+                        sizeof(probe_reason), "silero_vad_16k.safetensors")) {
+                    return nullptr;
+                }
+                model_load_failed_ = false;
+            }
+            engine::runtime::ModelLoadRequest request;
+            request.model_path = model_root_;
+            request.family_hint = std::string("silero_vad");
+            model_ = engine::models::silero_vad::load_silero_vad_model(request);
+            if (model_ == nullptr) {
+                model_load_failed_ = true;
+                fprintf(stderr, "[audiocpp-vad] model load failed from root: %s\n",
+                        model_root_.c_str());
+            }
+        }
+        return model_.get();
+    }
+
     // The bundled Silero VAD model root inside the pristine pinned checkout. Resolved
     // relative to the adapter's source location at configure time (see CMake).
     std::string model_root_ = IBAUDIO_AUDIO_CPP_SILERO_VAD_ROOT;
     std::shared_ptr<engine::models::silero_vad::SileroVADLoadedModel> model_;
+    bool model_load_failed_ = false;  // set after a failed load; see ensure_model_loaded
     std::mutex model_mutex_;
 };
 

@@ -5,8 +5,11 @@
 
 #include "inbharat/ibaudio.h"
 #include "../src/provider.hpp"
+#include "../src/internal.hpp"
 
+#include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -133,6 +136,120 @@ void test_provider_vad_roundtrip() {
     std::cout << "PASS provider_vad_roundtrip\n";
 }
 
+// Streaming fail-closed semantics: when the ASR provider fails during a
+// streaming run, the stream must reach its terminal event WITHOUT emitting a
+// fabricated transcript, and ibaudio_stream_finish must return an error so no
+// caller mistakes the failure for success. The pre-fix behavior emitted
+// "[reference-asr unavailable]" as FINAL_TEXT with a success status.
+void test_streaming_never_fabricates_transcript_on_provider_failure() {
+    using ibaudio::Provider;
+    using ibaudio::ProviderCapabilities;
+
+    class FailingAsrProvider final : public Provider {
+    public:
+        const ProviderCapabilities &capabilities() const override {
+            static const ProviderCapabilities caps = [] {
+                ProviderCapabilities c;
+                c.id = "failing-asr";
+                c.version = "0.0.0";
+                c.locality = "local-native";
+                c.privacy_class = "ephemeral";
+                c.remote = false;
+                c.supports_asr = true;
+                return c;
+            }();
+            return caps;
+        }
+        bool serves_family(const std::string &family) const override {
+            return family == "failing-asr";
+        }
+        // run_asr keeps the base UNSUPPORTED: every call fails.
+    };
+
+    ibaudio_runtime_t *runtime = make_runtime();
+    FailingAsrProvider provider;
+
+    // Wire a model/session pair directly to the failing provider. The model
+    // registry only holds built-in families, so this test constructs the
+    // internal structs the stream layer consumes — exactly what the resolver
+    // would have produced for a backed family.
+    ibaudio_model model{};
+    model.runtime = runtime;
+    model.record.descriptor.task = IBAUDIO_TASK_ASR;
+    std::snprintf(model.record.descriptor.id, sizeof(model.record.descriptor.id), "%s",
+                  "failing-asr-model");
+    model.provider = &provider;
+
+    ibaudio_session session{};
+    session.model = &model;
+    session.task = IBAUDIO_TASK_ASR;
+    session.streaming_enabled = true;
+
+    ibaudio_stream_options_v1 options{};
+    ibaudio_stream_options_init(&options);
+    options.emit_partial_results = 1u;
+    ibaudio_stream_t *stream = nullptr;
+    assert(ibaudio_stream_start(&session, &options, &stream) == IBAUDIO_STATUS_OK);
+    assert(stream != nullptr);
+
+    // Push phase: a failed partial must produce a diagnostic, never a
+    // PARTIAL_TEXT carrying invented text. 400 ms of signal so the partial
+    // window (3200 frames = 200 ms) fires at least once.
+    std::vector<float> window = speech_like_frames();
+    window.insert(window.end(), window.begin(), window.end());
+    window.insert(window.end(), window.begin(), window.end());
+    ibaudio_audio_view_v1 audio{};
+    audio.struct_size = sizeof(audio);
+    audio.api_version = IBAUDIO_API_VERSION;
+    audio.interleaved_f32 = window.data();
+    audio.frame_count = static_cast<uint32_t>(window.size());
+    audio.sample_rate = 16000;
+    audio.channels = 1;
+    assert(ibaudio_stream_push_audio(stream, &audio) == IBAUDIO_STATUS_OK);
+    bool saw_partial = false;
+    bool saw_push_diagnostic = false;
+    while (true) {
+        ibaudio_stream_event_v1 event{};
+        const ibaudio_status_t status = ibaudio_stream_poll_event(stream, 0u, &event);
+        if (status == IBAUDIO_STATUS_WOULD_BLOCK) break;
+        assert(status == IBAUDIO_STATUS_OK);
+        if (event.type == IBAUDIO_EVENT_PARTIAL_TEXT) saw_partial = true;
+        if (event.type == IBAUDIO_EVENT_DIAGNOSTIC) saw_push_diagnostic = true;
+        ibaudio_stream_event_release(&event);
+    }
+    assert(!saw_partial);
+    assert(saw_push_diagnostic);
+
+    // Finish phase: the call itself must fail, the stream must still reach
+    // a coherent terminal state, and no FINAL_TEXT may appear.
+    const ibaudio_status_t finish_status = ibaudio_stream_finish(stream);
+    assert(finish_status == IBAUDIO_STATUS_UNAVAILABLE);
+
+    bool saw_final_text = false;
+    bool saw_final = false;
+    bool saw_finish_diagnostic = false;
+    while (true) {
+        ibaudio_stream_event_v1 event{};
+        const ibaudio_status_t status = ibaudio_stream_poll_event(stream, 100u, &event);
+        if (status == IBAUDIO_STATUS_WOULD_BLOCK) break;
+        assert(status == IBAUDIO_STATUS_OK);
+        if (event.type == IBAUDIO_EVENT_FINAL_TEXT) saw_final_text = true;
+        if (event.type == IBAUDIO_EVENT_DIAGNOSTIC) saw_finish_diagnostic = true;
+        if (event.type == IBAUDIO_EVENT_FINAL) saw_final = true;
+        const bool terminal = event.type == IBAUDIO_EVENT_FINAL ||
+                              event.type == IBAUDIO_EVENT_CANCELLED;
+        ibaudio_stream_event_release(&event);
+        if (terminal) break;
+    }
+    assert(!saw_final_text);
+    assert(saw_finish_diagnostic);
+    assert(saw_final);
+
+    ibaudio_stream_release(&stream);
+    ibaudio_runtime_release(&runtime);
+    std::cout << "PASS streaming_fail_closed_no_fabricated_transcript\n";
+}
+
 // Anti-rot gate for the capability router's remote policy. Asserts, against the live
 // internal registry, that (a) family resolution works, (b) a remote-gated family
 // resolves under both policies (a stub remote provider is registered), and (c) the
@@ -206,6 +323,49 @@ void test_remote_gate() {
     // route() must also honor the gate: an ASR request resolves to the local stub,
     // and never to the remote stub when remote is disallowed.
     assert(registry.route(IBAUDIO_TASK_ASR, "", false, false) == &local);
+
+    // Language-coverage gate (the "as-IN must never run Qwen3" invariant):
+    // a provider that declares coverage only for the languages it truly
+    // serves must never be returned for an uncovered language. Registration
+    // order is priority, and language-agnostic providers (empty list) claim
+    // everything, so the sharp assertion is negative: the coverage-limited
+    // provider — the exact capability set of the production Qwen3-ASR
+    // adapter — must never answer for as-IN or any other uncovered
+    // Scheduled language, while covered languages must still route to
+    // SOME provider (the request is not unroutable because of the gate).
+    class StubCoverageProvider final : public Provider {
+    public:
+        const ProviderCapabilities &capabilities() const override {
+            static const ProviderCapabilities caps = [] {
+                ProviderCapabilities c;
+                c.id = "stub-coverage-asr";
+                c.version = "0.0.0";
+                c.locality = "local-native";
+                c.privacy_class = "ephemeral";
+                c.remote = false;
+                c.supports_asr = true;
+                // The exact coverage the production Qwen3-ASR adapter declares.
+                c.languages = {"en-IN", "hi-IN", "hi-en-codemix"};
+                return c;
+            }();
+            return caps;
+        }
+    };
+    StubCoverageProvider coverage;
+    registry.register_provider(&coverage);
+    for (const char *uncovered : {"as-IN", "bn-IN", "gu-IN", "ta-IN"}) {
+        Provider *routed = registry.route(IBAUDIO_TASK_ASR, uncovered, false, false);
+        assert(routed != &coverage);
+        if (routed != nullptr) {
+            const auto &declared = routed->capabilities().languages;
+            const bool declared_ok = declared.empty() ||
+                                     std::find(declared.begin(), declared.end(), uncovered) != declared.end();
+            assert(declared_ok);
+        }
+    }
+    for (const char *covered : {"en-IN", "hi-IN", "hi-en-codemix"}) {
+        assert(registry.route(IBAUDIO_TASK_ASR, covered, false, false) != nullptr);
+    }
     std::cout << "PASS remote_gate\n";
 }
 
@@ -279,6 +439,7 @@ int main() {
     test_provider_asr_roundtrip();
     test_provider_tts_roundtrip();
     test_provider_vad_roundtrip();
+    test_streaming_never_fabricates_transcript_on_provider_failure();
     test_remote_gate();
 #ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
     test_streaming_vad_differential();

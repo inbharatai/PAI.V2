@@ -282,6 +282,15 @@ void command_diagnostics(const std::map<std::string, std::string> &options) {
 }
 
 void command_audio_cpp_status(const std::map<std::string, std::string> &options) {
+    // Exit-code note (deliberate design decision): this command exits 0
+    // even when inference_ready=0 (GATED). It is a fact reporter — its job
+    // is to emit the status; the GATED fact is data, not a command failure.
+    // Both production callers parse the JSON and gate on inference_ready
+    // (the desktop readiness query maps it to a graceful GATED state, and
+    // the acceptance harness runs under `set -e`, where a non-zero exit
+    // would abort it before it could report the reason). Actual inference
+    // commands (asr/tts) fail closed with a non-zero exit when the gate
+    // blocks them.
     RuntimeOwner runtime = make_runtime(options);
     ibaudio_audio_cpp_status_v1 status{};
     require(ibaudio_runtime_get_audio_cpp_status(runtime.value, &status), "get audio.cpp status");

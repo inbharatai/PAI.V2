@@ -45,6 +45,16 @@ void write_file(const std::filesystem::path &root, const char *name) {
     out << "weights";
 }
 
+// Minimal structurally-plausible GGUF: magic + version + tensor count +
+// metadata kv count (24 bytes) plus a little padding, so the probe's
+// magic/header checks exercise a file that could actually parse.
+void write_gguf_file(const std::filesystem::path &root, const char *name) {
+    std::ofstream out(root / name, std::ios::binary);
+    out.write("GGUF", 4);
+    const char zeros[28] = {};
+    out.write(zeros, sizeof(zeros));
+}
+
 void test_probe_model_root_fails_closed() {
     char reason[192];
 
@@ -82,24 +92,199 @@ void test_probe_model_root_fails_closed() {
 void test_probe_model_root_accepts_local_weights() {
     char reason[192];
     const std::filesystem::path root = make_temp_root("weights");
-    write_file(root, "qwen3-asr.gguf");
+    write_gguf_file(root, "qwen3-asr.gguf");
 
     check(ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp ASR",
                                                        ".gguf", reason, sizeof(reason)),
-          "root with a .gguf must pass");
+          "root with a real GGUF must pass");
     check(contains(reason, "verified"), "passing reason must say verified");
 
     // Extension detection is case-insensitive.
     std::filesystem::remove(root / "qwen3-asr.gguf");
-    write_file(root, "QWEN3-ASR.GGUF");
+    write_gguf_file(root, "QWEN3-ASR.GGUF");
     check(ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp ASR",
                                                        ".gguf", reason, sizeof(reason)),
           "uppercase .GGUF must pass");
 
-    // Any-weights probes (nullptr extension) accept any regular file.
+    // Any-weights probes (nullptr extension, no required name) accept any
+    // non-empty regular file.
     check(ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp VAD",
                                                         nullptr, reason, sizeof(reason)),
           "any-file probe must pass with a regular file present");
+
+    std::filesystem::remove_all(root);
+}
+
+void test_probe_model_root_rejects_bad_or_ambiguous_weights() {
+    char reason[192];
+
+    // A zero-byte .gguf used to pass; no loader can mount one.
+    {
+        const std::filesystem::path root = make_temp_root("zero_gguf");
+        // Scope the writer so the handle is closed before remove_all —
+        // deleting a tree that still holds an open file fails on Windows and
+        // remove_all throws.
+        {
+            std::ofstream out(root / "qwen3-asr.gguf", std::ios::binary);
+            out.flush();
+        }
+        check(!ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp ASR",
+                                                            ".gguf", reason, sizeof(reason)),
+              "zero-byte .gguf must fail");
+        check(contains(reason, "not readable or empty"),
+              "zero-byte reason must name the problem");
+
+        std::filesystem::remove_all(root);
+    }
+
+    // A renamed non-GGUF file with the .gguf extension must fail the magic
+    // check — a truncated or substituted download is not a usable model.
+    {
+        const std::filesystem::path root = make_temp_root("fake_gguf");
+        write_file(root, "qwen3-asr.gguf");
+        check(!ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp ASR",
+                                                            ".gguf", reason, sizeof(reason)),
+              "non-GGUF bytes with .gguf extension must fail");
+        check(contains(reason, "GGUF magic"),
+              "magic failure reason must name the GGUF magic header");
+
+        std::filesystem::remove_all(root);
+    }
+
+    // Several .gguf candidates is a packaging error: the loader cannot
+    // disambiguate, so readiness fails closed.
+    {
+        const std::filesystem::path root = make_temp_root("ambiguous");
+        write_gguf_file(root, "qwen3-asr.gguf");
+        write_gguf_file(root, "other-asr.gguf");
+        check(!ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp ASR",
+                                                            ".gguf", reason, sizeof(reason)),
+              "two .gguf candidates must fail");
+        check(contains(reason, "ambiguous"),
+              "ambiguous reason must say one weight file is required");
+
+        std::filesystem::remove_all(root);
+    }
+
+    // The VAD resolver requires exactly silero_vad_16k.safetensors: a root
+    // with a substituted file is not ready even when it holds weights.
+    {
+        const std::filesystem::path root = make_temp_root("vad_wrong_name");
+        write_file(root, "vad.safetensors");
+        check(!ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp VAD",
+                                                            nullptr, reason, sizeof(reason),
+                                                            "silero_vad_16k.safetensors"),
+              "VAD root without silero_vad_16k.safetensors must fail");
+        check(contains(reason, "silero_vad_16k.safetensors"),
+              "VAD failure reason must name the required file");
+
+        std::filesystem::remove(root / "vad.safetensors");
+        write_file(root, "silero_vad_16k.safetensors");
+        check(ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp VAD",
+                                                            nullptr, reason, sizeof(reason),
+                                                            "silero_vad_16k.safetensors"),
+              "VAD root with the exact silero file must pass");
+
+        // Zero-byte VAD weights must fail even with the correct name.
+        std::filesystem::remove(root / "silero_vad_16k.safetensors");
+        {
+            std::ofstream empty_out(root / "silero_vad_16k.safetensors", std::ios::binary);
+            empty_out.flush();
+        }
+        check(!ibaudio::audio_cpp_adapter::probe_model_root(root.string().c_str(), "audio.cpp VAD",
+                                                             nullptr, reason, sizeof(reason),
+                                                             "silero_vad_16k.safetensors"),
+              "zero-byte silero file must fail");
+
+        std::filesystem::remove_all(root);
+    }
+}
+
+// Content-hash gate on top of the probe (finding V6): the baked-root load
+// path claimed SHA-256 verification without any hashing. The gate reuses the
+// probe's candidate selection, so a digest check can only pass for the exact
+// file the loader would mount.
+void test_verify_model_root_sha256() {
+    char reason[192];
+    const std::filesystem::path root = make_temp_root("sha256_gate");
+    write_gguf_file(root, "qwen3-asr.gguf");
+
+    // Known fixture: "GGUF" + 28 zero bytes.
+    const char *actual_digest = "d32718d69557e5fb1267744390d3fe5869b81db8dd9a8272ddf43ae50967eba6";
+
+    // The exact digest passes.
+    check(ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+              root.string().c_str(), "audio.cpp ASR", ".gguf", nullptr, actual_digest,
+              reason, sizeof(reason)),
+          "exact digest must pass the hash gate");
+    check(contains(reason, "SHA-256 verified"), "passing reason must say verified");
+
+    // The comparison is case-insensitive (hash tools print uppercase too).
+    {
+        std::string upper(actual_digest);
+        for (char &c : upper) {
+            c = (c >= 'a' && c <= 'f') ? static_cast<char>(c - 'a' + 'A') : c;
+        }
+        check(ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+                  root.string().c_str(), "audio.cpp ASR", ".gguf", nullptr, upper.c_str(),
+                  reason, sizeof(reason)),
+              "uppercase digest must pass the hash gate");
+    }
+
+    // A wrong digest fails closed and names the mismatch — a substituted
+    // weights file must never pass as "ready".
+    {
+        std::string wrong(actual_digest);
+        wrong[0] = wrong[0] == '0' ? '1' : '0';
+        check(!ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+                  root.string().c_str(), "audio.cpp ASR", ".gguf", nullptr, wrong.c_str(),
+                  reason, sizeof(reason)),
+              "wrong digest must fail the hash gate");
+        check(contains(reason, "mismatch"), "mismatch reason must name the problem");
+    }
+
+    // Malformed expected digests fail before any hashing.
+    check(!ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+              root.string().c_str(), "audio.cpp ASR", ".gguf", nullptr, "not-a-digest",
+              reason, sizeof(reason)),
+          "non-hex digest must be rejected");
+    check(contains(reason, "64 hex") || contains(reason, "non-hex"),
+          "malformed-digest reason must say why");
+    check(!ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+              root.string().c_str(), "audio.cpp ASR", ".gguf", nullptr, nullptr, reason,
+              sizeof(reason)),
+          "null digest must be rejected");
+    check(!ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+              root.string().c_str(), "audio.cpp ASR", ".gguf", nullptr, "", reason,
+              sizeof(reason)),
+          "empty digest must be rejected");
+
+    // The named-file variant (the VAD rule) hashes the exact silero file.
+    {
+        const std::filesystem::path vad_root = make_temp_root("sha256_gate_vad");
+        write_file(vad_root, "silero_vad_16k.safetensors");
+        // sha256("weights") — the exact content write_file produces.
+        const char *digest = "9a129038d9a00aed0cf6a7ea059ca50a813449061ab87848cf1a13eafdf33b2c";
+        check(ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+                  vad_root.string().c_str(), "audio.cpp VAD", nullptr,
+                  "silero_vad_16k.safetensors", digest, reason, sizeof(reason)),
+              "named-file digest must pass the hash gate");
+
+        std::filesystem::remove_all(vad_root);
+    }
+
+    // A root that fails the probe fails the gate first, with the probe's reason.
+    {
+        const std::filesystem::path empty_root = make_temp_root("sha256_gate_empty");
+        check(!ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+                  empty_root.string().c_str(), "audio.cpp ASR", ".gguf", nullptr,
+                  actual_digest, reason, sizeof(reason)),
+              "unready root must fail the hash gate");
+        check(contains(reason, "no .gguf"),
+              "unready root must keep the probe's reason");
+
+        std::filesystem::remove_all(empty_root);
+    }
 
     std::filesystem::remove_all(root);
 }
@@ -178,6 +363,8 @@ void test_null_arguments_rejected() {
 int main() {
     test_probe_model_root_fails_closed();
     test_probe_model_root_accepts_local_weights();
+    test_probe_model_root_rejects_bad_or_ambiguous_weights();
+    test_verify_model_root_sha256();
     test_compiled_adapter_with_missing_models_is_not_ready();
     test_runtime_status_never_ready_without_adapter_or_assets();
     test_null_arguments_rejected();
