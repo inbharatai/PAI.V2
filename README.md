@@ -16,7 +16,7 @@ copy.
 | **Model** | Gemma 4 E2B/E4B (LiteRT) | Gemma 4 12B Q4 GGUF (llama.cpp) |
 | **UI** | Jetpack Compose | Tauri 2 + React 19 |
 | **Storage** | Room cache → USB vault | RAM → USB vault |
-| **Voice** | Sherpa-ONNX STT/TTS | Whisper STT / Piper TTS |
+| **Voice** | Sherpa-ONNX STT/TTS | InBharat Audio (Qwen3-ASR / omnivoice, acceptance-gated) with legacy Whisper/Piper as the explicit policy fallback |
 | **Eyes-free** | TalkBack, Blind Aid, Camera OCR | Screen reader, high-contrast, OCR |
 
 The release identity is not a drive letter, volume label, or USB VID/PID.
@@ -91,7 +91,7 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 | Vault encryption (`packages/vault-core`) | IMPLEMENTED AND CORRECTNESS-HARDENED — Argon2id (256 MiB / t=3 / p=4) + AES-256-GCM for new records (legacy XChaCha20-Poly1305 stays readable, identified by nonce length) + HKDF-SHA-256 + BIP-39 recovery + write-ahead journal; transactional first-use setup refuses re-initialisation and preserves packaged `vault.id` bytes. Per-vault random salts on both the password and recovery paths. The KDF parameters are pinned as a cross-platform contract with the Kotlin `encrypted-vault` package (`SPEC_ARGON2_*` plus a `const` assertion that makes drift a compile error in release builds), because the test profile deliberately uses reduced parameters and would not catch a change that broke Android↔Windows unlock. **Wave 1** additionally fixed four release blockers: header slot selection now picks the newest committed generation (a password change written to the inactive slot used to be silently discarded on restart), record metadata is authenticated and re-verified on every read (privacy level, tombstone, type, revision and timestamps were previously editable on disk while content still decrypted), record writes are wrapped in real journal transactions with fsync-and-verify before promotion, and record IDs must be canonical UUID v4 before touching a path |
 | Model inference | Bundled llama.cpp only; direct runtime test verified (real answer, 127.0.0.1-only, clean stop) — see `docs/verification/2026-07-30/59_DIRECT_GEMMA.md` |
 | Offline voice | VERIFIED pipeline — bundled Piper synth → bundled Whisper transcribe round trip is verbatim; see `docs/verification/2026-07-30/62_OFFLINE_VOICE.md` |
-| InBharat Audio speech plane | ACCEPTANCE-GATED + DEPLOYED 2026-08-26 — `vendor/Inbharat-audiocpp/` (audio.cpp @ `26dcb5c4`); Qwen3-ASR-0.6B Q8_0 + omnivoice Q8_0 GGUF deployed at `SPEECH/models/`; deployed `audiocpp_cli` runs real ASR (exit 0) + TTS (exit 0, 24 kHz); 30/30 hash-bound acceptance gate green (re-hash of 2 CLIs + 2 models). `get_bharat_audio_status` readiness probe wired; `transcribe`/`synthesize` implemented but intentionally NOT the active Tauri voice path yet — legacy Whisper/Piper stays active until the gate passes (gate now green) |
+| InBharat Audio speech plane | ACCEPTANCE-GATED + DEPLOYED 2026-08-26 — `vendor/Inbharat-audiocpp/` (audio.cpp @ `26dcb5c4`); Qwen3-ASR-0.6B Q8_0 + omnivoice Q8_0 GGUF deployed at `SPEECH/models/`; deployed `audiocpp_cli` runs real ASR (exit 0) + TTS (exit 0, 24 kHz); 30/30 hash-bound acceptance gate green (re-hash of 2 CLIs + 2 models). **Speech-architecture hardening (2026-09):** the production Tauri voice path now goes through a `SpeechRouter` (`apps/desktop/src-tauri/src/speech.rs`) with the explicit `InbharatAudioThenLegacy` policy — production code never talks to a backend module directly. The InBharat route hash-verifies its CLIs/models before first execution and reports buffered-final (not stateful-streaming) semantics; the legacy Whisper/Piper route is wrapped behind the same trait, gains binary/model hash verification, deadline timeouts, and `error:` separation from transcript text. Language tags are canonicalized through the shared `packages/speech-contracts` table (`languages.v1.json`), byte-sync-checked against the Android `VoiceLanguage` mirror by `scripts/check_speech_language_sync.py` in CI; Assamese (`as-IN`) routes only to the IndicConformer family and fails closed when its assets are absent — it is never served by Qwen3 |
 | Recording | IMPLEMENTED WITH ENFORCED PRIVACY — `unoone-recording-policy` crate makes retention decisions exhaustive (20/20 tests); TRANSCRIPT_ONLY/SUMMARY_ONLY retain no audio; temp WAV deleted + verify-checked; zero-samples reports an error. **SUMMARY_ONLY is disabled in the UI** (no summariser exists) until one is implemented |
 | Browser workspace | IMPLEMENTED AS TYPED, VERIFIED ACTIONS — no arbitrary script execution; scheme allowlist; JSON-literal escaping; submit/upload/download require explicit confirmation; real PNG screenshots with SHA-256; 35 deterministic tests. Live-page acceptance journeys are human-gated |
 | Text handling (Indic scripts) | HARDENED — `packages/text-util` provides grapheme-cluster-safe truncation. Eight sites previously sliced `&str` at raw byte offsets, which **panics** mid-character; Devanagari and Bengali code points are 3 bytes, so this crashed on ordinary Hindi/Bengali/Assamese documents. Byte budgets for the model context window remain byte budgets (snapped to cluster boundaries) and truncation notices now report real character counts instead of byte counts |
@@ -111,11 +111,18 @@ corrected on 2026-07-30.
 
 ### CI gate state
 
-`main` is **green across all four gates** (2026-08-01): Desktop CI
-(windows-latest + macos-latest, incl. Verify Mobile Untouched),
+`main` was green across all four gates as of 2026-08-01: Desktop CI,
 Mobile Protection, Android CI (`invariants=0 e2e=0 lint=0 tests=0 apk=0`),
 and Pocket AI Windows Bundle (incl. the recording-retention and frontend
-embedding gates).
+embedding gates). The speech-hardening branch extends the lanes (these are
+workflow changes; each lane's own run is the evidence, not this paragraph):
+Desktop CI gains an **ubuntu-latest** Rust lane (Linux was previously
+untested), a **speech language-table sync** gate
+(`scripts/check_speech_language_sync.py` — the Kotlin `VoiceLanguage` alias
+table must stay byte-identical to `packages/speech-contracts/languages.v1.json`),
+a **vendor ctest + ABI symbol** job against `vendor/Inbharat-audiocpp`
+(including `ibaudio_runtime_get_audio_cpp_status` in both ABI manifests), and
+the golden-hash mobile-protection pointer is re-baselined in the same branch.
 
 The two historically red gates were fixed by design, not by weakening:
 
@@ -475,6 +482,31 @@ cd android-app/UnoOneAgent && ./gradlew test
 
 ## Latest verified results
 
+### Speech + Android hardening cycle (branch `speech/universal-audio-hardening`, 2026-09-07)
+
+Host (Windows 11, MSVC, Rust 1.93) and emulator (AVD "Medium Phone", API
+36.1, x86_64) evidence from the speech-architecture hardening cycle:
+
+| Gate | Result |
+|---|---|
+| Android host JVM unit tests (touched modules: app, modelmanager, voice, languagepacks, safetyguard, safety) | BUILD SUCCESSFUL, 2026-09-07 |
+| Language-pack install, all 7 baseline packs (en/hi/bn/ta/te/kn/ml), size + SHA-256 verified on-device | `LanguagePackInstallTest` green, run twice (gradle + direct instrumentation); fixed first: 5 Indic TTS pins re-pinned after an upstream re-upload (+76 bytes each, new hashes verified by a real 114 MB download), gemma-4-E4B rounded size corrected |
+| Assamese refusal (planned pack, no qualified models) | Asserted in the same test: install returns Failure, state stays not-installed |
+| Real ONNX TTS synthesis (en + hi) + STT engine loads | `SpeechEngineFunctionalTest` — `ttsFailures=0 sttFailures=0` |
+| Indic TTS→ASR round trip | `IndicSpeechRoundTripTest` green (hi, 41 chars) |
+| Uninstall/retain shared ASR + repair | `LanguagePackRepairRetainTest` green |
+| No-cloud speech fallback refusal | `SpeechNoCloudFallbackTest` 4/4 green after the microphone-FGS fail-closed fix (targetSDK 35: revoked RECORD_AUDIO no longer crashes the process at cold start) |
+| Headless on-device agent logic batch | 41/41 green after two fixes (instrumented SafetyGuard copy re-pinned to the production risk table; page-agent asset vendored) |
+| Secure browser: byte-authentic page-agent asset (196,197 bytes), guarded form fill, local-page read, DOCX/PDF round trips | 8/8 across `SecureBrowserPolicyHeadlessTest` (4), `PageAgentFormDeviceTest` (1), `ReadPageDeviceTest` (1), `DocumentFillEngineDeviceTest` (2) |
+| Local-brain (Gemma) device qualification | Honestly skipped via `assumeTrue` — no `.litertlm` model on the emulator |
+| Mobile Protection CI on the branch | Green (each commit) |
+
+Older evidence tiers (Windows MSVC ctest/ABI/readiness, the 2026-09-03
+pendrive re-stage, and per-toolchain boundaries) are recorded in
+[`docs/SPEECH_TEST_EVIDENCE.md`](docs/SPEECH_TEST_EVIDENCE.md). Physical
+Pocket AI evidence from July 29, 2026 follows; both are true, with their
+dates.
+
 Physical Pocket AI release verification on July 29, 2026:
 
 | Gate | Result |
@@ -592,6 +624,8 @@ The installer PWA is implemented but intentionally keeps downloads locked when a
 - [Safety](docs/SAFETY.md)
 - [Model acquisition and distribution](docs/MODEL_ACQUISITION_AND_DISTRIBUTION.md)
 - [Speech model qualification](docs/SPEECH_MODEL_QUALIFICATION.md)
+- [Speech architecture](docs/SPEECH_ARCHITECTURE.md) — one cross-platform speech contract, backend routing, and the truthful readiness/readiness-drift rules
+- [Speech test evidence](docs/SPEECH_TEST_EVIDENCE.md) — per-toolchain evidence tiers (HOST / EMULATOR / CI / BUILD-ONLY / PHYSICAL) for every speech claim
 - [Privacy policy](docs/play-review/privacy-policy.md)
 - [Data safety](docs/play-review/data-safety.md)
 

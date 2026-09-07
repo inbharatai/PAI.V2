@@ -8,6 +8,12 @@ target/
 **/node_modules/
 apps/desktop/src/dist/
 **/dist/
+# Exception: the page-agent bundle is a byte-pinned release artifact (size +
+# SHA-256 asserted by SecureBrowserPolicyHeadlessTest and the mobile golden
+# hashes). It is vendored deliberately so a fresh clone reproduces the shipped
+# secure-browser asset without `npm run bundle:android`.
+!web-runtime/page-agent-unoone/dist/
+!web-runtime/page-agent-unoone/dist/unoone-page-agent.js
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

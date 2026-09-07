@@ -34,19 +34,35 @@ has no Rust sanitizer lane; the C++ vendor side runs its own sanitizer
 support on other toolchains). Any sanitizer evidence for Windows is absent,
 not pending.
 
-## Android (BUILD-ONLY + HOST unit tests — no device claims)
+## Android (EMULATOR instrumented evidence 2026-09-07 + BUILD-ONLY + HOST)
+
+Instrumented execution evidence from 2026-09-07 on the host emulator
+(`emulator-5554`, AVD "Medium Phone", API 36.1, x86_64, 6144 MB RAM). All
+runs used the app assembled from the working tree, with the A9
+foreground-service fix, the corrected model pins, and the vendored page-agent
+asset in the APK.
 
 | Claim | Evidence | Tier |
 |---|---|---|
+| Cloud-fallback refusal with missing models (STT whisper/transducer/omnilingual + TTS) | `SpeechNoCloudFallbackTest` 4/4 green after the A9 fix (2026-09-07) | EMULATOR |
+| Headless agent logic on-device ART (notes CRUD, master-disable, safety pipeline, encrypted cache, safety guard, phone control, memory, secure browser policy) | Batch run 41/41 after two fixes: the `SafetyGuardHeadlessTest` instrumented copy re-pinned to the production risk table (`read_screen` = STRONG_CONFIRM, matching the JVM coverage pin), and the page-agent asset vendored (below) | EMULATOR |
+| All 7 baseline language packs install, size+SHA-verify, and report `installed/healthy/verified` — with the re-pinned upstream TTS bytes | `LanguagePackInstallTest` 1/1, twice (gradle `connectedDebugAndroidTest` exit 0 at 15:29; direct `am instrument` exit 0 at 16:03). Root cause fixed first: upstream `willwade/mms-tts-multilingual-models-onnx` re-uploaded the 5 Indic `model.onnx` files (+76 bytes each) after the manifest was pinned; new pins taken from the verified content hash (X-Linked-ETag, cross-checked by a real 114 MB host download + SHA-256), and `gemma-4-e4b`'s rounded `sizeBytes` corrected to the true 3,659,530,240 | EMULATOR |
+| Assamese (`as-IN`) refuses to install — planned, not silently active | `as-IN-standard` → `Failure: "Assamese is listed as planned; no qualified downloadable models are configured"`; state stays not-installed (asserted in the same test) | EMULATOR |
+| Re-pinned TTS bytes actually synthesize (model load → ONNX inference → non-empty PCM) and ASR engines load | `SpeechEngineFunctionalTest` 1/1: TTS en PCM (26.4 s), TTS hi PCM on the new bytes (13.0 s), English transducer init Success, omnilingual init Success — `ttsFailures=0 sttFailures=0` | EMULATOR |
+| Synthesized Indic speech recognized by the omnilingual ASR | `IndicSpeechRoundTripTest` 1/1: hi round trip, 41 chars | EMULATOR |
+| Pack uninstall retains the shared ASR while dependents exist; repair reinstalls | `LanguagePackRepairRetainTest` 1/1 (5 m 06 s, includes a real repair re-download) | EMULATOR |
+| Page-agent runtime asset packaged and byte-authentic (196,197 bytes, SHA-256 `d798e06e…`), guarded form-fill in the packaged WebView, local-page read, DOCX + PDF-AcroForm round trips with originals unchanged | `SecureBrowserPolicyHeadlessTest` 4/4 (incl. the previously failing asset gate), `SecureBrowserPageAgentFormDeviceTest` 1/1, `SecureBrowserReadPageDeviceTest` 1/1, `DocumentFillEngineDeviceTest` 2/2 — one `am instrument` batch, 13 tests / 0 failed | EMULATOR |
+| Microphone FGS fail-closed (targetSDK 35 contract) | A9 fix: `VoiceService.start` refuses without RECORD_AUDIO; `startForeground` failure is caught, logged, and `stopSelf()` — the mic-revoked cold-start crash loop is gone; verified by the green re-runs above (the pre-fix batch crashed the instrumentation process) | EMULATOR |
+| Local-brain qualification (Gemma eval/planner) | Honest `assumeTrue` skips — no `.litertlm` model on the emulator; `ModelPathDiagnosticTest` ran and dumped resolution | EMULATOR (documented skips) |
+| Host JVM unit tests for all touched modules | `:app/:modelmanager/:voice/:languagepacks/:safetyguard/:safety:testDebugUnitTest` — BUILD SUCCESSFUL, 2026-09-07 | HOST (JVM) |
 | `libibaudio.so` + `libibaudio_jni.so` + all RC test executables cross-compile for arm64-v8a (NDK r25.1.8937393, android-28) | `scripts/build_android_scaffold.sh --tests`, 60/60 targets, 2026-08-31; recorded in `vendor/Inbharat-audiocpp/ANDROID.md` | BUILD-ONLY |
 | Same tree compiles with ASan+UBSan | `--tests --sanitizers` lane, 2026-08-31 | BUILD-ONLY |
-| Kotlin language-contract mirror behaves identically to the Rust table | `:voice:testDebugUnitTest` on host, 52 tests / 0 failures (incl. `VoiceLanguageCanonicalizeTest` 12/12), 2026-08-31 | HOST (JVM unit tests; no device) |
+| Kotlin language-contract mirror behaves identically to the Rust table | `:voice:testDebugUnitTest` on host, 52 tests / 0 failures (incl. `VoiceLanguageCanonicalizeTest` 12/12), 2026-08-31 | HOST (JVM unit tests) |
 | Kotlin alias table == `languages.v1.json` | `scripts/check_speech_language_sync.py` (fails CI on drift; verified pass + fail paths) | CI-enforced |
 
-Android device gates (the eight in `ANDROID.md`) are **unset**: no emulator
-run, no physical run, no instrumented execution this cycle. The Gradle
-module's `ndkVersion` is property-overridable and defaults to the
-BUILD-ONLY-verified r25.1.
+No **physical-device** run has been made this cycle — every row above is
+emulator-tier. The Gradle module's `ndkVersion` is property-overridable and
+defaults to the BUILD-ONLY-verified r25.1.
 
 ## Linux x86_64 / macOS / Raspberry Pi ARM64
 
