@@ -1,15 +1,18 @@
 package com.unoone.agent.voice
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.runtime.AgentRuntimeGate
 import com.unoone.agent.core.util.Logger
@@ -142,9 +145,25 @@ class VoiceService : Service() {
 
         fun start(context: Context) {
             if (!AgentRuntimeGate.isEnabled()) return
+            // Finding A9: targetSDK 35 requires RECORD_AUDIO to be granted BEFORE a
+            // microphone-type foreground service may promote itself. Starting it
+            // without the grant raises SecurityException inside Service.onCreate —
+            // beyond any try/catch the caller has — and kills the whole process.
+            // Fail closed instead: no grant, no service.
+            if (!hasMicrophonePermission(context)) {
+                Logger.w("VoiceService: microphone permission not granted; voice service not started")
+                return
+            }
             val intent = Intent(context, VoiceService::class.java)
-            context.startForegroundService(intent)
+            runCatching { context.startForegroundService(intent) }
+                .onFailure {
+                    Logger.e("VoiceService: startForegroundService rejected (app not in eligible state)", it)
+                }
         }
+
+        private fun hasMicrophonePermission(context: Context): Boolean =
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
 
         fun stop(context: Context) {
             val intent = Intent(context, VoiceService::class.java)
@@ -170,7 +189,11 @@ class VoiceService : Service() {
             stopForegroundAndShutdown()
             return
         }
-        startForegroundWithNotification("Listening locally — Mic active. Say 'UnoOne' or 'Listen' to give a command.")
+        if (!startForegroundWithNotification("Listening locally — Mic active. Say 'UnoOne' or 'Listen' to give a command.")) {
+            // A9: foreground promotion was refused (permission/eligibility); the
+            // service has already stopped itself. Never fall through to engine init.
+            return
+        }
         VoiceAgentRuntime.transition(VoiceAgentState.INITIALISING, "voice service created")
         Logger.i("VoiceService: Created")
     }
@@ -201,6 +224,13 @@ class VoiceService : Service() {
                 voiceCommandCallback?.invoke(command)
             }
             return START_STICKY
+        }
+        // A9: if foreground promotion failed in onCreate the service is already
+        // stopping; starting the mic loop here would record without a foreground
+        // promotion (an implicit-policy violation at best, a second crash path at worst).
+        if (!foregroundStarted) {
+            Logger.w("VoiceService: onStartCommand without a foreground promotion; not starting the wake loop")
+            return START_NOT_STICKY
         }
         ensureEnginesAndMonitoring()
         return START_STICKY
@@ -594,10 +624,24 @@ class VoiceService : Service() {
         manager.notify(NOTIFICATION_ID, createNotification(text))
     }
 
-    private fun startForegroundWithNotification(text: String) {
-        if (foregroundStarted) return
-        startForeground(NOTIFICATION_ID, createNotification(text))
-        foregroundStarted = true
+    private fun startForegroundWithNotification(text: String): Boolean {
+        if (foregroundStarted) return true
+        return try {
+            startForeground(NOTIFICATION_ID, createNotification(text))
+            foregroundStarted = true
+            true
+        } catch (e: Exception) {
+            // Finding A9 (defense in depth): the permission check in start() covers
+            // the common case, but Android 14+ also requires the app to be in an
+            // "eligible state" to start a microphone FGS — a condition we cannot
+            // pre-check and that can change between start() and onCreate(). An
+            // uncaught SecurityException here used to escape Service.onCreate and
+            // kill the whole process. Stop the service instead; the wake loop
+            // cannot legally run without the foreground promotion anyway.
+            Logger.e("VoiceService: microphone foreground promotion not permitted; stopping service", e)
+            stopSelf()
+            false
+        }
     }
 
     /** Gate-closed shutdown that still satisfies the FGS start contract (finding A5). */
@@ -654,9 +698,11 @@ class VoiceService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         // Restart service if killed by aggressive battery optimization (Xiaomi, Huawei, Oppo, etc.)
+        // A9: goes through the hardened start() — a bare startForegroundService() here
+        // throws ForegroundServiceStartNotAllowedException whenever the task was
+        // removed while the app lost its foreground-service eligibility.
         if (AgentRuntimeGate.isEnabled()) {
-            val restartIntent = Intent(this, VoiceService::class.java)
-            startForegroundService(restartIntent)
+            start(this)
         }
         super.onTaskRemoved(rootIntent)
     }

@@ -40,7 +40,6 @@ class SafetyGuardHeadlessTest {
     @Test
     fun confirmToolsRequireSingleConfirmation() {
         assertEquals(RiskLevel.CONFIRM, guard.classify("open_url"))
-        assertEquals(RiskLevel.CONFIRM, guard.classify("read_screen"))
         assertEquals(RiskLevel.CONFIRM, guard.classify("share_text"))
     }
 
@@ -50,6 +49,11 @@ class SafetyGuardHeadlessTest {
         assertEquals(RiskLevel.STRONG_CONFIRM, guard.classify("delete_all_notes"))
         assertEquals(RiskLevel.STRONG_CONFIRM, guard.classify("describe_scene"))
         assertEquals(RiskLevel.STRONG_CONFIRM, guard.classify("system_control"))
+        // Screen reading is STRONG_CONFIRM by design (pinned by the JVM
+        // SafetyGuardToolCoverageTest): it exposes the user's entire screen
+        // contents, so it sits with the camera/projection tier, not with
+        // open_url/share_text. This instrumented copy had drifted to CONFIRM.
+        assertEquals(RiskLevel.STRONG_CONFIRM, guard.classify("read_screen"))
     }
 
     @Test
