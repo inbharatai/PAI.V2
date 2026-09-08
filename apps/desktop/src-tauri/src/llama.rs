@@ -821,9 +821,8 @@ impl ModelManager {
         //       while the UI is stuck showing "no model loaded" even though
         //       the server is up and healthy.
         *self.status.lock().unwrap() = ModelStatus::Loading;
-        let disk_sha256 = Some(Self::sha256_file(&model_path).map_err(|e| {
+        let disk_sha256 = Some(Self::sha256_file(&model_path).inspect_err(|_e| {
             *self.status.lock().unwrap() = ModelStatus::Error;
-            e
         })?);
 
         // Find an available port dynamically so multiple runs cannot collide.
