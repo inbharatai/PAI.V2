@@ -664,11 +664,7 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
 }
 
 fn current_architecture() -> &'static str {
-    match std::env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        other => other,
-    }
+    std::env::consts::ARCH
 }
 
 fn failure(
