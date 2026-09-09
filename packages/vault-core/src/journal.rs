@@ -267,8 +267,10 @@ impl Journal {
         let Ok(json) = serde_json::to_string(&cleared) else {
             return false;
         };
-        let expected =
-            hex::encode(crate::crypto::hmac_sha256(b"unoone-vault-journal", json.as_bytes()));
+        let expected = hex::encode(crate::crypto::hmac_sha256(
+            b"unoone-vault-journal",
+            json.as_bytes(),
+        ));
         expected.eq_ignore_ascii_case(&entry.entry_hmac)
     }
 
@@ -453,7 +455,10 @@ mod tests {
             result.errors
         );
         assert!(
-            result.errors.iter().any(|e| e.contains("HMAC verification")),
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("HMAC verification")),
             "the error must name the HMAC failure, got: {:?}",
             result.errors
         );

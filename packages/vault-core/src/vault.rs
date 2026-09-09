@@ -126,11 +126,12 @@ impl Vault {
         // allowed to fabricate the root directory, explicitly and up front;
         // validation itself never creates anything (see validate_vault_root).
         // The traversal check inside validation still sees the raw path.
-        std::fs::create_dir_all(vault_root)
-            .map_err(|e| VaultError::Io(std::io::Error::other(format!(
+        std::fs::create_dir_all(vault_root).map_err(|e| {
+            VaultError::Io(std::io::Error::other(format!(
                 "cannot create vault root {}: {e}",
                 vault_root.display()
-            ))))?;
+            )))
+        })?;
         Self::validate_vault_root(vault_root)?;
 
         // Refuse to silently overwrite an initialised vault: a valid header

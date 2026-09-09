@@ -941,7 +941,14 @@ impl ModelManager {
             .is_ok()
             {
                 // Port is open. Verify the server identity before claiming LOADED.
-                match Self::verify_server_identity(port, &config.model_path, vault_root, disk_sha256.clone()).await {
+                match Self::verify_server_identity(
+                    port,
+                    &config.model_path,
+                    vault_root,
+                    disk_sha256.clone(),
+                )
+                .await
+                {
                     Ok(mut identity) => {
                         identity.pid = pid;
                         *self.server_identity.lock().unwrap() = Some(identity);
