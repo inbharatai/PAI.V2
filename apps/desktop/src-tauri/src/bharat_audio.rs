@@ -13,12 +13,14 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
-use unoone_speech_contracts::LanguageTag;
+use unoone_speech_contracts::{provider_serves, resolve_provider_key, LanguageTag, SpeechTask};
 
 const CONFIG_RELATIVE_PATH: &str = "SPEECH/config/inbharat-audio.v1.json";
 const ACCEPTANCE_RELATIVE_PATH: &str = "SPEECH/acceptance/audio-cpp.acceptance.v1.json";
@@ -235,6 +237,60 @@ fn confine_audio_input(root: &Path, audio_path: &str) -> Result<PathBuf, String>
     Ok(input)
 }
 
+/// How long a transient TTS WAV may outlive its request in the OS temp area
+/// before a later synthesize call sweeps it. Playback needs the file to
+/// survive the request that produced it; an hour comfortably covers "play it
+/// back a few times" while guaranteeing plaintext derived from user text
+/// never accumulates on disk.
+const TTS_OUTPUT_TTL: Duration = Duration::from_secs(3600);
+
+/// The transient TTS output area, OUTSIDE the encrypted vault tree (see the
+/// note in `synthesize`). A sibling of the `unoone-stt` capture area the
+/// recording module already owns.
+fn tts_output_dir() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("unoone-tts");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot prepare the TTS output temp area: {e}"))?;
+    dir.canonicalize()
+        .map_err(|e| format!("cannot canonicalize the TTS output temp area: {e}"))
+}
+
+/// Best-effort removal of TTS outputs older than `ttl`. Never fails a speech
+/// request: a sweep error just leaves a file for the next sweep (or the OS
+/// temp cleaner). The TTL is a parameter so tests can exercise the age
+/// boundary without forging file times.
+fn sweep_tts_outputs_older_than(dir: &Path, ttl: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("inbharat_tts_")
+        {
+            continue;
+        }
+        let stale = metadata
+            .modified()
+            .map(|mtime| mtime.elapsed().map(|age| age > ttl).unwrap_or(true))
+            .unwrap_or(true);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn sweep_stale_tts_outputs(dir: &Path) {
+    sweep_tts_outputs_older_than(dir, TTS_OUTPUT_TTL)
+}
+
 fn read_manifest(vault_root: &str) -> Result<(PathBuf, InBharatAudioManifest), String> {
     let root = canonical_root(vault_root)?;
     let path = canonical_under(&root, CONFIG_RELATIVE_PATH, true)?;
@@ -381,6 +437,63 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Memoized SHA-256 for acceptance-gate assets.
+///
+/// The preflight gate hashes the ASR/TTS model trees (≈2.5 GB) against the
+/// acceptance attestation before every subprocess spawn, and one speech
+/// request runs the gate twice (`status()` + the request itself) — every
+/// transcribe/synthesize call re-read gigabytes of pendrive bytes for files
+/// that did not change. Memoizing by (path, size, mtime) — the same posture
+/// as the legacy plane's `verify_legacy_asset` — keeps the hash-before-spawn
+/// property real while making unchanged assets a metadata lookup: any size
+/// or mtime change is a cache miss and a full re-hash, and entries expire
+/// after `HASH_MEMO_TTL` so a long-lived process periodically re-verifies
+/// the bytes for real. A same-size, same-mtime byte swap inside the TTL is
+/// the residual window, accepted deliberately (matches the legacy plane) —
+/// the package manifest sweep still independently verifies the vault.
+type HashMemoKey = (PathBuf, u64, u64);
+type HashMemo = HashMap<HashMemoKey, (Instant, String)>;
+const HASH_MEMO_TTL: Duration = Duration::from_secs(600);
+
+fn sha256_file_memoized(path: &Path) -> Result<String, String> {
+    fn memo() -> &'static Mutex<HashMemo> {
+        static MEMO: OnceLock<Mutex<HashMemo>> = OnceLock::new();
+        MEMO.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("cannot stat {} for SHA-256: {e}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "refusing symlinked audio asset: {}",
+            path.display()
+        ));
+    }
+    let modified = metadata
+        .modified()
+        .map_err(|e| format!("cannot read mtime of {}: {e}", path.display()))?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let key = (path.to_path_buf(), metadata.len(), modified);
+    if let Ok(guard) = memo().lock() {
+        if let Some((hashed_at, digest)) = guard.get(&key) {
+            if hashed_at.elapsed() < HASH_MEMO_TTL {
+                return Ok(digest.clone());
+            }
+        }
+    }
+    let digest = sha256_file(path)?;
+    if let Ok(mut guard) = memo().lock() {
+        // Bound the cache; the TTL retain keeps the working set tiny in
+        // practice but the cap guarantees it even under adversarial churn.
+        if guard.len() >= 4096 {
+            guard.retain(|_, (hashed_at, _)| hashed_at.elapsed() < HASH_MEMO_TTL);
+        }
+        guard.insert(key, (Instant::now(), digest.clone()));
+    }
+    Ok(digest)
+}
+
 fn sha256_asset(path: &Path) -> Result<String, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|e| format!("cannot stat {} for SHA-256: {e}", path.display()))?;
@@ -391,7 +504,7 @@ fn sha256_asset(path: &Path) -> Result<String, String> {
         ));
     }
     if metadata.is_file() {
-        return sha256_file(path);
+        return sha256_file_memoized(path);
     }
     if !metadata.is_dir() {
         return Err(format!(
@@ -449,7 +562,10 @@ fn sha256_asset(path: &Path) -> Result<String, String> {
     hasher.update(b"IBAUDIO_TREE_SHA256_V1\n");
     for relative in files {
         let relative_text = relative.to_string_lossy().replace('\\', "/");
-        let file_hash = sha256_file(&path.join(&relative))?;
+        // The tree hash enumerates and re-keys every file on every call; only
+        // the per-file digests are memoized, so added/removed/renamed files
+        // still change the tree hash immediately.
+        let file_hash = sha256_file_memoized(&path.join(&relative))?;
         hasher.update(relative_text.as_bytes());
         hasher.update([0u8]);
         hasher.update(file_hash.as_bytes());
@@ -709,6 +825,45 @@ fn validate_language(
     ))
 }
 
+/// Enforce the SPEECH_ARCHITECTURE invariant on the InBharat route: the
+/// configured model family must actually serve the requested language
+/// according to the shared provider table (`languages.v1.json`), independent
+/// of what the pack manifest allowlists. The manifest allowlist decides what
+/// the PACK permits; the provider table decides what the MODEL can truthfully
+/// do — allowlisting a language in the manifest can never add coverage
+/// (without this check, a manifest line allowlisting `as` would route
+/// Assamese straight to Qwen3-ASR, which cannot serve it).
+fn ensure_provider_coverage(
+    task: &SpeechTaskConfig,
+    task_kind: SpeechTask,
+    tag: &LanguageTag,
+) -> Result<(), String> {
+    if tag.is_auto() {
+        // `auto` is the ASR detect directive: the engine decides the language
+        // at inference time, so there is no coverage to assert up front.
+        return Ok(());
+    }
+    let Some(key) = resolve_provider_key(&task.family, task_kind) else {
+        return Err(format!(
+            "speech model family '{}' is not a known provider in the language table",
+            task.family
+        ));
+    };
+    if provider_serves(&key, task_kind, tag) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the {} model '{}' does not serve language '{}' (provider language table)",
+            match task_kind {
+                SpeechTask::Asr => "ASR",
+                SpeechTask::Tts => "TTS",
+            },
+            task.family,
+            tag
+        ))
+    }
+}
+
 #[tauri::command]
 pub fn get_bharat_audio_status(vault_root: String) -> BharatAudioStatus {
     status(&vault_root)
@@ -819,6 +974,10 @@ pub fn transcribe(
         let tag = validate_language(&manifest, trimmed)?;
         (trimmed.to_string(), tag)
     };
+    // Provider-table coverage is enforced on the InBharat route itself, not
+    // only on the legacy fallback: the manifest allowlist alone must never be
+    // enough to route a language to a model family that cannot serve it.
+    ensure_provider_coverage(task, SpeechTask::Asr, &language_tag)?;
     cmd.arg("--language").arg(&cli_language);
     let transcript = {
         // The transcript file must be deleted on EVERY path — CLI failure,
@@ -861,12 +1020,22 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         .ok_or_else(|| "TTS is not configured in the Pocket AI speech pack".to_string())?;
     let model = canonical_under(&root, &task.model_relative_path, true)?;
     let cli = audio_cpp_cli(&root)?;
-    let relative_output = format!(
+    // Synthesized speech is plaintext derived from user text. It previously
+    // persisted unencrypted at VAULT/recordings/tts/ — plaintext inside the
+    // encrypted-vault tree, never cleaned up. It now goes to a transient OS
+    // temp area OUTSIDE the vault (the audio can still be played from the
+    // returned path), and every call sweeps outputs older than the TTL so
+    // nothing accumulates indefinitely.
+    let output_dir = tts_output_dir()?;
+    sweep_stale_tts_outputs(&output_dir);
+    let output = output_dir.join(format!(
         // Unique per-call output name (see the ASR transcript note above).
-        "VAULT/recordings/tts/inbharat_tts_{}.wav",
+        "inbharat_tts_{}.wav",
         uuid::Uuid::new_v4().simple()
-    );
-    let output = canonical_under(&root, &relative_output, false)?;
+    ));
+    // Defensive: never write through a pre-existing path (a planted symlink
+    // at our generated name would make the CLI write elsewhere).
+    let _ = std::fs::remove_file(&output);
 
     let mut cmd = Command::new(cli);
     cmd.arg("--task")
@@ -882,7 +1051,7 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         .arg("--out")
         .arg(&output);
     let trimmed = language.trim();
-    let (cli_language, _language_tag) = if trimmed.is_empty() {
+    let (cli_language, language_tag) = if trimmed.is_empty() {
         // Pack default (see transcribe): canonicalized but exempt from the
         // user-facing allowlist check.
         let default = task
@@ -902,6 +1071,8 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         let tag = validate_language(&manifest, trimmed)?;
         (trimmed.to_string(), tag)
     };
+    // Same InBharat-route coverage rule as transcription.
+    ensure_provider_coverage(task, SpeechTask::Tts, &language_tag)?;
     cmd.arg("--language").arg(&cli_language);
     if let Err(error) = run_command_timeout(cmd, INFERENCE_TIMEOUT) {
         // A failed run may still have written a partial WAV — remove it so
@@ -1116,5 +1287,93 @@ mod tests {
 
         // Missing file: rejected.
         assert!(confine_audio_input(&root, "Z:\\does\\not\\exist.wav").is_err());
+    }
+
+    /// The acceptance-gate hash memo: an unchanged file (same size + mtime)
+    /// serves the memoized digest, and any change to the file is a cache miss
+    /// that re-hashes for real. This is what stops every speech request from
+    /// re-reading 2.5 GB of model trees.
+    #[test]
+    fn hash_memo_serves_unchanged_files_and_invalidates_on_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("memo-model.bin");
+        std::fs::write(&file, b"first payload").unwrap();
+        let first = sha256_file_memoized(&file).expect("first hash");
+        let second = sha256_file_memoized(&file).expect("memoized hash");
+        assert_eq!(
+            first, second,
+            "unchanged file must serve the memoized digest"
+        );
+
+        // A size change (any real modification) must be a cache miss.
+        std::fs::write(&file, b"second payload, different length").unwrap();
+        let third = sha256_file_memoized(&file).expect("re-hash after change");
+        assert_ne!(first, third, "changed file must be re-hashed");
+        assert_eq!(
+            third,
+            sha256_file(&file).expect("direct hash"),
+            "memoized and direct digests must agree"
+        );
+    }
+
+    fn speech_task_config(family: &str) -> SpeechTaskConfig {
+        SpeechTaskConfig {
+            family: family.to_owned(),
+            model_relative_path: "SPEECH/models/x.gguf".to_owned(),
+            default_language: None,
+        }
+    }
+
+    /// The InBharat route enforces the provider table, not just the manifest
+    /// allowlist: a manifest line allowlisting Assamese can never route it to
+    /// Qwen3-ASR, and the production `omnivoice` TTS family resolves to its
+    /// table key and serves exactly what the table says.
+    #[test]
+    fn provider_coverage_is_enforced_on_the_inbharat_route() {
+        let hindi = unoone_speech_contracts::canonicalize("hi").unwrap();
+        let assamese = unoone_speech_contracts::canonicalize("as").unwrap();
+
+        let qwen3 = speech_task_config("qwen3_asr");
+        assert!(ensure_provider_coverage(&qwen3, SpeechTask::Asr, &hindi).is_ok());
+        assert!(ensure_provider_coverage(&qwen3, SpeechTask::Asr, &assamese).is_err());
+
+        // The manifest's bare "omnivoice" family must resolve to omnivoice_tts.
+        let omnivoice = speech_task_config("omnivoice");
+        assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Tts, &hindi).is_ok());
+        let english = unoone_speech_contracts::canonicalize("en").unwrap();
+        assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Tts, &english).is_ok());
+        assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Tts, &assamese).is_err());
+        // OmniVoice does not do ASR at all.
+        assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Asr, &hindi).is_err());
+
+        // An unknown family fails closed with zero coverage.
+        let unknown = speech_task_config("does-not-exist");
+        assert!(ensure_provider_coverage(&unknown, SpeechTask::Tts, &hindi).is_err());
+
+        // The `auto` ASR detect directive is exempt (the engine decides).
+        let auto = unoone_speech_contracts::canonicalize("auto").unwrap();
+        assert!(ensure_provider_coverage(&qwen3, SpeechTask::Asr, &auto).is_ok());
+    }
+
+    /// TTS outputs are transient: they live outside the vault tree, and the
+    /// sweep removes only `inbharat_tts_*` files whose age exceeds the TTL —
+    /// fresh outputs and unrelated files are never touched.
+    #[test]
+    fn tts_sweep_removes_only_stale_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("inbharat_tts_current.wav");
+        std::fs::write(&output, b"RIFF").unwrap();
+        let unrelated = dir.path().join("someone-elses.wav");
+        std::fs::write(&unrelated, b"RIFF").unwrap();
+
+        // A just-written output is younger than the real TTL and survives.
+        sweep_tts_outputs_older_than(dir.path(), TTS_OUTPUT_TTL);
+        assert!(output.exists(), "fresh output must survive the real TTL");
+        assert!(unrelated.exists(), "unrelated files must never be touched");
+
+        // A zero TTL treats everything as stale — but still only our prefix.
+        sweep_tts_outputs_older_than(dir.path(), Duration::ZERO);
+        assert!(!output.exists(), "stale output must be swept");
+        assert!(unrelated.exists(), "unrelated files must never be touched");
     }
 }

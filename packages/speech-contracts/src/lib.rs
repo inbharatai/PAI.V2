@@ -196,6 +196,53 @@ impl SpeechTask {
                 | (SpeechTask::Tts, ProviderKind::Both)
         )
     }
+
+    fn suffix(&self) -> &'static str {
+        match self {
+            SpeechTask::Asr => "asr",
+            SpeechTask::Tts => "tts",
+        }
+    }
+}
+
+/// Resolve a speech-pack model `family` name to its provider-table key for
+/// `task`, or `None` when the family is not a known provider.
+///
+/// Speech manifests name model families ("omnivoice", "qwen3-asr") while the
+/// provider table keys providers ("omnivoice_tts", "qwen3_asr") — and the two
+/// vocabularies disagree about dashes, underscores, and the task suffix. This
+/// is the single place that translation may happen: exact table key first,
+/// then a dash/underscore-insensitive comparison, then the family with the
+/// task suffix appended ("omnivoice" + Tts → "omnivoice_tts"). Callers must
+/// hand the resolved key (never the raw family) to `provider_serves` /
+/// `provider_languages`, so an unknown or mismatched family reports zero
+/// coverage instead of accidentally matching.
+pub fn resolve_provider_key(family: &str, task: SpeechTask) -> Option<String> {
+    fn fold(value: &str) -> String {
+        value
+            .chars()
+            .map(|c| if c == '-' { '_' } else { c })
+            .collect()
+    }
+    let family = family.trim();
+    if family.is_empty() {
+        return None;
+    }
+    let providers = &table().providers;
+    // 1. Exact table key.
+    if providers.contains_key(family) {
+        return Some(family.to_owned());
+    }
+    // 2/3. Dash-insensitive match, then the family with the task suffix.
+    for candidate in [family.to_owned(), format!("{family}_{}", task.suffix())] {
+        let folded = fold(&candidate);
+        for key in providers.keys() {
+            if fold(key) == folded {
+                return Some(key.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Does `provider` truthfully serve `language` for `task`?
@@ -532,6 +579,68 @@ mod tests {
         assert!(provider_serves("whisper_cpp", SpeechTask::Asr, &english));
         assert!(!provider_serves("omnivoice_tts", SpeechTask::Asr, &english));
         assert!(provider_serves("omnivoice_tts", SpeechTask::Tts, &english));
+    }
+
+    // ---- Manifest-family → provider-key resolution ----
+
+    #[test]
+    fn resolves_manifest_families_to_table_keys() {
+        // The production speech manifest writes families "qwen3_asr" and
+        // "omnivoice"; the table keys are "qwen3_asr" and "omnivoice_tts".
+        assert_eq!(
+            resolve_provider_key("qwen3_asr", SpeechTask::Asr).as_deref(),
+            Some("qwen3_asr")
+        );
+        assert_eq!(
+            resolve_provider_key("qwen3-asr", SpeechTask::Asr).as_deref(),
+            Some("qwen3_asr")
+        );
+        assert_eq!(
+            resolve_provider_key("omnivoice", SpeechTask::Tts).as_deref(),
+            Some("omnivoice_tts")
+        );
+        assert_eq!(
+            resolve_provider_key("omnivoice-tts", SpeechTask::Tts).as_deref(),
+            Some("omnivoice_tts")
+        );
+        // Exact keys (including the dash-spelled one) resolve to themselves.
+        assert_eq!(
+            resolve_provider_key("indicconformer-asr", SpeechTask::Asr).as_deref(),
+            Some("indicconformer-asr")
+        );
+        assert_eq!(
+            resolve_provider_key("whisper_cpp", SpeechTask::Asr).as_deref(),
+            Some("whisper_cpp")
+        );
+        assert_eq!(
+            resolve_provider_key("piper", SpeechTask::Tts).as_deref(),
+            Some("piper_tts")
+        );
+    }
+
+    #[test]
+    fn unresolved_family_has_no_coverage() {
+        // A TTS-only family asked to do ASR resolves to nothing — and an
+        // unknown family never matches. Callers derive zero coverage from
+        // None rather than guessing.
+        assert_eq!(resolve_provider_key("omnivoice", SpeechTask::Asr), None);
+        assert_eq!(resolve_provider_key("", SpeechTask::Tts), None);
+        assert_eq!(resolve_provider_key("  ", SpeechTask::Tts), None);
+        assert_eq!(
+            resolve_provider_key("does-not-exist", SpeechTask::Tts),
+            None
+        );
+    }
+
+    #[test]
+    fn resolved_key_agrees_with_provider_serves() {
+        // The whole point of the resolver: coverage questions asked through a
+        // manifest family must give the same answer as the raw table key.
+        let hindi = canonicalize("hi").unwrap();
+        let assamese = canonicalize("as").unwrap();
+        let key = resolve_provider_key("omnivoice", SpeechTask::Tts).unwrap();
+        assert!(provider_serves(&key, SpeechTask::Tts, &hindi));
+        assert!(!provider_serves(&key, SpeechTask::Tts, &assamese));
     }
 
     // ---- Streaming-class labels ----

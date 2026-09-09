@@ -58,10 +58,16 @@ core manifest already pass 80/80 on Windows). Migration rules:
 2. The CLI implementation stays the fallback behind the same trait; the
    C-ABI implementation replaces it without touching callers.
 3. Gate order is a security property and must survive any migration:
-   manifest checks → `verify_pocket_ai_package` (HMAC) → **only then** CLI
-   spawn → `query_readiness` → `check_runtime_status` (adapter compiled +
-   commit match + runtime-probed `inference_ready`) → `verify_acceptance`.
-   The readiness CLI is never spawned before the package HMAC gate passes.
+   manifest checks → `verify_pocket_ai_package` (HMAC) → `verify_acceptance`
+   (SHA-256 of both runtime CLIs and both model trees against the acceptance
+   attestation) → **only then** the first CLI spawn (`query_readiness`) →
+   `check_runtime_status` (adapter compiled + commit match + runtime-probed
+   `inference_ready`). No executable is spawned before its bytes and the
+   model bytes have been hash-verified — the acceptance check runs BEFORE
+   the spawn, not after. (Acceptance-gate digests are memoized per
+   (path, size, mtime) with a TTL so an unchanged 2.5 GB model tree is not
+   re-read on every request; any change to a file is a cache miss and a full
+   re-hash.)
 
 ## Readiness is a runtime fact, not a build fact
 

@@ -17,8 +17,8 @@
 use std::path::{Path, PathBuf};
 
 use unoone_speech_contracts::{
-    provider_languages, BackendStatus, LanguageTag, SpeechBackend, SpeechError, SpeechTask,
-    StreamingClass, Synthesis, Transcription,
+    provider_languages, resolve_provider_key, BackendStatus, LanguageTag, SpeechBackend,
+    SpeechError, SpeechTask, StreamingClass, Synthesis, Transcription,
 };
 
 use crate::bharat_audio;
@@ -28,6 +28,10 @@ use crate::voice::{self, VoiceConfig, VoiceModule};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeechRoutePolicy {
     /// Default. InBharat Audio only; a failed gate is an error, not a reroute.
+    /// No product path selects this yet (the desktop product router uses
+    /// `InbharatAudioThenLegacy`); it stays as the strict contract for
+    /// embedders and future product surfaces.
+    #[allow(dead_code)]
     InbharatAudioOnly,
     /// InBharat Audio first; the legacy Whisper/Piper plane may serve a
     /// request only if the InBharat gate fails. This must be deliberately
@@ -74,14 +78,6 @@ impl SpeechRouter {
             vault_root: vault_root.into(),
             policy,
         }
-    }
-
-    pub fn policy(&self) -> SpeechRoutePolicy {
-        self.policy
-    }
-
-    pub fn vault_root(&self) -> &str {
-        &self.vault_root
     }
 
     /// The InBharat Audio backend for this root.
@@ -166,10 +162,15 @@ impl InbharatSpeechBackend {
         }
     }
 
-    /// Map the manifest's family name (e.g. `qwen3-asr`) to the provider key
-    /// in `languages.v1.json` (e.g. `qwen3_asr`) for truthful coverage.
-    fn provider_key(family: &str) -> String {
-        family.replace('-', "_")
+    /// Map the manifest's family name (e.g. `omnivoice`, `qwen3-asr`) to the
+    /// provider key in `languages.v1.json` (e.g. `omnivoice_tts`,
+    /// `qwen3_asr`) for truthful coverage. Resolution lives in the shared
+    /// contracts crate: an unresolvable family reports zero coverage instead
+    /// of accidentally matching (the old `replace('-', "_")` mapping turned
+    /// the production `omnivoice` family into a non-existent key, so the
+    /// backend silently claimed no TTS languages at all).
+    fn provider_key(family: &str, task: SpeechTask) -> Option<String> {
+        resolve_provider_key(family, task)
     }
 }
 
@@ -193,7 +194,8 @@ impl SpeechBackend for InbharatSpeechBackend {
         status
             .asr_family
             .as_deref()
-            .map(|family| provider_languages(&Self::provider_key(family), SpeechTask::Asr))
+            .and_then(|family| Self::provider_key(family, SpeechTask::Asr))
+            .map(|key| provider_languages(&key, SpeechTask::Asr))
             .unwrap_or_default()
     }
 
@@ -202,7 +204,8 @@ impl SpeechBackend for InbharatSpeechBackend {
         status
             .tts_family
             .as_deref()
-            .map(|family| provider_languages(&Self::provider_key(family), SpeechTask::Tts))
+            .and_then(|family| Self::provider_key(family, SpeechTask::Tts))
+            .map(|key| provider_languages(&key, SpeechTask::Tts))
             .unwrap_or_default()
     }
 

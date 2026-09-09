@@ -3,15 +3,13 @@
 
 mod accessibility;
 mod agent;
-// The InBharat Audio adapter's production ASR/TTS entry points (transcribe,
-// synthesize) and their result structs/constants are implemented and unit-
-// tested but intentionally NOT registered as Tauri commands yet: the master
-// product policy keeps the legacy Whisper/Piper voice path active until the
-// real audio.cpp CLI passes its hash-bound readiness + acceptance gate. Only
-// `get_bharat_audio_status` (the readiness probe) is wired into the UI. The
-// dead-code allow is scoped to this module so a future genuine dead item
-// elsewhere is still flagged.
-#[allow(dead_code)]
+// The InBharat Audio adapter: the production ASR/TTS route (Qwen3-ASR /
+// OmniVoice via the audio.cpp CLI subprocess), gated fail-closed behind a
+// hash-before-spawn acceptance gate (CLIs and models are SHA-256-verified
+// against the acceptance attestation BEFORE any process spawns). Reached
+// through the SpeechRouter's InbharatAudioThenLegacy policy in `speech` /
+// `recording` — the legacy Whisper/Piper plane is the explicit fallback, not
+// the default.
 mod bharat_audio;
 mod browser;
 mod capability;
@@ -23,10 +21,11 @@ mod recording;
 mod safety;
 mod security;
 // The product speech plane: SpeechBackend implementations (InBharat Audio +
-// wrapped legacy Whisper/Piper) behind the explicit SpeechRouter policy. Not
-// yet registered as Tauri commands until C7 gates the UI on real
-// inference_ready; the trait implementations and router are unit-tested here.
-#[allow(dead_code)]
+// wrapped legacy Whisper/Piper) behind the explicit SpeechRouter policy
+// (`product_router` = InbharatAudioThenLegacy). This IS the production
+// speech path — recording's transient transcription and the voice commands
+// route through it; no backend ever serves a language outside its declared
+// provider coverage.
 mod speech;
 mod startup;
 mod voice;
