@@ -301,7 +301,18 @@ export function ModelManager() {
                   </div>
                   <select
                     value={config.cache_type_v ?? ''}
-                    onChange={e => setConfig({ ...config, cache_type_v: e.target.value || undefined })}
+                    onChange={e => {
+                      const cacheTypeV = e.target.value || undefined;
+                      const nextConfig = { ...config, cache_type_v: cacheTypeV };
+                      // A quantized V cache needs flash attention — llama-server
+                      // refuses the combination otherwise, so never let the UI
+                      // build it. "Auto" stays untouched; an explicit "off"
+                      // becomes "on" the moment a quantized V cache is picked.
+                      if (cacheTypeV && config.flash_attention === false) {
+                        nextConfig.flash_attention = true;
+                      }
+                      setConfig(nextConfig);
+                    }}
                   >
                     <option value="">Server default (f16)</option>
                     <option value="q8_0">q8_0 (recommended ≥16K ctx)</option>
