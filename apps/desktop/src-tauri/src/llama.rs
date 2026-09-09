@@ -23,6 +23,26 @@ pub struct ModelConfig {
     pub max_tokens: u32,
     /// Path to the multimodal projector (mmproj) model file for vision/OCR
     pub mmproj_path: Option<String>,
+    /// KV-cache quantization for K (f16 default; q8_0/q4_0 shrink the cache
+    /// so large contexts fit low-VRAM hosts). Host-adaptive: the shipped
+    /// llama-server b10075 supports `-ctk`.
+    #[serde(default)]
+    pub cache_type_k: Option<String>,
+    /// KV-cache quantization for V. Non-f16 V cache requires flash
+    /// attention, which llama-server b10075 enables via `-fa auto` by
+    /// default.
+    #[serde(default)]
+    pub cache_type_v: Option<String>,
+    /// Force flash attention on/off. None = the server default (auto).
+    #[serde(default)]
+    pub flash_attention: Option<bool>,
+}
+
+impl ModelConfig {
+    /// Only the KV-cache types the shipped llama-server build accepts.
+    fn valid_cache_type(value: &str) -> bool {
+        matches!(value, "f16" | "q8_0" | "q4_0" | "bf16")
+    }
 }
 
 impl Default for ModelConfig {
@@ -39,6 +59,9 @@ impl Default for ModelConfig {
             repeat_penalty: 1.1,
             max_tokens: 4096,
             mmproj_path: None,
+            cache_type_k: None,
+            cache_type_v: None,
+            flash_attention: None,
         }
     }
 }
@@ -279,6 +302,22 @@ impl ModelManager {
     /// Read the expected SHA-256 hash for a model path from the USB manifest.
     /// Accepts either the relative manifest path or an absolute on-disk path.
     fn read_manifest_model_hash(vault_root: &str, model_path: &str) -> Option<String> {
+        // Host-disk model cache entries are named <manifest-sha256>.gguf and
+        // are only published after the streamed copy is digest-verified, so
+        // for a cache path the filename IS the manifest-expected hash. The
+        // startup disk hash still has to match it (Strict policy), so a
+        // tampered cache copy is refused exactly like a tampered drive copy.
+        if let Ok(cache_dir) = model_cache_dir() {
+            let path = PathBuf::from(model_path);
+            if path.starts_with(&cache_dir) {
+                let name = path.file_name()?.to_str()?;
+                let hex = name.strip_suffix(".gguf")?;
+                if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Some(hex.to_ascii_lowercase());
+                }
+                return None;
+            }
+        }
         let manifest_path = PathBuf::from(vault_root).join("manifest.json");
         let manifest_content = std::fs::read_to_string(&manifest_path).ok()?;
         if let Ok(manifest) =
@@ -876,6 +915,32 @@ impl ModelManager {
             if mmproj_path.exists() {
                 cmd.args(["--mmproj", mmproj]);
             }
+        }
+
+        // KV-cache quantization: q8_0/q4_0 let a 16K-32K context fit hosts
+        // with little VRAM (the 4 GB RTX 5050 laptop class). A quantized V
+        // cache needs flash attention; the shipped b10075 server defaults
+        // to `-fa auto`, which enables it where the backend supports it.
+        // Invalid values are skipped, never fatal — a config typo must not
+        // take down model loading on any host.
+        if let Some(cache_type) = config.cache_type_k.as_deref() {
+            if ModelConfig::valid_cache_type(cache_type) {
+                cmd.args(["-ctk", cache_type]);
+            }
+        }
+        if let Some(cache_type) = config.cache_type_v.as_deref() {
+            if ModelConfig::valid_cache_type(cache_type) {
+                cmd.args(["-ctv", cache_type]);
+            }
+        }
+        match config.flash_attention {
+            Some(true) => {
+                cmd.args(["-fa", "on"]);
+            }
+            Some(false) => {
+                cmd.args(["-fa", "off"]);
+            }
+            None => {}
         }
 
         // Threads
@@ -1719,6 +1784,110 @@ mod tests {
         assert!(result.unwrap_err().contains("Model file not found"));
         assert_eq!(manager.get_status(), ModelStatus::Error);
     }
+
+    // --- Host-disk model cache -------------------------------------------------
+
+    fn write_cache_test_manifest(vault_dir: &std::path::Path, sha256: Option<&str>) {
+        let mut model = serde_json::json!({ "path": "models/gemma.gguf" });
+        if let Some(sha256) = sha256 {
+            model["sha256"] = serde_json::json!(sha256);
+        }
+        let manifest = serde_json::json!({
+            "models": { "desktop": { "gemma": model } }
+        });
+        std::fs::write(
+            vault_dir.join("manifest.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn cache_test_fixture(
+        name: &str,
+        sha256: Option<&str>,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let vault_dir = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&vault_dir);
+        std::fs::create_dir_all(vault_dir.join("models")).unwrap();
+        let model_path = vault_dir.join("models").join("gemma.gguf");
+        std::fs::write(&model_path, b"model bytes for cache staging").unwrap();
+        write_cache_test_manifest(&vault_dir, sha256);
+        (vault_dir, model_path)
+    }
+
+    #[test]
+    fn stage_model_to_host_cache_verifies_digest_and_publishes() {
+        let (vault_dir, model_path) = cache_test_fixture("unoone-cache-stage-test", None);
+        let sha = ModelManager::sha256_file(&model_path).unwrap();
+        write_cache_test_manifest(&vault_dir, Some(&sha));
+
+        let (cached, size) =
+            stage_model_to_host_cache(model_path.to_str().unwrap(), vault_dir.to_str().unwrap())
+                .expect("staging should succeed");
+        assert_eq!(size, std::fs::metadata(&model_path).unwrap().len());
+        assert!(cached.is_file(), "the cached copy must exist");
+        assert!(
+            cached.file_name().unwrap().to_str().unwrap() == format!("{}.gguf", sha),
+            "the cache entry must be keyed by the manifest sha256"
+        );
+        // The verification marker must exist alongside.
+        assert!(cached
+            .parent()
+            .unwrap()
+            .join(format!("{}.verified", sha))
+            .is_file());
+
+        // The cached path must resolve back to the manifest-expected hash via
+        // the cache-path branch of read_manifest_model_hash.
+        let resolved = ModelManager::read_manifest_model_hash(
+            vault_dir.to_str().unwrap(),
+            cached.to_str().unwrap(),
+        )
+        .expect("cache path should resolve to its filename hash");
+        assert_eq!(resolved, sha);
+
+        // A second staging call must hit the cheap verified path: same file.
+        let (again, again_size) =
+            stage_model_to_host_cache(model_path.to_str().unwrap(), vault_dir.to_str().unwrap())
+                .expect("re-staging an unchanged copy should be cheap and succeed");
+        assert_eq!(again, cached);
+        assert_eq!(again_size, size);
+
+        let _ = std::fs::remove_dir_all(&vault_dir);
+        let _ = std::fs::remove_file(&cached);
+        let _ = std::fs::remove_file(cached.parent().unwrap().join(format!("{}.verified", sha)));
+    }
+
+    #[test]
+    fn stage_model_refuses_model_without_manifest_hash() {
+        let (vault_dir, model_path) = cache_test_fixture("unoone-cache-nohash-test", None);
+        let error =
+            stage_model_to_host_cache(model_path.to_str().unwrap(), vault_dir.to_str().unwrap())
+                .expect_err("staging must fail closed without a manifest hash");
+        assert!(
+            error.contains("Refusing to cache"),
+            "expected a fail-closed refusal, got: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&vault_dir);
+    }
+
+    #[test]
+    fn stage_model_rejects_digest_mismatch_and_leaves_nothing_behind() {
+        let (vault_dir, model_path) =
+            cache_test_fixture("unoone-cache-mismatch-test", Some(&"0".repeat(64)));
+        let error =
+            stage_model_to_host_cache(model_path.to_str().unwrap(), vault_dir.to_str().unwrap())
+                .expect_err("a digest mismatch must fail staging");
+        assert!(
+            error.contains("does not match the manifest sha256"),
+            "expected the digest-mismatch error, got: {error}"
+        );
+        // Neither the published copy nor a leftover .part may survive.
+        let cache_dir = model_cache_dir().unwrap();
+        assert!(!cache_dir.join(format!("{}.gguf", "0".repeat(64))).is_file());
+        assert!(!cache_dir.join(format!("{}.part", "0".repeat(64))).is_file());
+        let _ = std::fs::remove_dir_all(&vault_dir);
+    }
 }
 
 // Tauri command wrappers
@@ -1945,4 +2114,188 @@ pub async fn detect_inference_backend(
     }
 
     Err("The managed UnoOne llama-server is not responding".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Host-disk model cache
+//
+// Models live on the removable USB drive, where sequential read throughput is
+// the launch bottleneck. This cache streams a model from the drive to the
+// host disk ONCE (%LOCALAPPDATA%\UnoOne\model-cache), verifying the digest
+// against the manifest in the same single pass; later launches load from the
+// host SSD/NVMe instead. Cache entries are keyed by the manifest sha256, so
+// a cached copy is only ever used after its bytes have been proven to match
+// the manifest — no unverified model bytes ever reach the host, and the
+// drive copy remains the canonical source.
+// ---------------------------------------------------------------------------
+
+/// Resolve the host-disk model cache directory.
+fn model_cache_dir() -> Result<PathBuf, String> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "LOCALAPPDATA is not set; cannot locate the model cache".to_string())?;
+    Ok(local_app_data.join("UnoOne").join("model-cache"))
+}
+
+/// Marker value (size:mtime) for a cached file, so an unchanged verified copy
+/// never needs to be re-hashed.
+fn model_cache_marker_value(path: &std::path::Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let size = metadata.len();
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(format!("{}:{}", size, mtime))
+}
+
+/// True when a cached copy exists, has a verification marker, and has not
+/// been touched since the marker was written.
+fn model_cache_is_verified(cached: &std::path::Path, marker: &std::path::Path) -> bool {
+    if !cached.is_file() || !marker.is_file() {
+        return false;
+    }
+    let Some(current) = model_cache_marker_value(cached) else {
+        return false;
+    };
+    match std::fs::read_to_string(marker) {
+        Ok(recorded) => recorded.trim() == current,
+        Err(_) => false,
+    }
+}
+
+/// Stream a manifest-vouched model from the drive to the host cache, hashing
+/// in the same single pass. Returns the cached path and byte count.
+fn stage_model_to_host_cache(model_path: &str, vault_root: &str) -> Result<(PathBuf, u64), String> {
+    use sha2::Digest;
+    use std::io::{Read, Write};
+
+    let source = PathBuf::from(model_path);
+    if !source.is_file() {
+        return Err(format!("Model file not found: {}", source.display()));
+    }
+    // Fail closed: without a manifest hash there is nothing to verify the
+    // cached copy against, so we refuse to put it on the host disk at all.
+    let expected_sha = ModelManager::read_manifest_model_hash(vault_root, model_path)
+        .filter(|hash| !hash.is_empty())
+        .ok_or_else(|| {
+            "Refusing to cache this model: the manifest records no sha256 for it".to_string()
+        })?;
+
+    let cache_dir = model_cache_dir()?;
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create {}: {}", cache_dir.display(), e))?;
+    let cached = cache_dir.join(format!("{}.gguf", expected_sha));
+    let marker = cache_dir.join(format!("{}.verified", expected_sha));
+
+    // Cheap path: a previously verified copy that has not changed since.
+    if model_cache_is_verified(&cached, &marker) {
+        let size = std::fs::metadata(&cached).map(|m| m.len()).unwrap_or(0);
+        return Ok((cached, size));
+    }
+
+    // Stream-copy from the removable drive, hashing in the same single pass.
+    // A separate verify pass would double the multi-GB read from the drive.
+    let part = cache_dir.join(format!("{}.part", expected_sha));
+    let mut input = std::fs::File::open(&source)
+        .map_err(|e| format!("Failed to open {}: {}", source.display(), e))?;
+    let mut output = std::fs::File::create(&part)
+        .map_err(|e| format!("Failed to create {}: {}", part.display(), e))?;
+    let mut hasher = sha2::Sha256::new();
+    // Heap buffer, 512 KiB — mirrors sha256_file: multi-GB streams must not
+    // turn into millions of syscalls on removable media.
+    let mut buffer = vec![0u8; 512 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = input
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to read {}: {}", source.display(), e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+        output
+            .write_all(&buffer[..n])
+            .map_err(|e| format!("Failed to write {}: {}", part.display(), e))?;
+        total += n as u64;
+    }
+    output
+        .flush()
+        .map_err(|e| format!("Failed to flush {}: {}", part.display(), e))?;
+    drop(output);
+
+    let digest = hex::encode(hasher.finalize());
+    if digest != expected_sha {
+        let _ = std::fs::remove_file(&part);
+        return Err("The cached copy does not match the manifest sha256 — the model bytes changed or the drive read failed. Nothing was staged.".to_string());
+    }
+    let source_size = std::fs::metadata(&source)
+        .map(|m| m.len())
+        .map_err(|e| format!("Failed to stat {}: {}", source.display(), e))?;
+    if total != source_size {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!(
+            "Truncated copy: staged {} bytes but the model is {} bytes. Nothing was staged.",
+            total, source_size
+        ));
+    }
+    // Atomic publish: rename the .part into place, then write the marker.
+    std::fs::rename(&part, &cached)
+        .map_err(|e| format!("Failed to publish {}: {}", cached.display(), e))?;
+    let marker_value = model_cache_marker_value(&cached).unwrap_or_default();
+    std::fs::write(&marker, &marker_value)
+        .map_err(|e| format!("Failed to write {}: {}", marker.display(), e))?;
+    Ok((cached, total))
+}
+
+/// Cheap probe: is this model already staged (and still verified) on the
+/// host disk? Reads the manifest and stats two files — never hashes the
+/// multi-GB model.
+#[tauri::command]
+pub async fn model_cache_status(
+    model_path: String,
+    vault_root: String,
+) -> Result<serde_json::Value, String> {
+    let expected_sha = ModelManager::read_manifest_model_hash(&vault_root, &model_path)
+        .filter(|hash| !hash.is_empty())
+        .ok_or_else(|| "The manifest records no sha256 for this model".to_string())?;
+    let cache_dir = model_cache_dir()?;
+    let cached = cache_dir.join(format!("{}.gguf", expected_sha));
+    let marker = cache_dir.join(format!("{}.verified", expected_sha));
+    let staged = model_cache_is_verified(&cached, &marker);
+    Ok(serde_json::json!({
+        "staged": staged,
+        "cached_path": if staged {
+            Some(cached.to_string_lossy().to_string())
+        } else {
+            None
+        },
+        "size_bytes": if staged {
+            std::fs::metadata(&cached).ok().map(|m| m.len())
+        } else {
+            None
+        },
+        "sha256": expected_sha,
+    }))
+}
+
+/// Heavy path: stream the model from the drive to the host cache (single
+/// pass, digest-verified against the manifest). Blocking work runs off the
+/// async runtime — the audio audit flagged blocking inside async commands.
+#[tauri::command]
+pub async fn stage_model_cache(
+    model_path: String,
+    vault_root: String,
+) -> Result<serde_json::Value, String> {
+    let (cached_path, size_bytes) =
+        tokio::task::spawn_blocking(move || stage_model_to_host_cache(&model_path, &vault_root))
+            .await
+            .map_err(|e| format!("Model cache staging task failed: {}", e))??;
+    Ok(serde_json::json!({
+        "staged": true,
+        "cached_path": cached_path.to_string_lossy().to_string(),
+        "size_bytes": size_bytes,
+    }))
 }

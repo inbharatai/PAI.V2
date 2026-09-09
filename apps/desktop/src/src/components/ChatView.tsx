@@ -33,6 +33,11 @@ export function ChatView() {
   const [modelStatus, setModelStatus] = useState<'unknown' | 'loaded' | 'loading' | 'not_loaded' | 'error'>('unknown');
   const [serverError, setServerError] = useState('');
   const [expandedSteps, setExpandedSteps] = useState<Set<string>>(new Set());
+  // Pending image attachments for the next turn, as data URLs. The backend
+  // re-validates (media type allowlist, base64 decode, 8 MiB per image, 4
+  // images max) and hashes each one — this state only previews and transports.
+  const [pendingImages, setPendingImages] = useState<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   // Stable Harness conversation namespace for this chat session. Harness memory
   // is long-term only; canonical chat history stays in UNOONE MESSAGE records
   // passed in as read-only context, never duplicated into Harness memory.
@@ -123,18 +128,47 @@ export function ChatView() {
     };
   }, [checkModelStatus]);
 
+  const handleAttachImages = (files: FileList | null) => {
+    if (!files) return;
+    const readers: Promise<string>[] = [];
+    for (const file of Array.from(files)) {
+      if (pendingImages.length + readers.length >= 4) break;
+      if (!file.type.startsWith('image/')) continue;
+      readers.push(
+        new Promise(resolve => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(file);
+        }),
+      );
+    }
+    void Promise.all(readers).then(dataUrls => {
+      const valid = dataUrls.filter(url => url.startsWith('data:image/'));
+      if (valid.length === 0) return;
+      setPendingImages(prev => [...prev, ...valid].slice(0, 4));
+    });
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const removePendingImage = (index: number) => {
+    setPendingImages(prev => prev.filter((_, i) => i !== index));
+  };
+
   const handleSend = async () => {
     if (!input.trim() || isGenerating) return;
 
+    const images = pendingImages;
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: input.trim(),
+      content: images.length > 0 ? `${input.trim()}\n\n[${images.length} image(s) attached]` : input.trim(),
       timestamp: Date.now(),
     };
 
     setMessages(prev => [...prev, userMessage]);
     setInput('');
+    setPendingImages([]);
     setIsGenerating(true);
     setServerError('');
 
@@ -154,6 +188,7 @@ export function ChatView() {
           conversationHistory,
           conversationIdRef.current,
           fullAccess,
+          images,
         );
         // Harness returns counts, not structured per-tool steps. Surface the
         // real route + counts as an honest telemetry line (no fabricated tool
@@ -402,7 +437,66 @@ export function ChatView() {
             </span>
           </label>
         </div>
+        {pendingImages.length > 0 && (
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+            {pendingImages.map((dataUrl, i) => (
+              <div key={i} style={{ position: 'relative' }}>
+                <img
+                  src={dataUrl}
+                  alt={`attachment ${i + 1}`}
+                  style={{
+                    width: '64px',
+                    height: '64px',
+                    objectFit: 'cover',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border-color, #333)',
+                  }}
+                />
+                <button
+                  onClick={() => removePendingImage(i)}
+                  title="Remove image"
+                  style={{
+                    position: 'absolute',
+                    top: '-6px',
+                    right: '-6px',
+                    width: '18px',
+                    height: '18px',
+                    borderRadius: '50%',
+                    border: 'none',
+                    background: 'var(--danger, #f87171)',
+                    color: '#fff',
+                    fontSize: '11px',
+                    lineHeight: 1,
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="chat-input-row">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            style={{ display: 'none' }}
+            onChange={e => handleAttachImages(e.target.files)}
+          />
+          <button
+            className="btn"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isGenerating || modelStatus === 'not_loaded' || pendingImages.length >= 4}
+            title="Attach images (up to 4) — the model sees them via its mmproj vision encoder"
+            style={{ padding: '8px' }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
           <textarea
             className="chat-input"
             placeholder={

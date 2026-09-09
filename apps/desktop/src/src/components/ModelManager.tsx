@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { tauriApi, type ModelInfo, type ModelConfig, type ModelStatus, type AccelerationBackend, type SecurityLevel } from '../lib/tauri';
+import { tauriApi, type ModelInfo, type ModelConfig, type ModelStatus, type AccelerationBackend, type SecurityLevel, type ModelCacheStatus } from '../lib/tauri';
 
 export function ModelManager() {
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -10,6 +10,9 @@ export function ModelManager() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [securityLevel, setSecurityLevel] = useState<SecurityLevel>('STANDARD');
+  const [vaultRoot, setVaultRoot] = useState<string>('');
+  const [cacheStatus, setCacheStatus] = useState<ModelCacheStatus | null>(null);
+  const [stagingCache, setStagingCache] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -17,6 +20,7 @@ export function ModelManager() {
         // Detect vault root from USB pendrive, not hardcoded path
         const vaultInfo = await tauriApi.detectVault();
         const vaultRoot = vaultInfo.detected ? vaultInfo.vault_root : '';
+        setVaultRoot(vaultRoot);
 
         const [modelList, backends, status, modelConfig, secLevel] = await Promise.all([
           tauriApi.listModels(vaultRoot),
@@ -46,6 +50,41 @@ export function ModelManager() {
     }
     load();
   }, []);
+
+  // Probe the host-disk model cache for the selected model. Cheap on purpose:
+  // the backend only reads the manifest and stats two files, never hashes
+  // the multi-GB model.
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedModelPath || !vaultRoot) return;
+    void tauriApi
+      .modelCacheStatus(selectedModelPath, vaultRoot)
+      .then(status => {
+        if (!cancelled) setCacheStatus(status);
+      })
+      .catch(() => {
+        // No manifest hash for this model (or no cache yet) — not an error
+        // worth displacing real errors for; just show as unstaged.
+        if (!cancelled) setCacheStatus(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedModelPath, vaultRoot]);
+
+  const stageToHostCache = async () => {
+    if (!selectedModelPath || !vaultRoot) return;
+    setStagingCache(true);
+    setError(null);
+    try {
+      const status = await tauriApi.stageModelCache(selectedModelPath, vaultRoot);
+      setCacheStatus(status);
+    } catch (e: any) {
+      setError(e?.message || 'Failed to stage the model to the host cache');
+    } finally {
+      setStagingCache(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -136,6 +175,45 @@ export function ModelManager() {
           )}
         </div>
 
+        {/* Fast local cache — stream the model off the slow USB drive once,
+            then launch from the host SSD/NVMe. The copy is digest-verified
+            against the manifest in a single pass, so the cache never serves
+            bytes the drive wouldn't vouch for. */}
+        {selectedModelPath && cacheStatus !== null && (
+          <div style={{
+            marginBottom: '24px',
+            padding: '12px 16px',
+            background: cacheStatus.staged ? 'var(--success-bg)' : 'var(--bg-secondary)',
+            border: `1px solid ${cacheStatus.staged ? 'var(--success-border, rgba(52,211,153,0.3))' : 'var(--border)'}`,
+            borderRadius: 'var(--radius-md)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+            flexWrap: 'wrap',
+          }}>
+            <div>
+              <div style={{ fontSize: '13px', fontWeight: 600 }}>
+                {cacheStatus.staged ? '⚡ Staged to fast local cache' : 'Slow drive launch'}
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                {cacheStatus.staged
+                  ? `Next launch loads from ${cacheStatus.cached_path} (${(cacheStatus.size_bytes ?? 0) / (1024 * 1024 * 1024)} GB) instead of the USB drive`
+                  : 'Stage the model to the host disk once so future launches skip the slow USB read. The copy is sha256-verified against the manifest.'}
+              </div>
+            </div>
+            {cacheStatus.staged ? (
+              <button className="btn btn-secondary" disabled={stagingCache} onClick={stageToHostCache}>
+                {stagingCache ? 'Re-checking…' : 'Re-stage'}
+              </button>
+            ) : (
+              <button className="btn btn-primary" disabled={stagingCache} onClick={stageToHostCache}>
+                {stagingCache ? 'Staging… (one multi-GB pass)' : 'Stage to fast local cache'}
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Acceleration Backend */}
         <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)' }}>
           Acceleration
@@ -172,13 +250,81 @@ export function ModelManager() {
                 <div className="settings-row">
                   <div>
                     <div className="settings-row-label">Context Size</div>
-                    <div className="settings-row-desc">Maximum context window for generation</div>
+                    <div className="settings-row-desc">
+                      Maximum context window for generation. 16K/32K need a quantized KV cache
+                      (below) to fit small VRAM — pick q8_0 there.
+                    </div>
                   </div>
-                  <select value={config.context_size} onChange={e => setConfig({ ...config, context_size: Number(e.target.value) })}>
+                  <select
+                    value={config.context_size}
+                    onChange={e => {
+                      const contextSize = Number(e.target.value);
+                      // Host-adaptive default: large contexts switch the KV
+                      // cache to q8_0 unless the user already chose something.
+                      const nextConfig = { ...config, context_size: contextSize };
+                      if (contextSize >= 16384 && !config.cache_type_v && !config.cache_type_k) {
+                        nextConfig.cache_type_k = 'q8_0';
+                        nextConfig.cache_type_v = 'q8_0';
+                      }
+                      setConfig(nextConfig);
+                    }}
+                  >
                     <option value={2048}>2048</option>
                     <option value={4096}>4096</option>
                     <option value={8192}>8192</option>
                     <option value={16384}>16384</option>
+                    <option value={32768}>32768</option>
+                  </select>
+                </div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-label">KV Cache (K)</div>
+                    <div className="settings-row-desc">
+                      Quantize the K cache to fit long contexts in small VRAM (q8_0 ≈ half of f16)
+                    </div>
+                  </div>
+                  <select
+                    value={config.cache_type_k ?? ''}
+                    onChange={e => setConfig({ ...config, cache_type_k: e.target.value || undefined })}
+                  >
+                    <option value="">Server default (f16)</option>
+                    <option value="q8_0">q8_0 (recommended ≥16K ctx)</option>
+                    <option value="q4_0">q4_0 (smallest)</option>
+                  </select>
+                </div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-label">KV Cache (V)</div>
+                    <div className="settings-row-desc">
+                      Quantize the V cache — requires flash attention (auto by default)
+                    </div>
+                  </div>
+                  <select
+                    value={config.cache_type_v ?? ''}
+                    onChange={e => setConfig({ ...config, cache_type_v: e.target.value || undefined })}
+                  >
+                    <option value="">Server default (f16)</option>
+                    <option value="q8_0">q8_0 (recommended ≥16K ctx)</option>
+                    <option value="q4_0">q4_0 (smallest)</option>
+                  </select>
+                </div>
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-label">Flash Attention</div>
+                    <div className="settings-row-desc">Required for quantized V cache; auto picks what the backend supports</div>
+                  </div>
+                  <select
+                    value={config.flash_attention === undefined ? '' : config.flash_attention ? 'on' : 'off'}
+                    onChange={e =>
+                      setConfig({
+                        ...config,
+                        flash_attention: e.target.value === '' ? undefined : e.target.value === 'on',
+                      })
+                    }
+                  >
+                    <option value="">Auto (server default)</option>
+                    <option value="on">On</option>
+                    <option value="off">Off</option>
                   </select>
                 </div>
                 <div className="settings-row">
@@ -243,7 +389,12 @@ export function ModelManager() {
 
                 const nextConfig: ModelConfig = {
                   ...config,
-                  model_path: selectedModelPath,
+                  // Launch from the digest-verified host cache when the model
+                  // is staged there — same bytes (manifest sha256 key), read
+                  // from the host disk instead of the slow USB drive.
+                  model_path: cacheStatus?.staged && cacheStatus.cached_path
+                    ? cacheStatus.cached_path
+                    : selectedModelPath,
                   mmproj_path: models.find(model => model.path === selectedModelPath)?.mmproj_path,
                 };
 

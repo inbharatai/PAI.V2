@@ -14,10 +14,10 @@ use crate::{
 };
 use inbharat_harness_core::{
     tools::{ListFilesTool, ReadFileTool, RunProcessTool, WriteFileTool},
-    BudgetLimits, CancellationToken, Capability, CapabilitySet, ConfirmationMode,
-    ConfirmationOutcome, Determinism, ExecutionLevel, HarnessBuilder, HarnessResult,
-    LocalExecutionBroker, MemoryOptions, PermissionDecision, PermissionProvider, RootedFs,
-    RunOptions, SideEffect, StaticConfirmationProvider, Tool, ToolArguments, ToolContext,
+    AttachmentMetadata, BudgetLimits, CancellationToken, Capability, CapabilitySet,
+    ConfirmationMode, ConfirmationOutcome, Determinism, ExecutionLevel, HarnessBuilder,
+    HarnessResult, LocalExecutionBroker, MemoryOptions, PermissionDecision, PermissionProvider,
+    RootedFs, RunOptions, SideEffect, StaticConfirmationProvider, Tool, ToolArguments, ToolContext,
     ToolManifest, ToolOutput, Value,
 };
 use pai_harness_adapter::{
@@ -489,6 +489,82 @@ fn workspace_root() -> Result<PathBuf, String> {
         )
     })?;
     Ok(root)
+}
+
+/// Vision lane: the image types llama.cpp accepts through an `image_url`
+/// part (via the mmproj projector loaded at model-server startup).
+const SUPPORTED_IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const MAX_IMAGES_PER_TURN: usize = 4;
+const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Parse data-URL image attachments into (a) harness attachment metadata —
+/// ids, media types, lengths and SHA-256 digests for the audit trail — and
+/// (b) the local base64 bytes the model provider renders into the OpenAI
+/// request. Pixels never leave the machine; the audit records digests.
+#[allow(clippy::type_complexity)]
+fn parse_image_attachments(
+    data_urls: &[String],
+) -> Result<(Vec<AttachmentMetadata>, Vec<(String, String, String)>), String> {
+    use base64::Engine as _;
+    if data_urls.len() > MAX_IMAGES_PER_TURN {
+        return Err(format!(
+            "at most {MAX_IMAGES_PER_TURN} images can be attached per message"
+        ));
+    }
+    let mut metadata = Vec::with_capacity(data_urls.len());
+    let mut bytes_by_id = Vec::with_capacity(data_urls.len());
+    for (index, data_url) in data_urls.iter().enumerate() {
+        if data_url.len() > 16 * 1024 * 1024 {
+            return Err("attached image is too large".to_owned());
+        }
+        let rest = data_url
+            .strip_prefix("data:")
+            .ok_or_else(|| "images must be data URLs (data:image/png;base64,...)".to_owned())?;
+        let (header, payload) = rest
+            .split_once(',')
+            .ok_or_else(|| "image data URL is malformed".to_owned())?;
+        let media_type = header
+            .strip_suffix(";base64")
+            .ok_or_else(|| "image data URL must be base64-encoded".to_owned())?
+            .to_owned();
+        if !SUPPORTED_IMAGE_TYPES.contains(&media_type.as_str()) {
+            return Err(format!(
+                "unsupported image type '{media_type}' (supported: png, jpeg, webp, gif)"
+            ));
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload.trim())
+            .map_err(|error| format!("attached image is not valid base64: {error}"))?;
+        if decoded.is_empty() {
+            return Err("attached image is empty".to_owned());
+        }
+        if decoded.len() > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "attached image exceeds {} MiB",
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
+        let digest = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&decoded);
+            hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let id = format!("attach-{}", index + 1);
+        metadata.push(AttachmentMetadata {
+            id: id.clone(),
+            media_type: media_type.clone(),
+            byte_len: decoded.len() as u64,
+            digest,
+            display_name: None,
+        });
+        bytes_by_id.push((id, media_type, payload.trim().to_owned()));
+    }
+    Ok((metadata, bytes_by_id))
 }
 
 /// Run the shared UnoOne safety review for one model-selected tool call.
@@ -1154,6 +1230,7 @@ pub async fn harness_chat(
     conversation_id: Option<String>,
     conversation_history: Vec<ConversationTurn>,
     allow_workspace_goal: Option<bool>,
+    images: Option<Vec<String>>,
     app: tauri::AppHandle,
     browser_state: tauri::State<'_, Arc<BrowserStateHolder>>,
     model_state: tauri::State<'_, ModelManagerState>,
@@ -1164,6 +1241,12 @@ pub async fn harness_chat(
     if message.is_empty() || message.len() > 256 * 1024 {
         return Err("Harness message is empty or exceeds 256 KiB".to_owned());
     }
+    // Vision: parse data-URL images into harness attachment metadata + local
+    // base64 bytes for the adapter. Everything stays local — bytes go to the
+    // verified llama-server over localhost, digests (never pixels) go into
+    // the audit trail. Low-RAM hosts degrade the same as any long prompt:
+    // the model server applies its own context bound.
+    let attachments = parse_image_attachments(images.as_deref().unwrap_or_default())?;
     let conversation_id = conversation_id.unwrap_or_else(|| "default".to_owned());
     if conversation_id.is_empty()
         || conversation_id.len() > 128
@@ -1268,12 +1351,15 @@ pub async fn harness_chat(
         }
     }
     let browser = Arc::clone(browser_state.inner());
+    let (attachment_metadata, attachment_bytes) = attachments;
 
     tokio::task::spawn_blocking(move || {
-        let model = Arc::new(
-            PaiLlamaLocalProvider::new(model_id.clone(), port)
-                .map_err(|error| error.to_string())?,
-        );
+        let mut model_builder = PaiLlamaLocalProvider::new(model_id.clone(), port)
+            .map_err(|error| error.to_string())?;
+        for (id, media_type, base64_bytes) in &attachment_bytes {
+            model_builder = model_builder.with_attachment(id, media_type, base64_bytes);
+        }
+        let model = Arc::new(model_builder);
         let memory = Arc::new(
             PaiVaultMemoryProvider::new(
                 Arc::clone(&vault),
@@ -1356,6 +1442,7 @@ pub async fn harness_chat(
         let mut options = RunOptions {
             actor: "local-user".to_owned(),
             capabilities,
+            attachments: attachment_metadata,
             provider: "pai-llama-local".to_owned(),
             model: model_id.clone(),
             memory: MemoryOptions {
@@ -1432,8 +1519,10 @@ mod workspace_tool_tests {
     }
 
     /// A ToolContext wired to an empty-allowlist broker over the same fence.
+    /// The fence itself is bound into the tools at construction, not carried
+    /// by the context, so the parameter is intentionally unused here.
     fn tool_context<'a>(
-        filesystem: &'a RootedFs,
+        _filesystem: &'a RootedFs,
         cancel: &'a CancellationToken,
         broker: &'a LocalExecutionBroker,
     ) -> ToolContext<'a> {

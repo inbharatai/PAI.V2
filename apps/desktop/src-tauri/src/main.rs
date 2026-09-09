@@ -148,6 +148,8 @@ fn main() {
             llama::send_chat_completion,
             llama::check_model_health,
             llama::detect_inference_backend,
+            llama::model_cache_status,
+            llama::stage_model_cache,
             // Filesystem helpers
             check_file_exists,
             // Safety guard
