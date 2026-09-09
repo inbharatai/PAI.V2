@@ -23,6 +23,11 @@ pub struct PaiLlamaLocalProvider {
     model_id: String,
     port: u16,
     timeout: Duration,
+    /// Attachment bytes (base64) keyed by the harness `AttachmentMetadata`
+    /// id. The harness core carries metadata only; the desktop bridge hands
+    /// the actual image bytes to this provider so vision requests stay
+    /// local and the audit trail records digests, not pixels.
+    attachments: std::collections::BTreeMap<String, (String, String)>,
 }
 
 impl PaiLlamaLocalProvider {
@@ -39,7 +44,21 @@ impl PaiLlamaLocalProvider {
             model_id,
             port,
             timeout: DEFAULT_TIMEOUT,
+            attachments: std::collections::BTreeMap::new(),
         })
+    }
+
+    /// Attach image bytes (base64) under one harness attachment id. The
+    /// media type must be an image type llama.cpp accepts in an
+    /// `image_url` part (png/jpeg/webp/gif).
+    pub fn with_attachment(
+        mut self,
+        id: impl Into<String>,
+        media_type: impl Into<String>,
+        base64_bytes: impl Into<String>,
+    ) -> Self {
+        self.attachments.insert(id.into(), (media_type.into(), base64_bytes.into()));
+        self
     }
 
     #[must_use]
@@ -103,6 +122,46 @@ impl ModelProvider for PaiLlamaLocalProvider {
                 "role": Self::role(message.role),
                 "content": message.content,
             }));
+        }
+
+        // Vision: when the request carries attachments, render the last
+        // user message as multimodal parts (text + image_url data URLs).
+        // llama-server resolves the image through the mmproj projector
+        // passed at startup. Attachment ids without local bytes fail closed
+        // rather than silently sending a text-only request the model would
+        // answer as if it had seen the image.
+        if !request.attachments.is_empty() {
+            let last_user = messages
+                .iter()
+                .rposition(|message| message.get("role").and_then(JsonValue::as_str) == Some("user"))
+                .ok_or_else(|| {
+                    Self::failure(
+                        "pai.model.attachments",
+                        "attachments require a user message to attach to",
+                    )
+                })?;
+            let mut parts = vec![json!({
+                "type": "text",
+                "text": messages[last_user].get("content").cloned().unwrap_or(JsonValue::String(String::new())),
+            })];
+            for attachment in &request.attachments {
+                let (media_type, base64_bytes) = self
+                    .attachments
+                    .get(&attachment.id)
+                    .ok_or_else(|| {
+                        Self::failure(
+                            "pai.model.attachments",
+                            format!("attachment bytes are missing for id {}", attachment.id),
+                        )
+                    })?;
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", media_type, base64_bytes),
+                    }
+                }));
+            }
+            messages[last_user]["content"] = JsonValue::Array(parts);
         }
 
         let tools = request

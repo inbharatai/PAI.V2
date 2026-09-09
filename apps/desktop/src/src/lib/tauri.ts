@@ -108,6 +108,18 @@ export interface ModelConfig {
   repeat_penalty: number;
   max_tokens: number;
   mmproj_path?: string;
+  // Host-adaptive KV-cache controls (all optional — older configs without
+  // them still deserialize on the Rust side via #[serde(default)]).
+  cache_type_k?: string;
+  cache_type_v?: string;
+  flash_attention?: boolean;
+}
+
+export interface ModelCacheStatus {
+  staged: boolean;
+  cached_path: string | null;
+  size_bytes: number | null;
+  sha256: string;
 }
 
 export type Content = string | ContentPart[];
@@ -459,6 +471,11 @@ export const tauriApi = {
   startModelServer: (config: ModelConfig, vaultRoot: string) =>
     invoke<number>('start_model_server', { config, vault_root: vaultRoot }),
   stopModelServer: () => invoke<void>('stop_model_server'),
+  // Host-disk model cache (single-pass digest-verified staging off the USB drive)
+  modelCacheStatus: (modelPath: string, vaultRoot: string) =>
+    invoke<ModelCacheStatus>('model_cache_status', { model_path: modelPath, vault_root: vaultRoot }),
+  stageModelCache: (modelPath: string, vaultRoot: string) =>
+    invoke<ModelCacheStatus>('stage_model_cache', { model_path: modelPath, vault_root: vaultRoot }),
   checkFileExists: (path: string) => invoke<boolean>('check_file_exists', { path }),
 
   // Safety guard
@@ -524,12 +541,14 @@ export const tauriApi = {
     conversationHistory: ConversationTurn[],
     conversationId: string | null,
     allowWorkspaceGoal: boolean,
+    images?: string[] | null,
   ) =>
     invoke<HarnessChatResult>('harness_chat', {
       message,
       conversation_history: conversationHistory,
       conversation_id: conversationId,
       allow_workspace_goal: allowWorkspaceGoal,
+      images: images ?? null,
     }),
   // InBharat Audio adapter — production_ready is true only when the real
   // audio.cpp CLI passes its hash-bound readiness + acceptance gate.
