@@ -38,6 +38,25 @@ export function ChatView() {
   // passed in as read-only context, never duplicated into Harness memory.
   const conversationIdRef = useRef<string>(crypto.randomUUID());
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Full access is the default the user directed: the agent may read/write
+  // the host workspace, run allowlisted commands and drive the browser.
+  // Every call still passes the audited, budgeted harness pipeline; turning
+  // this off drops back to the read-only vault chat lane.
+  const [fullAccess, setFullAccess] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('unoone.fullAccess') !== 'off';
+    } catch {
+      return true;
+    }
+  });
+  const toggleFullAccess = (enabled: boolean) => {
+    setFullAccess(enabled);
+    try {
+      localStorage.setItem('unoone.fullAccess', enabled ? 'on' : 'off');
+    } catch {
+      // Storage unavailable — the toggle still applies for this session.
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -134,7 +153,7 @@ export function ChatView() {
           input.trim(),
           conversationHistory,
           conversationIdRef.current,
-          false,
+          fullAccess,
         );
         // Harness returns counts, not structured per-tool steps. Surface the
         // real route + counts as an honest telemetry line (no fabricated tool
@@ -360,6 +379,29 @@ export function ChatView() {
       )}
 
       <div className="chat-input-area">
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          marginBottom: '8px',
+          fontSize: '12px',
+          color: 'var(--text-secondary, #888)',
+        }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', userSelect: 'none' }}>
+            <input
+              type="checkbox"
+              checked={fullAccess}
+              onChange={e => toggleFullAccess(e.target.checked)}
+              disabled={isGenerating}
+            />
+            <span>
+              Full access — read/write files, run commands, drive the browser
+              <span style={{ color: 'var(--text-muted, #666)' }}>
+                {' '}(workspace: %USERPROFILE%\UnoOneAgent · audited + budgeted)
+              </span>
+            </span>
+          </label>
+        </div>
         <div className="chat-input-row">
           <textarea
             className="chat-input"

@@ -515,6 +515,10 @@ export const tauriApi = {
     invoke<AgentResult>('agent_chat', { message, conversation_history: conversationHistory }),
   // Unified Harness text plane (production). Routes L0/L1/L2/L3 deterministically
   // and runs the single agent loop against the verified 127.0.0.1 llama-server.
+  // allowWorkspaceGoal = full access: explicit L3 agentic execution with the
+  // fenced host-workspace file tools, the allowlisted direct-argv command
+  // broker and the model-driven browser lane — every call still audited and
+  // budgeted. false keeps the read-only vault chat lane.
   harnessChat: (
     message: string,
     conversationHistory: ConversationTurn[],
