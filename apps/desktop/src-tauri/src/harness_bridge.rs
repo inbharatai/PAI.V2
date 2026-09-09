@@ -471,6 +471,46 @@ const FULL_ACCESS_PROGRAMS: &[&str] = &[
     "sh",
 ];
 
+/// The system-prompt briefing that tells the model what it actually is and
+/// which tools it holds in this run. Without it the model only sees the
+/// generic harness line ("Answer directly." / "Work toward the goal..."),
+/// and L0 direct-answer requests carry no tools array at all — observed
+/// live: the model told the user it "only operates within the encrypted
+/// USB vault" while the full-access lane was enabled. The text must stay
+/// truthful to what the bridge registers per mode: read-only vault tools
+/// always; workspace file tools + allowlisted direct-argv commands +
+/// browser control only in full-access mode.
+fn desktop_system_prefix(full_access: bool) -> String {
+    let workspace = workspace_root()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "%USERPROFILE%\\UnoOneAgent".to_owned());
+    if full_access {
+        format!(
+            "You are UnoOne, the user's private Pocket AI running locally on their Windows \
+             computer (fully offline, no cloud). You are NOT limited to a vault: in this \
+             session you have full agent tools, all audited and budgeted.\n\
+             - Read/write/list/search/patch files in the workspace folder: {workspace}\n\
+             - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
+             dotnet, go, java, cmake, make, gcc, clang, powershell) inside that workspace\n\
+             - Drive a real web browser (navigate, click, type, fill forms, screenshot) \
+             via browser.act\n\
+             - Read the user's encrypted Pocket AI vault records \
+             (search_notes, list_documents, read_document, verify_vault)\n\
+             When a task needs any of this, actually use the tools instead of claiming \
+             you cannot. If a request falls outside what the tools above can reach, say \
+             so honestly and specifically."
+        )
+    } else {
+        "You are UnoOne, the user's private Pocket AI running locally (fully offline, no \
+         cloud). In this session you are in read-only mode: you can search, list and read \
+         the user's encrypted Pocket AI vault records and verify the vault, but you cannot \
+         read or modify other host files, run commands or drive the browser. Say so \
+         honestly when a request needs those abilities, and suggest re-enabling full \
+         access in the chat settings."
+            .to_owned()
+    }
+}
+
 /// The coding/automation workspace root. Full-access file tools and
 /// subprocesses are rooted here — never the encrypted pendrive vault — so
 /// agent writes land on rewritable host disk, not the read-mostly package.
@@ -1405,6 +1445,7 @@ pub async fn harness_chat(
             .register_model(model)
             .map_err(|error| error.to_string())?
             .memory_provider(memory)
+            .system_prefix(desktop_system_prefix(full_access))
             .confirmation_provider(Arc::new(StaticConfirmationProvider {
                 outcome: if full_access {
                     ConfirmationOutcome::AllowedOnce

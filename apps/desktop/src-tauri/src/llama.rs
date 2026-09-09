@@ -943,6 +943,15 @@ impl ModelManager {
             None => {}
         }
 
+        // Pin the GGUF's native chat template explicitly. b10075 defaults
+        // --jinja on, which renders the OpenAI `tools` array we send on
+        // agentic runs; passing it explicitly protects tool calling if a
+        // future bundled runtime changes that default. (Self-knowledge of
+        // the agent's abilities does not rely on this: L0 direct-answer
+        // requests carry no tools array, which is why the embedding also
+        // installs a truthful system-prefix briefing in the harness.)
+        cmd.arg("--jinja");
+
         // Threads
         if config.threads > 0 {
             cmd.args(["-t", &config.threads.to_string()]);

@@ -135,9 +135,23 @@ function App() {
         }
         await tauriApi.detectAcceleration();
         const config = await tauriApi.getModelConfig();
+        // Prefer the digest-verified host cache when the model is staged
+        // there: same bytes (keyed by the manifest sha256), read from the
+        // host disk instead of the slow USB drive. The cheap status probe
+        // never hashes the multi-GB model; anything but a verified staged
+        // copy falls back to the drive path.
+        let bootModelPath = desktopModel.path;
+        try {
+          const cacheStatus = await tauriApi.modelCacheStatus(desktopModel.path, vaultRoot);
+          if (cacheStatus.staged && cacheStatus.cached_path) {
+            bootModelPath = cacheStatus.cached_path;
+          }
+        } catch {
+          // No manifest hash / no cache yet — boot from the drive as before.
+        }
         await tauriApi.startModelServer({
           ...config,
-          model_path: desktopModel.path,
+          model_path: bootModelPath,
           mmproj_path: desktopModel.mmproj_path,
         }, vaultRoot);
         const health = await tauriApi.checkModelHealth();
