@@ -46,7 +46,9 @@ harness core designed it.
 Launching a 7 GB Q4 model off a USB 2/3 pendrive is minutes of sequential
 read. The cache streams the model to the host disk **once**:
 
-- Cache dir: `%LOCALAPPDATA%\UnoOne\model-cache`, entries keyed
+- Cache dir: `%LOCALAPPDATA%\UnoOne\model-cache` on Windows (macOS
+  `~/Library/Caches/UnoOne/model-cache`, Linux `$XDG_CACHE_HOME/UnoOne/model-cache`),
+  entries keyed
   `<manifest-sha256>.gguf`.
 - Staging is a **single pass**: stream-copy while hashing, digest compared
   to the manifest sha256, size compared to the source, then atomic rename

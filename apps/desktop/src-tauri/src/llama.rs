@@ -2121,7 +2121,7 @@ pub async fn detect_inference_backend(
 //
 // Models live on the removable USB drive, where sequential read throughput is
 // the launch bottleneck. This cache streams a model from the drive to the
-// host disk ONCE (%LOCALAPPDATA%\UnoOne\model-cache), verifying the digest
+// host disk ONCE (per-platform user cache dir — see model_cache_dir), verifying the digest
 // against the manifest in the same single pass; later launches load from the
 // host SSD/NVMe instead. Cache entries are keyed by the manifest sha256, so
 // a cached copy is only ever used after its bytes have been proven to match
@@ -2129,12 +2129,40 @@ pub async fn detect_inference_backend(
 // drive copy remains the canonical source.
 // ---------------------------------------------------------------------------
 
-/// Resolve the host-disk model cache directory.
+/// Resolve the host-disk model cache directory, per-platform:
+/// Windows `%LOCALAPPDATA%\UnoOne\model-cache`, macOS
+/// `~/Library/Caches/UnoOne/model-cache`, Linux
+/// `$XDG_CACHE_HOME/UnoOne/model-cache` (default `~/.cache/...`).
 fn model_cache_dir() -> Result<PathBuf, String> {
-    let local_app_data = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .ok_or_else(|| "LOCALAPPDATA is not set; cannot locate the model cache".to_string())?;
-    Ok(local_app_data.join("UnoOne").join("model-cache"))
+    if cfg!(target_os = "windows") {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .ok_or_else(|| "LOCALAPPDATA is not set; cannot locate the model cache".to_string())?;
+        Ok(base.join("UnoOne").join("model-cache"))
+    } else if cfg!(target_os = "macos") {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| "HOME is not set; cannot locate the model cache".to_string())?;
+        Ok(home
+            .join("Library")
+            .join("Caches")
+            .join("UnoOne")
+            .join("model-cache"))
+    } else {
+        // Linux: XDG cache, with the standard ~/.cache fallback.
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|value| !value.is_empty())
+                    .map(|home| PathBuf::from(home).join(".cache"))
+            })
+            .ok_or_else(|| {
+                "Neither XDG_CACHE_HOME nor HOME is set; cannot locate the model cache".to_string()
+            })?;
+        Ok(base.join("UnoOne").join("model-cache"))
+    }
 }
 
 /// Marker value (size:mtime) for a cached file, so an unchanged verified copy
