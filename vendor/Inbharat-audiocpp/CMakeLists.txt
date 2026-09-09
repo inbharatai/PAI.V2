@@ -162,17 +162,21 @@ if(IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER)
         # silently mixing runtimes. (Release remains the only evidenced
         # adapter lane; the supported evidence tiers are unchanged.)
         set(_ac_cfg_dir "$<IF:$<CONFIG:Debug>,Debug,Release>")
-        set(IBAUDIO_AUDIO_CPP_LIBS "")
-        foreach(_lib
-                engine_runtime
-                external/sentencepiece/src/sentencepiece
-                ggml/src/ggml
-                ggml/src/ggml-base
-                ggml/src/ggml-cpu
-                cjson_vendor
-                yaml_vendor)
-            list(APPEND IBAUDIO_AUDIO_CPP_LIBS "${_acb}/${_ac_cfg_dir}/${_lib}.lib")
-        endforeach()
+        # Actual VS multi-config layout of the pinned 26dcb5c4 build (verified
+        # twice, 2026-08-31 and 2026-09-08): top-level targets emit
+        # <build>/<CONFIG>/<name>.lib, while subdirectory targets (ggml,
+        # sentencepiece) emit <build>/<target-subdir>/<CONFIG>/<name>.lib.
+        # The earlier <build>/<CONFIG>/<subdir>/<name>.lib paths matched no
+        # real VS build tree — the archives had to be hand-copied into that
+        # shape, which no fresh clone reproduces.
+        set(IBAUDIO_AUDIO_CPP_LIBS
+            "${_acb}/${_ac_cfg_dir}/engine_runtime.lib"
+            "${_acb}/${_ac_cfg_dir}/cjson_vendor.lib"
+            "${_acb}/${_ac_cfg_dir}/yaml_vendor.lib"
+            "${_acb}/external/sentencepiece/src/${_ac_cfg_dir}/sentencepiece.lib"
+            "${_acb}/ggml/src/${_ac_cfg_dir}/ggml.lib"
+            "${_acb}/ggml/src/${_ac_cfg_dir}/ggml-base.lib"
+            "${_acb}/ggml/src/${_ac_cfg_dir}/ggml-cpu.lib")
     else()
         set(IBAUDIO_AUDIO_CPP_LIBS
             "${_acb}/libengine_runtime.a"
