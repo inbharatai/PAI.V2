@@ -124,6 +124,7 @@ pub struct HarnessBuilder {
     safety: Arc<dyn SafetyProvider>,
     memory: Option<Arc<dyn MemoryProvider>>,
     route_policy: RoutePolicy,
+    system_prefix: Option<String>,
 }
 
 impl std::fmt::Debug for HarnessBuilder {
@@ -181,6 +182,7 @@ impl HarnessBuilder {
             safety: Arc::new(BasicSafetyProvider),
             memory: None,
             route_policy: RoutePolicy::default(),
+            system_prefix: None,
         })
     }
 
@@ -239,6 +241,20 @@ impl HarnessBuilder {
         self
     }
 
+    /// Installs an embedding-authored system-prompt prefix. The harness core
+    /// is generic and cannot know what its host product actually is; without
+    /// this, a model may honestly believe it has no tools (observed: Pocket
+    /// AI's model told the user it "only operates within the encrypted vault"
+    /// while holding full-access tools). The prefix is prepended verbatim to
+    /// the harness system prompt on every request; it must describe only what
+    /// the embedding actually registered — the harness does not validate it
+    /// against the tool registry, so embeddings must keep it truthful.
+    #[must_use]
+    pub fn system_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.system_prefix = Some(prefix.into());
+        self
+    }
+
     #[must_use]
     pub fn build(self) -> Harness {
         Harness {
@@ -253,6 +269,7 @@ impl HarnessBuilder {
             sandbox: self.sandbox,
             safety: self.safety,
             memory: self.memory,
+            system_prefix: self.system_prefix.unwrap_or_default(),
             metrics: Arc::new(Metrics::default()),
         }
     }
@@ -271,6 +288,7 @@ pub struct Harness {
     sandbox: Arc<dyn SandboxProvider>,
     safety: Arc<dyn SafetyProvider>,
     memory: Option<Arc<dyn MemoryProvider>>,
+    system_prefix: String,
     metrics: Arc<Metrics>,
 }
 
@@ -696,7 +714,11 @@ impl Harness {
                 };
                 let tool_ids: Vec<String> =
                     model_tools.iter().map(|tool| tool.id.clone()).collect();
-                let system = system_prompt_with_memory(decision.level, memory_context.as_deref());
+                let system = system_prompt_with_memory(
+                    &self.system_prefix,
+                    decision.level,
+                    memory_context.as_deref(),
+                );
                 session.append(EventData::RequestHeader {
                     request_id: request_id.clone(),
                     provider: options.provider.clone(),
@@ -1424,8 +1446,19 @@ fn parse_tool_arguments(value: &str) -> HarnessResult<ToolArguments> {
     }
 }
 
-fn system_prompt_with_memory(level: ExecutionLevel, memory: Option<&str>) -> String {
-    let mut system = system_prompt(level);
+fn system_prompt_with_memory(
+    prefix: &str,
+    level: ExecutionLevel,
+    memory: Option<&str>,
+) -> String {
+    let mut system = String::new();
+    if !prefix.is_empty() {
+        system.push_str(prefix);
+        if !prefix.ends_with('\n') {
+            system.push('\n');
+        }
+    }
+    system.push_str(&system_prompt(level));
     if let Some(memory) = memory {
         system.push_str(memory);
     }
@@ -1531,6 +1564,25 @@ fn finish_name(reason: FinishReason) -> &'static str {
 mod tests {
     use super::*;
     use crate::providers::InMemoryMemoryProvider;
+
+    #[test]
+    fn system_prompt_with_memory_prefixes_embedding_briefing() {
+        let system = system_prompt_with_memory(
+            "You are the Pocket AI desktop agent.",
+            ExecutionLevel::L3,
+            Some("\n[MEMORY CONTEXT]\n"),
+        );
+        assert!(
+            system.starts_with("You are the Pocket AI desktop agent.\n"),
+            "the embedding prefix must lead the system prompt, got: {system}"
+        );
+        assert!(system.contains("Work toward the explicit goal"));
+        assert!(system.ends_with("\n[MEMORY CONTEXT]\n"));
+
+        // No prefix and no memory must keep the plain level prompt.
+        let plain = system_prompt_with_memory("", ExecutionLevel::L0, None);
+        assert_eq!(plain, "Answer directly. Do not invoke tools.");
+    }
 
     #[test]
     fn l0_has_one_step_and_no_tools() -> HarnessResult<()> {
