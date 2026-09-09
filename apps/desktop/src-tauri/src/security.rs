@@ -109,8 +109,8 @@ impl SecurityManager {
     /// each one fully into memory (the audit's unbounded-allocation finding).
     fn compute_file_sha256(&self, path: &PathBuf) -> Result<String, String> {
         use std::io::Read;
-        let mut file =
-            std::fs::File::open(path).map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+        let mut file = std::fs::File::open(path)
+            .map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
         let mut hasher = Sha256::new();
         // Heap buffer (see the llama.rs/bharat_audio.rs stack-overflow notes:
         // never a large stack array) at 1 MiB — large enough that hashing a

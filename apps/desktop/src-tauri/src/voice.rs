@@ -292,9 +292,7 @@ impl VoiceModule {
                             confidence: None,
                             processing_time_ms: start.elapsed().as_millis() as u64,
                             status: VoiceCapabilityStatus::Error,
-                            error: Some(
-                                "Whisper produced no transcript text".to_string(),
-                            ),
+                            error: Some("Whisper produced no transcript text".to_string()),
                         },
                         Err(e) => SttResult {
                             text: String::new(),
@@ -380,10 +378,7 @@ impl VoiceModule {
 
         // Unique per-call output name: the old millisecond timestamp collided
         // for concurrent requests.
-        let output_file = output_dir.join(format!(
-            "tts_{}.wav",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let output_file = output_dir.join(format!("tts_{}.wav", uuid::Uuid::new_v4().simple()));
 
         let model_path = match &self.config.piper_model_path {
             Some(path) => path.clone(),
@@ -640,16 +635,17 @@ pub(crate) fn discover_voice_assets(vault_root: &str, language: &str) -> VoiceCo
     // product no longer ships, so they never matched and discovery silently
     // ran on hardcoded defaults that merely happened to coincide with the
     // staged layout.
-    let whisper_model = discover_model_path_v2(vault_root, &["WHISPER_MODEL"]).unwrap_or_else(|| {
-        discover_model_path(
-            vault_root,
-            &[
-                "models.desktop.whisper.path",
-                "models.desktop.whisper_model.path",
-            ],
-            "MODELS/DESKTOP/whisper-base.en.bin",
-        )
-    });
+    let whisper_model =
+        discover_model_path_v2(vault_root, &["WHISPER_MODEL"]).unwrap_or_else(|| {
+            discover_model_path(
+                vault_root,
+                &[
+                    "models.desktop.whisper.path",
+                    "models.desktop.whisper_model.path",
+                ],
+                "MODELS/DESKTOP/whisper-base.en.bin",
+            )
+        });
 
     let piper_model = discover_model_path_v2(vault_root, &["PIPER_MODEL"]).unwrap_or_else(|| {
         discover_model_path(

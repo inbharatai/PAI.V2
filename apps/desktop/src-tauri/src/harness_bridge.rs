@@ -6,21 +6,25 @@
 //! it does not create a second model runtime or persistence store.
 
 use crate::{
+    browser::{self, BrowserAction, BrowserStateHolder, ScrollDirection},
     documents,
     llama::{Content, ConversationTurn, ModelManagerState},
     safety::{DesktopSafetyGuard, SafetyGuardState, ToolAction},
     security, DesktopVaultState,
 };
 use inbharat_harness_core::{
-    CancellationToken, Capability, CapabilitySet, ConfirmationMode, ConfirmationOutcome,
-    Determinism, ExecutionLevel, HarnessBuilder, HarnessResult, MemoryOptions, RunOptions,
-    SideEffect, StaticConfirmationProvider, Tool, ToolArguments, ToolContext, ToolManifest,
-    ToolOutput, Value,
+    tools::{ListFilesTool, ReadFileTool, RunProcessTool, WriteFileTool},
+    BudgetLimits, CancellationToken, Capability, CapabilitySet, ConfirmationMode,
+    ConfirmationOutcome, Determinism, ExecutionLevel, HarnessBuilder, HarnessResult,
+    LocalExecutionBroker, MemoryOptions, PermissionDecision, PermissionProvider, RootedFs,
+    RunOptions, SideEffect, StaticConfirmationProvider, Tool, ToolArguments, ToolContext,
+    ToolManifest, ToolOutput, Value,
 };
 use pai_harness_adapter::{
     PaiLlamaLocalProvider, PaiVaultMemoryProvider, PaiVaultMemoryProviderConfig,
 };
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use unoone_vault_core::Vault;
@@ -397,14 +401,761 @@ fn desktop_read_tools(
     .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Full-access local agent lane (coding, automation, browser)
+// ---------------------------------------------------------------------------
+//
+// The user explicitly directed that Pocket AI, in full-access mode, may do
+// everything Gemma can drive on this machine: read and write files, create
+// directories, run programs, act in the browser workspace. What does NOT
+// change is what makes the agent trustworthy: every call still passes the
+// non-bypassable harness pipeline (validate → authorize per capability →
+// confirm → budget → sandbox → execute → bound → verify) with the full JSONL
+// audit trail, every subprocess is direct-argv (never a shell), cwd-confined
+// to the workspace, environment-scrubbed and deadline-killed, and every file
+// access stays behind the TOCTOU-hardened RootedFs fence.
+
+/// The permission policy for full-access mode: every capability is
+/// authorized. This replaces deny-by-default ONLY in the full-access lane
+/// and only for the tool-backed local capabilities; the harness core's
+/// pipeline, budgets and audit remain non-bypassable in front of every call.
+struct FullAccessPermission;
+
+impl PermissionProvider for FullAccessPermission {
+    fn authorize(
+        &self,
+        _actor: &str,
+        _capability: Capability,
+        _resource: &str,
+    ) -> HarnessResult<PermissionDecision> {
+        Ok(PermissionDecision::Allow)
+    }
+}
+
+/// Programs the full-access agent may spawn. Direct argv only — the broker
+/// never invokes a shell; each name is resolved from PATH at broker
+/// construction and unresolvable names are silently skipped, so this is a
+/// capability declaration, not a guarantee. Interpreters and shells are
+/// included deliberately under the user's full-access directive: a coding
+/// agent that cannot run `npm install`, a test runner or a build script is
+/// not a coding agent. Every spawn is still audited, budgeted and
+/// deadline-killed by the harness in front of the broker.
+const FULL_ACCESS_PROGRAMS: &[&str] = &[
+    // VCS + build + languages
+    "git",
+    "cargo",
+    "rustc",
+    "node",
+    "npm",
+    "npx",
+    "python",
+    "python3",
+    "py",
+    "pip",
+    "dotnet",
+    "go",
+    "java",
+    "mvn",
+    "gradle",
+    "cmake",
+    "make",
+    "gcc",
+    "g++",
+    "clang",
+    "cl",
+    // Shells: full access means the agent may script compound commands too.
+    "powershell",
+    "pwsh",
+    "cmd",
+    "bash",
+    "sh",
+];
+
+/// The coding/automation workspace root. Full-access file tools and
+/// subprocesses are rooted here — never the encrypted pendrive vault — so
+/// agent writes land on rewritable host disk, not the read-mostly package.
+fn workspace_root() -> Result<PathBuf, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "cannot locate the user home directory for the agent workspace".to_string()
+        })?;
+    let root = home.join("UnoOneAgent");
+    std::fs::create_dir_all(&root).map_err(|e| {
+        format!(
+            "cannot create the agent workspace at {}: {e}",
+            root.display()
+        )
+    })?;
+    Ok(root)
+}
+
+/// Run the shared UnoOne safety review for one model-selected tool call.
+/// Every desktop bridge tool uses the same guard as the vault read tools.
+fn safety_review(
+    safety: &Arc<Mutex<DesktopSafetyGuard>>,
+    tool_id: &str,
+    arguments: &ToolArguments,
+) -> HarnessResult<()> {
+    let canonical = Value::Object(arguments.clone()).to_canonical_json();
+    let parameter_json: serde_json::Value = serde_json::from_str(&canonical).map_err(|error| {
+        inbharat_harness_core::Failure::invalid(
+            "pai.desktop_tool.safety",
+            format!("could not canonicalize tool arguments: {error}"),
+        )
+    })?;
+    let action = ToolAction {
+        action_id: format!("harness-{}", uuid::Uuid::new_v4()),
+        tool_name: tool_id.to_owned(),
+        parameters: parameter_json,
+        confidence: None,
+        raw_output: canonical,
+    };
+    let verdict = safety
+        .lock()
+        .map_err(|_| {
+            inbharat_harness_core::Failure::new(
+                inbharat_harness_core::ErrorCode::ProviderFailed,
+                inbharat_harness_core::FailureClass::Policy,
+                "pai.desktop_tool.safety",
+                "UnoOne safety state lock failed",
+            )
+        })?
+        .review_action(&action);
+    if !verdict.approved {
+        return Err(inbharat_harness_core::Failure::new(
+            inbharat_harness_core::ErrorCode::PermissionDenied,
+            inbharat_harness_core::FailureClass::Policy,
+            "pai.desktop_tool.safety",
+            verdict.reason,
+        ));
+    }
+    Ok(())
+}
+
+fn optional_string<'a>(arguments: &'a ToolArguments, key: &str) -> Option<&'a str> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 64 * 1024)
+}
+
+fn value_as_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        _ => None,
+    }
+}
+
+/// Recursive literal-substring search across the agent workspace. The walk
+/// goes through the same `RootedFs` fence as fs.read/fs.write (directories
+/// are enumerated by `list`, files are read by `read_text`), so path escape,
+/// symlink planting and oversized files are rejected by the fence rather
+/// than by this tool's own logic.
+struct DesktopSearchTool {
+    manifest: ToolManifest,
+    filesystem: RootedFs,
+}
+
+impl DesktopSearchTool {
+    fn new(filesystem: RootedFs) -> Self {
+        Self {
+            manifest: ToolManifest {
+                id: "workspace.search".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: "Recursively search file contents in the agent workspace for a literal substring; returns path:line: text matches.".to_owned(),
+                input_schema: r#"{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"case_insensitive":{"type":"boolean"},"max_results":{"type":"integer","minimum":1,"maximum":200}},"required":["query"],"additionalProperties":false}"#.to_owned(),
+                output_schema: r#"{"type":"string"}"#.to_owned(),
+                required_capabilities: CapabilitySet::from_slice(&[Capability::FileRead]),
+                supported_levels: vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
+                determinism: Determinism::Deterministic,
+                side_effect: SideEffect::Read,
+                confirmation: ConfirmationMode::Never,
+                concurrency_safe: false,
+                default_timeout: Duration::from_secs(60),
+                max_output_bytes: 64 * 1024,
+                verification: "fenced-local-read-v1".to_owned(),
+                compensation: "none".to_owned(),
+            },
+            filesystem,
+        }
+    }
+}
+
+impl Tool for DesktopSearchTool {
+    fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        let allowed = ["query", "path", "case_insensitive", "max_results"];
+        if arguments.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "pai.tool.arguments",
+                "workspace.search call contains an unsupported argument",
+            ));
+        }
+        required_string(arguments, "query")?;
+        if let Some(value) = arguments.get("max_results") {
+            match value {
+                Value::Integer(limit) if (1..=200).contains(limit) => {}
+                _ => {
+                    return Err(inbharat_harness_core::Failure::invalid(
+                        "workspace.search.max_results",
+                        "max_results must be an integer from 1 to 200",
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        context.cancel.check("pai.workspace_search")?;
+        let query = required_string(arguments, "query")?;
+        let start = optional_string(arguments, "path").unwrap_or(".");
+        let case_insensitive = arguments
+            .get("case_insensitive")
+            .and_then(value_as_bool)
+            .unwrap_or(false);
+        let max_results = arguments
+            .get("max_results")
+            .and_then(|value| match value {
+                Value::Integer(limit) => u32::try_from(*limit).ok(),
+                _ => None,
+            })
+            .unwrap_or(50) as usize;
+        let needle = if case_insensitive {
+            query.to_ascii_lowercase()
+        } else {
+            query.to_owned()
+        };
+
+        const MAX_FILES: usize = 2000;
+        const MAX_DEPTH: usize = 12;
+
+        let mut scanned = 0usize;
+        let mut matches: Vec<String> = Vec::new();
+        let mut queue: Vec<(String, usize)> = vec![(start.to_owned(), 0)];
+        let mut truncated = false;
+        while let Some((dir, depth)) = queue.pop() {
+            if matches.len() >= max_results || scanned >= MAX_FILES {
+                truncated = true;
+                break;
+            }
+            if depth >= MAX_DEPTH {
+                continue;
+            }
+            let entries = match self.filesystem.list(&dir) {
+                Ok(entries) => entries,
+                // Unreadable directories (permissions, fence) are skipped, not
+                // fatal: a search reports what it could see.
+                Err(_) => continue,
+            };
+            for name in entries {
+                if matches.len() >= max_results || scanned >= MAX_FILES {
+                    truncated = true;
+                    break;
+                }
+                let relative = if dir == "." {
+                    name
+                } else {
+                    format!("{dir}/{name}")
+                };
+                let resolved = match self.filesystem.resolve_existing(&relative) {
+                    Ok(resolved) => resolved,
+                    Err(_) => continue,
+                };
+                let metadata = match std::fs::symlink_metadata(&resolved) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                if metadata.is_symlink() {
+                    continue;
+                }
+                if metadata.is_dir() {
+                    queue.push((relative, depth + 1));
+                    continue;
+                }
+                if !metadata.is_file() {
+                    continue;
+                }
+                scanned += 1;
+                let Ok(text) = self.filesystem.read_text(&relative) else {
+                    continue;
+                };
+                for (index, line) in text.lines().enumerate() {
+                    // Case-insensitive matching lowercases a copy of the
+                    // line for comparison; the reported match text stays
+                    // the original line, as the user wrote it.
+                    let candidate: std::borrow::Cow<str> = if case_insensitive {
+                        std::borrow::Cow::Owned(line.to_ascii_lowercase())
+                    } else {
+                        std::borrow::Cow::Borrowed(line)
+                    };
+                    if candidate.contains(&needle) {
+                        matches.push(format!("{relative}:{}: {line}", index + 1));
+                        if matches.len() >= max_results {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let mut output = if matches.is_empty() {
+            format!("No matches for '{query}' under {start} ({scanned} file(s) scanned).")
+        } else {
+            format!(
+                "{} match(es) for '{query}' ({scanned} file(s) scanned):\n{}",
+                matches.len(),
+                matches.join("\n")
+            )
+        };
+        if truncated {
+            output.push_str("\n[result truncated: raise max_results or narrow the search path]");
+        }
+        let output =
+            unoone_text::truncate_bytes_with_notice(&output, self.manifest.max_output_bytes);
+        Ok(ToolOutput {
+            value: Value::String(output.clone()),
+            model_content: output,
+            presentation: BTreeMap::new(),
+        })
+    }
+}
+
+/// Exact-string search/replace over one workspace file — the token-efficient
+/// editing primitive for a coding agent (whole-file rewrites through
+/// fs.write stay available, but a 12B model patches far more reliably than
+/// it reproduces a whole file). Reads and writes go through the same
+/// `RootedFs` fence as the built-in fs tools; the atomic write means a
+/// failed or partial patch never leaves a torn file.
+struct DesktopPatchTool {
+    manifest: ToolManifest,
+    filesystem: RootedFs,
+}
+
+impl DesktopPatchTool {
+    fn new(filesystem: RootedFs) -> Self {
+        Self {
+            manifest: ToolManifest {
+                id: "workspace.patch".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: "Replace an exact literal substring inside one workspace file. By default the match must be unique; pass replace_all=true to replace every occurrence.".to_owned(),
+                input_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"find":{"type":"string"},"replace":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","find","replace"],"additionalProperties":false}"#.to_owned(),
+                output_schema: r#"{"type":"string"}"#.to_owned(),
+                required_capabilities: CapabilitySet::from_slice(&[Capability::FileWrite]),
+                supported_levels: vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
+                determinism: Determinism::NonIdempotent,
+                side_effect: SideEffect::Write,
+                confirmation: ConfirmationMode::OnSideEffect,
+                concurrency_safe: false,
+                default_timeout: Duration::from_secs(30),
+                max_output_bytes: 16 * 1024,
+                verification: "fenced-atomic-write-v1".to_owned(),
+                compensation: "re-write-v1".to_owned(),
+            },
+            filesystem,
+        }
+    }
+}
+
+impl Tool for DesktopPatchTool {
+    fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        let allowed = ["path", "find", "replace", "replace_all"];
+        if arguments.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "pai.tool.arguments",
+                "workspace.patch call contains an unsupported argument",
+            ));
+        }
+        required_string(arguments, "path")?;
+        let find = arguments
+            .get("find")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 64 * 1024)
+            .ok_or_else(|| {
+                inbharat_harness_core::Failure::invalid(
+                    "workspace.patch.find",
+                    "find must be a non-empty string of at most 64 KiB",
+                )
+            })?;
+        if find.matches('\n').count() > 512 {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "workspace.patch.find",
+                "find spans too many lines; narrow the match",
+            ));
+        }
+        let _replace = arguments
+            .get("replace")
+            .and_then(Value::as_str)
+            .filter(|value| value.len() <= 256 * 1024)
+            .ok_or_else(|| {
+                inbharat_harness_core::Failure::invalid(
+                    "workspace.patch.replace",
+                    "replace must be a string of at most 256 KiB (an empty string deletes the matched text)",
+                )
+            })?;
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        context.cancel.check("pai.workspace_patch")?;
+        let path = required_string(arguments, "path")?;
+        let find = required_string(arguments, "find")?;
+        let replace = arguments
+            .get("replace")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let replace_all = arguments
+            .get("replace_all")
+            .and_then(value_as_bool)
+            .unwrap_or(false);
+
+        let text = self.filesystem.read_text(path)?;
+        let occurrences = text.matches(find).count();
+        if occurrences == 0 {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "workspace.patch.find",
+                format!("the text to find is not present in {path}"),
+            ));
+        }
+        if occurrences > 1 && !replace_all {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "workspace.patch.find",
+                format!(
+                    "the text to find occurs {occurrences} times in {path}; include more surrounding context to make it unique, or pass replace_all=true"
+                ),
+            ));
+        }
+        let patched = if replace_all {
+            text.replace(find, replace)
+        } else {
+            text.replacen(find, replace, 1)
+        };
+        self.filesystem.write_text_atomic(path, &patched)?;
+        let summary = format!(
+            "patched {path}: replaced {occurrences} occurrence(s); file is now {} bytes",
+            patched.len()
+        );
+        Ok(ToolOutput {
+            value: Value::String(summary.clone()),
+            model_content: summary,
+            presentation: BTreeMap::from([("kind".to_owned(), "file-patch".to_owned())]),
+        })
+    }
+}
+
+/// Model-driven browser lane: the same typed actions, session state and
+/// verified result contract as the user-driven BrowserWorkspace buttons,
+/// exposed to the model as one tool. `confirmed` is always true here — this
+/// tool only exists in the user-directed full-access lane — but every call
+/// still passes the shared safety review and the browser module's own
+/// URL validation.
+struct DesktopBrowserTool {
+    manifest: ToolManifest,
+    app: tauri::AppHandle,
+    browser: Arc<BrowserStateHolder>,
+    safety: Arc<Mutex<DesktopSafetyGuard>>,
+}
+
+impl DesktopBrowserTool {
+    fn new(
+        app: tauri::AppHandle,
+        browser: Arc<BrowserStateHolder>,
+        safety: Arc<Mutex<DesktopSafetyGuard>>,
+    ) -> Self {
+        Self {
+            manifest: ToolManifest {
+                id: "browser.act".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: "Drive the desktop browser workspace: navigate, click, type, fill forms, scroll, extract page text, get page info or screenshot. Requires an active browser session (the user opens the BrowserWorkspace first).".to_owned(),
+                input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["navigate","back","forward","reload","extract_page_text","extract_element_text","click","type","fill_form","scroll","wait","get_page_info","screenshot","close","clear_session"]},"url":{"type":"string"},"selector":{"type":"string"},"text":{"type":"string"},"direction":{"type":"string","enum":["up","down"]},"amount":{"type":"integer","minimum":1},"milliseconds":{"type":"integer","minimum":1,"maximum":30000},"fields":{"type":"array","items":{"type":"object","properties":{"selector":{"type":"string"},"value":{"type":"string"}},"required":["selector","value"],"additionalProperties":false}}},"required":["action"],"additionalProperties":false}"#.to_owned(),
+                output_schema: r#"{"type":"string"}"#.to_owned(),
+                required_capabilities: CapabilitySet::from_slice(&[Capability::Workspace]),
+                supported_levels: vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
+                determinism: Determinism::NonIdempotent,
+                side_effect: SideEffect::Process,
+                confirmation: ConfirmationMode::OnSideEffect,
+                concurrency_safe: false,
+                default_timeout: Duration::from_secs(30),
+                max_output_bytes: 64 * 1024,
+                verification: "webview-verified-v1".to_owned(),
+                compensation: "none".to_owned(),
+            },
+            app,
+            browser,
+            safety,
+        }
+    }
+}
+
+/// The browser.act argument contract, standalone so it is testable without
+/// a Tauri AppHandle.
+fn validate_browser_arguments(arguments: &ToolArguments) -> HarnessResult<()> {
+    let allowed = [
+        "action",
+        "url",
+        "selector",
+        "text",
+        "direction",
+        "amount",
+        "milliseconds",
+        "fields",
+    ];
+    if arguments.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(inbharat_harness_core::Failure::invalid(
+            "pai.tool.arguments",
+            "browser.act call contains an unsupported argument",
+        ));
+    }
+    let action = required_string(arguments, "action")?;
+    let require = |fields: &[&str]| -> HarnessResult<()> {
+        for field in fields {
+            required_string(arguments, field)?;
+        }
+        Ok(())
+    };
+    match action {
+        "navigate" => require(&["url"])?,
+        "extract_element_text" | "click" => require(&["selector"])?,
+        "type" => require(&["selector", "text"])?,
+        "fill_form" => {
+            let Some(Value::Array(fields)) = arguments.get("fields") else {
+                return Err(inbharat_harness_core::Failure::invalid(
+                    "browser.act.fields",
+                    "fill_form requires a fields array",
+                ));
+            };
+            if fields.is_empty() || fields.len() > 64 {
+                return Err(inbharat_harness_core::Failure::invalid(
+                    "browser.act.fields",
+                    "fields must contain 1-64 entries",
+                ));
+            }
+        }
+        "scroll" => {
+            require(&["direction"])?;
+            let direction = required_string(arguments, "direction")?;
+            if !matches!(direction, "up" | "down") {
+                return Err(inbharat_harness_core::Failure::invalid(
+                    "browser.act.direction",
+                    "direction must be 'up' or 'down'",
+                ));
+            }
+            require(&["amount"])?;
+            match arguments.get("amount") {
+                Some(Value::Integer(value)) if (1..=100_000).contains(value) => {}
+                _ => {
+                    return Err(inbharat_harness_core::Failure::invalid(
+                        "browser.act.amount",
+                        "amount must be an integer from 1 to 100000",
+                    ))
+                }
+            }
+        }
+        "wait" => match arguments.get("milliseconds") {
+            Some(Value::Integer(value)) if (1..=30_000).contains(value) => {}
+            _ => {
+                return Err(inbharat_harness_core::Failure::invalid(
+                    "browser.act.milliseconds",
+                    "milliseconds must be an integer from 1 to 30000",
+                ))
+            }
+        },
+        "back" | "forward" | "reload" | "extract_page_text" | "get_page_info" | "screenshot"
+        | "close" | "clear_session" => {}
+        other => {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "browser.act.action",
+                format!("unknown browser action '{other}'"),
+            ))
+        }
+    }
+    Ok(())
+}
+
+impl Tool for DesktopBrowserTool {
+    fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        validate_browser_arguments(arguments)
+    }
+
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        context.cancel.check("pai.browser_tool")?;
+        safety_review(&self.safety, &self.manifest.id, arguments)?;
+
+        let action = required_string(arguments, "action")?;
+        let typed = match action {
+            "navigate" => BrowserAction::Navigate {
+                url: required_string(arguments, "url")?.to_owned(),
+            },
+            "back" => BrowserAction::Back,
+            "forward" => BrowserAction::Forward,
+            "reload" => BrowserAction::Reload,
+            "extract_page_text" => BrowserAction::ExtractPageText,
+            "extract_element_text" => BrowserAction::ExtractElementText {
+                selector: required_string(arguments, "selector")?.to_owned(),
+            },
+            "click" => BrowserAction::Click {
+                selector: required_string(arguments, "selector")?.to_owned(),
+            },
+            "type" => BrowserAction::Type {
+                selector: required_string(arguments, "selector")?.to_owned(),
+                text: required_string(arguments, "text")?.to_owned(),
+            },
+            "fill_form" => {
+                let Some(Value::Array(fields)) = arguments.get("fields") else {
+                    return Err(inbharat_harness_core::Failure::invalid(
+                        "browser.act.fields",
+                        "fill_form requires a fields array",
+                    ));
+                };
+                let mut parsed = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let Some(object) = field.as_object() else {
+                        return Err(inbharat_harness_core::Failure::invalid(
+                            "browser.act.fields",
+                            "each field must be an object with selector and value",
+                        ));
+                    };
+                    let selector = object
+                        .get("selector")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let value = object
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if selector.is_empty() {
+                        return Err(inbharat_harness_core::Failure::invalid(
+                            "browser.act.fields",
+                            "each field requires a non-empty selector",
+                        ));
+                    }
+                    parsed.push(browser::FormFillField {
+                        selector: selector.to_owned(),
+                        value: value.to_owned(),
+                    });
+                }
+                BrowserAction::FillForm { fields: parsed }
+            }
+            "scroll" => BrowserAction::Scroll {
+                direction: if required_string(arguments, "direction")? == "up" {
+                    ScrollDirection::Up
+                } else {
+                    ScrollDirection::Down
+                },
+                amount: match arguments.get("amount") {
+                    Some(Value::Integer(value)) => u32::try_from(*value).unwrap_or(1),
+                    _ => 1,
+                },
+            },
+            "wait" => BrowserAction::Wait {
+                milliseconds: match arguments.get("milliseconds") {
+                    Some(Value::Integer(value)) => u64::try_from(*value).unwrap_or(100),
+                    _ => 100,
+                },
+            },
+            "get_page_info" => BrowserAction::GetPageInfo,
+            "screenshot" => BrowserAction::Screenshot,
+            "close" => BrowserAction::Close,
+            "clear_session" => BrowserAction::ClearSession,
+            other => {
+                return Err(inbharat_harness_core::Failure::invalid(
+                    "browser.act.action",
+                    format!("unknown browser action '{other}'"),
+                ))
+            }
+        };
+
+        // Full access: risky element consent (submit/upload/download) is
+        // auto-granted by design — the user directed this lane; the safety
+        // review above still ran, and the browser module's URL validation
+        // and session checks still apply.
+        let result =
+            browser::browser_execute_sync(typed, true, self.app.clone(), Arc::clone(&self.browser))
+                .map_err(|error| {
+                    inbharat_harness_core::Failure::new(
+                        inbharat_harness_core::ErrorCode::ToolFailed,
+                        inbharat_harness_core::FailureClass::Execution,
+                        "pai.browser_tool",
+                        error,
+                    )
+                })?;
+        let summary = serde_json::json!({
+            "success": result.success,
+            "verified": result.verified,
+            "current_url": result.current_url,
+            "current_title": result.current_title,
+            "message": result.user_message,
+            "error": result.error,
+            "screenshot_path": result.screenshot_path,
+            "data": result.data,
+        });
+        let text = unoone_text::truncate_bytes_with_notice(
+            &serde_json::to_string_pretty(&summary).unwrap_or_default(),
+            self.manifest.max_output_bytes,
+        );
+        Ok(ToolOutput {
+            value: Value::String(text.clone()),
+            model_content: text,
+            presentation: BTreeMap::from([("kind".to_owned(), "browser".to_owned())]),
+        })
+    }
+}
+
+/// The full-access tool set: the harness built-ins (fenced fs.read/fs.list/
+/// fs.write + allowlisted direct-argv process.run), plus the desktop search,
+/// patch and browser adapters. Every tool stays behind the harness pipeline.
+fn desktop_workspace_tools(
+    filesystem: RootedFs,
+    app: tauri::AppHandle,
+    browser: Arc<BrowserStateHolder>,
+    safety: Arc<Mutex<DesktopSafetyGuard>>,
+) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(ReadFileTool::default()) as Arc<dyn Tool>,
+        Arc::new(ListFilesTool::default()),
+        Arc::new(WriteFileTool::default()),
+        Arc::new(RunProcessTool::default()),
+        Arc::new(DesktopSearchTool::new(filesystem.clone())),
+        Arc::new(DesktopPatchTool::new(filesystem.clone())),
+        Arc::new(DesktopBrowserTool::new(app, browser, safety)),
+    ]
+}
+
 /// Unified text orchestration entry point. The legacy agent remains compiled only
 /// as an explicit rollback path while the frontend production text path uses Harness.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri injects the trailing state params
 pub async fn harness_chat(
     message: String,
     conversation_id: Option<String>,
     conversation_history: Vec<ConversationTurn>,
     allow_workspace_goal: Option<bool>,
+    app: tauri::AppHandle,
+    browser_state: tauri::State<'_, Arc<BrowserStateHolder>>,
     model_state: tauri::State<'_, ModelManagerState>,
     vault_state: tauri::State<'_, DesktopVaultState>,
     safety_state: tauri::State<'_, SafetyGuardState>,
@@ -422,7 +1173,11 @@ pub async fn harness_chat(
     {
         return Err("conversation_id must use 1-128 characters from [A-Za-z0-9._-]".to_owned());
     }
-    let allow_workspace_goal = allow_workspace_goal.unwrap_or(false);
+    // Full access is the user-directed default: files, code execution and
+    // browser control on the host, with the audit trail + budgets intact.
+    // The same flag doubles as the historical "workspace goal" switch — it
+    // grants the escalation to L3 (multi-step agentic) execution.
+    let full_access = allow_workspace_goal.unwrap_or(true);
 
     // UNOONE encrypted MESSAGE records remain the only canonical chat history.
     // The frontend supplies that already-decrypted history for this one run;
@@ -512,6 +1267,7 @@ pub async fn harness_chat(
             return Err("Pocket AI vault is locked".to_owned());
         }
     }
+    let browser = Arc::clone(browser_state.inner());
 
     tokio::task::spawn_blocking(move || {
         let model = Arc::new(
@@ -530,13 +1286,41 @@ pub async fn harness_chat(
             .map_err(|error| error.to_string())?,
         );
 
-        let mut builder = HarnessBuilder::local_embedded(&vault_root)
-            .map_err(|error| error.to_string())?
+        // Full-access mode roots file tools + subprocesses at the host
+        // workspace (%USERPROFILE%\UnoOneAgent) with an allowlisted
+        // direct-argv broker and a permissive permission provider; every
+        // other pipeline stage — validate, confirm, budget, sandbox fence,
+        // output bounding, audit — stays non-bypassable. Chat-only mode
+        // keeps the deny-by-default vault-rooted read-only builder.
+        let workspace_fs = if full_access {
+            let workspace = workspace_root().map_err(|error| error.to_string())?;
+            Some(
+                RootedFs::new(&workspace)
+                    .map_err(|error| error.to_string())?
+                    .with_limits(2 * 1024 * 1024, 4 * 1024 * 1024),
+            )
+        } else {
+            None
+        };
+        let mut builder = if let Some(filesystem) = workspace_fs.clone() {
+            let broker = LocalExecutionBroker::new(
+                filesystem,
+                FULL_ACCESS_PROGRAMS
+                    .iter()
+                    .map(|program| (*program).to_owned()),
+            );
+            HarnessBuilder::embedded(Arc::new(broker))
+                .map_err(|error| error.to_string())?
+                .permission_provider(Arc::new(FullAccessPermission))
+        } else {
+            HarnessBuilder::local_embedded(&vault_root).map_err(|error| error.to_string())?
+        };
+        builder = builder
             .register_model(model)
             .map_err(|error| error.to_string())?
             .memory_provider(memory)
             .confirmation_provider(Arc::new(StaticConfirmationProvider {
-                outcome: if allow_workspace_goal {
+                outcome: if full_access {
                     ConfirmationOutcome::AllowedOnce
                 } else {
                     ConfirmationOutcome::Unavailable
@@ -547,17 +1331,29 @@ pub async fn harness_chat(
                 .register_tool(tool)
                 .map_err(|error| error.to_string())?;
         }
+        if let Some(filesystem) = workspace_fs {
+            for tool in desktop_workspace_tools(
+                filesystem,
+                app.clone(),
+                Arc::clone(&browser),
+                Arc::clone(&safety),
+            ) {
+                builder = builder
+                    .register_tool(tool)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
         let harness = builder.build();
-        let capabilities = if allow_workspace_goal {
-            CapabilitySet::from_slice(&[
-                Capability::Model,
-                Capability::FileRead,
-                Capability::Workspace,
-            ])
+        // Full access authorizes the full local capability surface. Network,
+        // Credential, Job and Subagent have no registered tools today — the
+        // authorization is forward honesty about the lane's scope, not an
+        // unlocked behavior.
+        let capabilities = if full_access {
+            CapabilitySet::all_local()
         } else {
             CapabilitySet::from_slice(&[Capability::Model, Capability::FileRead])
         };
-        let options = RunOptions {
+        let mut options = RunOptions {
             actor: "local-user".to_owned(),
             capabilities,
             provider: "pai-llama-local".to_owned(),
@@ -580,6 +1376,22 @@ pub async fn harness_chat(
             },
             ..RunOptions::default()
         };
+        if full_access {
+            // Full-access runs are multi-step coding/automation sessions:
+            // request the L3 agentic route explicitly (allowed by the
+            // default route policy) and give it a coding-agent budget —
+            // still bounded, just bigger than the chat defaults.
+            options.explicit_level = Some(ExecutionLevel::L3);
+            options.budget = Some(BudgetLimits {
+                max_steps: 48,
+                max_tool_calls: 96,
+                max_rounds: 4,
+                max_jobs: 0,
+                max_subagent_depth: 0,
+                max_output_bytes: 2 * 1024 * 1024,
+                max_duration: Duration::from_secs(900),
+            });
+        }
         let cancel = CancellationToken::new();
         let (outcome, _session) = harness
             .run(&harness_prompt, &options, &cancel)
@@ -599,4 +1411,312 @@ pub async fn harness_chat(
     })
     .await
     .map_err(|error| format!("Harness worker failed: {error}"))?
+}
+
+#[cfg(test)]
+mod workspace_tool_tests {
+    use super::*;
+    use inbharat_harness_core::ExecutionBroker;
+
+    /// A throwaway fenced workspace under the OS temp directory.
+    fn temp_workspace() -> (PathBuf, RootedFs) {
+        let dir = std::env::temp_dir().join(format!(
+            "unoone-harness-tests-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp workspace");
+        let filesystem = RootedFs::new(&dir)
+            .expect("fence the temp workspace")
+            .with_limits(2 * 1024 * 1024, 4 * 1024 * 1024);
+        (dir, filesystem)
+    }
+
+    /// A ToolContext wired to an empty-allowlist broker over the same fence.
+    fn tool_context<'a>(
+        filesystem: &'a RootedFs,
+        cancel: &'a CancellationToken,
+        broker: &'a LocalExecutionBroker,
+    ) -> ToolContext<'a> {
+        ToolContext {
+            actor: "test",
+            level: ExecutionLevel::L3,
+            execution: broker as &dyn ExecutionBroker,
+            cancel,
+        }
+    }
+
+    fn harness_broker(filesystem: &RootedFs) -> LocalExecutionBroker {
+        LocalExecutionBroker::new(filesystem.clone(), std::iter::empty::<String>())
+    }
+
+    fn args(pairs: &[(&str, Value)]) -> ToolArguments {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), value.clone()))
+            .collect()
+    }
+
+    fn string_args(pairs: &[(&str, &str)]) -> ToolArguments {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), Value::String((*value).to_owned())))
+            .collect()
+    }
+
+    #[test]
+    fn full_access_permission_allows_every_local_capability() {
+        let all = [
+            Capability::Model,
+            Capability::FileRead,
+            Capability::FileWrite,
+            Capability::ProcessSpawn,
+            Capability::Network,
+            Capability::Credential,
+            Capability::Workspace,
+            Capability::Job,
+            Capability::Subagent,
+        ];
+        for capability in all {
+            let decision = FullAccessPermission
+                .authorize("test", capability, "test-resource")
+                .expect("authorization must not fail structurally");
+            assert!(
+                matches!(decision, PermissionDecision::Allow),
+                "{capability:?} must be allowed in full-access mode"
+            );
+        }
+    }
+
+    #[test]
+    fn search_finds_matches_recursively_and_respects_case() {
+        let (_dir, filesystem) = temp_workspace();
+        filesystem
+            .write_text_atomic(
+                "alpha.txt",
+                "The needle is here\nnothing to see\nNEEDLE in caps\n",
+            )
+            .expect("write alpha");
+        filesystem.create_dir_all("sub").expect("mkdir sub");
+        filesystem
+            .write_text_atomic("sub/beta.txt", "a needle deeper down\n")
+            .expect("write beta");
+        let tool = DesktopSearchTool::new(filesystem.clone());
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let context = tool_context(&filesystem, &cancel, &broker);
+
+        // Case-sensitive: exactly the two lowercase matches.
+        let output = tool
+            .execute(&string_args(&[("query", "needle")]), &context)
+            .expect("search must succeed");
+        let text = output.model_content;
+        assert!(text.contains("alpha.txt:1: The needle is here"), "{text}");
+        assert!(
+            text.contains("sub/beta.txt:1: a needle deeper down"),
+            "{text}"
+        );
+        assert!(!text.contains("NEEDLE in caps"), "{text}");
+
+        // Case-insensitive: the uppercase match appears too.
+        let output = tool
+            .execute(
+                &args(&[
+                    ("query", Value::String("needle".to_owned())),
+                    ("case_insensitive", Value::Bool(true)),
+                ]),
+                &context,
+            )
+            .expect("search must succeed");
+        assert!(output.model_content.contains("NEEDLE in caps"));
+    }
+
+    #[test]
+    fn search_case_insensitive_finds_uppercase_matches() {
+        let (_dir, filesystem) = temp_workspace();
+        filesystem
+            .write_text_atomic("notes.md", "GEMMA is a family of models\n")
+            .expect("write notes");
+        let tool = DesktopSearchTool::new(filesystem.clone());
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let context = tool_context(&filesystem, &cancel, &broker);
+        let output = tool
+            .execute(
+                &args(&[
+                    ("query", Value::String("gemma".to_owned())),
+                    ("case_insensitive", Value::Bool(true)),
+                ]),
+                &context,
+            )
+            .expect("search must succeed");
+        assert!(
+            output.model_content.contains("notes.md:1"),
+            "{}",
+            output.model_content
+        );
+    }
+
+    #[test]
+    fn search_stays_inside_the_fence_and_rejects_unknown_arguments() {
+        let (dir, filesystem) = temp_workspace();
+        // A sibling directory OUTSIDE the fence holds a matching file; a
+        // rooted search must never see it.
+        let outside = dir.parent().unwrap().join(format!(
+            "unoone-harness-outside-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&outside).expect("create outside dir");
+        std::fs::write(outside.join("decoy.txt"), "needle outside the fence\n")
+            .expect("write decoy");
+        filesystem
+            .write_text_atomic("inside.txt", "needle inside\n")
+            .expect("write inside");
+        let tool = DesktopSearchTool::new(filesystem.clone());
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let context = tool_context(&filesystem, &cancel, &broker);
+        let output = tool
+            .execute(&string_args(&[("query", "needle")]), &context)
+            .expect("search must succeed");
+        assert!(
+            output.model_content.contains("inside.txt"),
+            "{}",
+            output.model_content
+        );
+        assert!(
+            !output.model_content.contains("decoy"),
+            "search must not escape the fenced workspace: {}",
+            output.model_content
+        );
+        let _ = std::fs::remove_dir_all(&outside);
+
+        // Unknown argument keys are rejected before any file is touched.
+        let bad = args(&[
+            ("query", Value::String("needle".to_owned())),
+            ("glob", Value::String("*.txt".to_owned())),
+        ]);
+        assert!(tool.validate_arguments(&bad).is_err());
+    }
+
+    #[test]
+    fn patch_replaces_a_unique_match_atomically() {
+        let (_dir, filesystem) = temp_workspace();
+        filesystem
+            .write_text_atomic("config.toml", "name = \"old\"\nvalue = 1\n")
+            .expect("write config");
+        let tool = DesktopPatchTool::new(filesystem.clone());
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let context = tool_context(&filesystem, &cancel, &broker);
+        tool.execute(
+            &string_args(&[
+                ("path", "config.toml"),
+                ("find", "name = \"old\""),
+                ("replace", "name = \"new\""),
+            ]),
+            &context,
+        )
+        .expect("patch must succeed");
+        let patched = filesystem.read_text("config.toml").expect("re-read");
+        assert_eq!(patched, "name = \"new\"\nvalue = 1\n");
+    }
+
+    #[test]
+    fn patch_rejects_ambiguous_matches_until_replace_all() {
+        let (_dir, filesystem) = temp_workspace();
+        filesystem
+            .write_text_atomic("log.txt", "todo one\ntodo two\n")
+            .expect("write log");
+        let tool = DesktopPatchTool::new(filesystem.clone());
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let context = tool_context(&filesystem, &cancel, &broker);
+
+        let ambiguous = string_args(&[("path", "log.txt"), ("find", "todo"), ("replace", "done")]);
+        let error = tool
+            .execute(&ambiguous, &context)
+            .expect_err("ambiguous patch must be rejected");
+        assert!(
+            error.message.contains("2 times"),
+            "the error must name the ambiguity: {}",
+            error.message
+        );
+
+        let replace_all = args(&[
+            ("path", Value::String("log.txt".to_owned())),
+            ("find", Value::String("todo".to_owned())),
+            ("replace", Value::String("done".to_owned())),
+            ("replace_all", Value::Bool(true)),
+        ]);
+        tool.execute(&replace_all, &context)
+            .expect("replace_all patch must succeed");
+        assert_eq!(
+            filesystem.read_text("log.txt").expect("re-read"),
+            "done one\ndone two\n"
+        );
+    }
+
+    #[test]
+    fn patch_rejects_missing_match_and_path_escape() {
+        let (_dir, filesystem) = temp_workspace();
+        filesystem
+            .write_text_atomic("root.txt", "present\n")
+            .expect("write root file");
+        let tool = DesktopPatchTool::new(filesystem.clone());
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let context = tool_context(&filesystem, &cancel, &broker);
+
+        let missing = string_args(&[
+            ("path", "root.txt"),
+            ("find", "absent"),
+            ("replace", "whatever"),
+        ]);
+        assert!(tool.execute(&missing, &context).is_err());
+
+        // An escape attempt must fail without touching anything outside.
+        let escape = string_args(&[
+            ("path", "../root.txt"),
+            ("find", "present"),
+            ("replace", "escaped"),
+        ]);
+        assert!(tool.execute(&escape, &context).is_err());
+        assert_eq!(
+            filesystem.read_text("root.txt").expect("re-read"),
+            "present\n"
+        );
+    }
+
+    #[test]
+    fn browser_action_arguments_are_checked() {
+        let (_dir, filesystem) = temp_workspace();
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let context = tool_context(&filesystem, &cancel, &broker);
+
+        // navigate without a url is rejected
+        let navigate_no_url = string_args(&[("action", "navigate")]);
+        assert!(validate_browser_arguments(&navigate_no_url).is_err());
+        // navigate with a url is accepted
+        let navigate_ok = string_args(&[("action", "navigate"), ("url", "https://example.com")]);
+        assert!(validate_browser_arguments(&navigate_ok).is_ok());
+        // unknown actions are rejected
+        let unknown = string_args(&[("action", "teleport")]);
+        assert!(validate_browser_arguments(&unknown).is_err());
+        // wait bounds are enforced
+        let wait_bad = args(&[
+            ("action", Value::String("wait".to_owned())),
+            ("milliseconds", Value::Integer(0)),
+        ]);
+        assert!(validate_browser_arguments(&wait_bad).is_err());
+        let wait_ok = args(&[
+            ("action", Value::String("wait".to_owned())),
+            ("milliseconds", Value::Integer(500)),
+        ]);
+        assert!(validate_browser_arguments(&wait_ok).is_ok());
+        // click requires a selector
+        let click_no_selector = string_args(&[("action", "click")]);
+        assert!(validate_browser_arguments(&click_no_selector).is_err());
+        let _ = context.cancel.is_cancelled();
+    }
 }

@@ -694,7 +694,10 @@ pub async fn browser_execute(
     Ok(result)
 }
 
-fn browser_execute_sync(
+/// Sync browser executor — also the entry point for the Harness browser tool
+/// (the model-driven lane runs the same typed actions, against the same
+/// session state, as the user-driven BrowserWorkspace buttons).
+pub(crate) fn browser_execute_sync(
     action: BrowserAction,
     confirmed: bool,
     app: tauri::AppHandle,
