@@ -120,13 +120,24 @@ class AudioRecorder {
         if (!isRecording) return ByteArray(0)
         isRecording = false
         onAmplitude?.invoke(0f)
-        try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (e: Exception) {
-            Logger.e("Error stopping recorder", e)
-        }
+        val record = audioRecord
         audioRecord = null
+        if (record != null) {
+            try {
+                record.stop()
+            } catch (e: Exception) {
+                Logger.e("Error stopping recorder", e)
+            } finally {
+                // Finding A7: release() used to share stop()'s try block, so a
+                // stop() exception skipped it entirely and the native
+                // AudioRecord (plus the microphone it claims) leaked until GC.
+                try {
+                    record.release()
+                } catch (e: Exception) {
+                    Logger.e("Error releasing recorder", e)
+                }
+            }
+        }
         // 0C-6: Increase thread join timeout from 500ms to 2000ms to prevent
         // truncated audio if the recording thread is still flushing data
         recordingThread?.join(2000)

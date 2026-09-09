@@ -110,10 +110,21 @@ pub struct RecordingSession {
     pub sample_rate: u32,
     /// Channel count used during capture (set from the cpal input config)
     pub channels: u16,
+    /// Canonical BCP-47 speech language for this session (from
+    /// unoone-speech-contracts; `en`, `hi`, `hinglish`, `as`… canonicalize to
+    /// `en-IN`, `hi-IN`, `hi-en-codemix`, `as-IN`). Backends map it to their
+    /// own CLI vocabulary at the boundary. Older persisted sessions default
+    /// to `en-IN`.
+    #[serde(default = "default_session_language")]
+    pub language: String,
     /// Truthful, verified outcome of the stop operation. `None` while the
     /// session is still recording. The UI must render this rather than infer
     /// success from the presence of a session object.
     pub outcome: Option<RecordingOutcome>,
+}
+
+fn default_session_language() -> String {
+    "en-IN".to_string()
 }
 
 /// Bookmark in a recording
@@ -314,6 +325,7 @@ pub fn start_recording(
     recording_type: RecordingType,
     privacy_level: PrivacyLevel,
     vault_root: String,
+    language: Option<String>,
     state: tauri::State<'_, RecordingStateHolder>,
 ) -> Result<RecordingSession, String> {
     // Retain the vault root: `stop_recording` needs it to locate the bundled
@@ -350,6 +362,17 @@ pub fn start_recording(
         .lock()
         .map_err(|e| format!("State lock error: {}", e))? = Some(cmd_tx);
 
+    // Speech language for this session: canonicalized BCP-47 from
+    // unoone-speech-contracts (`en`, `hi`, `hinglish`, `as`… all canonicalize
+    // here). Invalid input fails closed instead of silently defaulting.
+    let session_language = match language.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(requested) => unoone_speech_contracts::canonicalize(requested)
+            .map_err(|e| format!("cannot start recording with language '{requested}': {e}"))?
+            .as_str()
+            .to_string(),
+        None => default_session_language(),
+    };
+
     let session = RecordingSession {
         id: uuid::Uuid::new_v4().to_string(),
         title: format!(
@@ -373,6 +396,7 @@ pub fn start_recording(
         vault_record_id: None,
         sample_rate,
         channels,
+        language: session_language,
         outcome: None,
     };
 
@@ -558,8 +582,12 @@ pub fn stop_recording(
                     .push("VAULT_ROOT_UNAVAILABLE_TRANSCRIPTION_SKIPPED".to_string());
             }
             Some(root) => {
-                let (text, deletion_confirmed, warning) =
-                    transcribe_transiently(&wav_bytes, root, &session.privacy_level.to_string());
+                let (text, deletion_confirmed, warning) = transcribe_transiently(
+                    &wav_bytes,
+                    root,
+                    &session.language,
+                    &session.privacy_level.to_string(),
+                );
                 outcome.temp_audio_deletion_confirmed = Some(deletion_confirmed);
                 if let Some(w) = warning {
                     outcome.warnings.push(w);
@@ -696,20 +724,34 @@ fn describe_outcome(outcome: &RecordingOutcome) -> String {
 /// Transcribe a WAV buffer without ever committing the audio to durable
 /// storage.
 ///
-/// Whisper.cpp reads from a file path, so a temporary WAV is unavoidable. It is
-/// written outside the vault, deleted immediately after transcription, and the
-/// deletion is then **verified** by re-checking the path — the directive
-/// requires proof of deletion, not an attempt.
+/// The engine reads from a file path, so a temporary WAV is unavoidable. It is
+/// written outside the vault — inside the single confined capture area
+/// `<temp>/unoone-stt` that `bharat_audio::confine_audio_input` accepts —
+/// deleted immediately after transcription, and the deletion is then
+/// **verified** by re-checking the path; the directive requires proof of
+/// deletion, not an attempt.
+///
+/// `language` is the session's canonical BCP-47 tag; the legacy backend maps
+/// it to its own CLI vocabulary at the boundary.
 ///
 /// Returns `(transcript_text, deletion_confirmed, optional_warning)`.
 fn transcribe_transiently(
     wav_bytes: &[u8],
     vault_root: &str,
+    language: &str,
     level_label: &str,
 ) -> (String, bool, Option<String>) {
     let _ = level_label;
 
-    let temp_path = std::env::temp_dir().join(format!("unoone-stt-{}.wav", uuid::Uuid::new_v4()));
+    let capture_dir = std::env::temp_dir().join("unoone-stt");
+    if let Err(e) = std::fs::create_dir_all(&capture_dir) {
+        return (
+            String::new(),
+            true, // nothing was written, so nothing is left behind
+            Some(format!("TEMP_AUDIO_DIR_FAILED:{}", e)),
+        );
+    }
+    let temp_path = capture_dir.join(format!("unoone-stt-{}.wav", uuid::Uuid::new_v4()));
 
     if let Err(e) = std::fs::write(&temp_path, wav_bytes) {
         return (
@@ -719,20 +761,24 @@ fn transcribe_transiently(
         );
     }
 
-    let config = crate::voice::discover_voice_assets(vault_root, "en");
-    let module = crate::voice::VoiceModule::new(config);
-    let result = module.transcribe(&temp_path.to_string_lossy());
+    // Production speech goes through the SpeechRouter — InBharat Audio
+    // first, legacy Whisper only as the coverage-gated fallback. The old
+    // code constructed a legacy VoiceModule directly, bypassing the router.
+    let router = crate::speech::product_router(vault_root);
+    let result = router.transcribe(&temp_path, language);
 
     // Delete first, then prove it is gone.
     let _ = std::fs::remove_file(&temp_path);
     let deletion_confirmed = !temp_path.exists();
 
-    let warning = match result.status {
-        crate::voice::VoiceCapabilityStatus::Available => None,
-        other => Some(format!("STT_UNAVAILABLE:{:?}", other)),
-    };
-
-    (result.text, deletion_confirmed, warning)
+    match result {
+        Ok(transcription) => (transcription.text, deletion_confirmed, None),
+        Err(error) => (
+            String::new(),
+            deletion_confirmed,
+            Some(format!("STT_UNAVAILABLE:{}", error)),
+        ),
+    }
 }
 
 #[tauri::command]

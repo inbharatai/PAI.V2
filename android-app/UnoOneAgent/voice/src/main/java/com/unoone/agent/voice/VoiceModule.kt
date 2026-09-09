@@ -196,6 +196,22 @@ class VoiceModule(private val context: Context) {
         if (!isRecordingFlag.getAndSet(false)) return Result.Error("No active voice capture session")
         VoiceAgentRuntime.transition(VoiceAgentState.PROCESSING, "transcribing final utterance")
 
+        val result = transcribeFinalUtterance()
+        if (result is Result.Error) {
+            // Finding A4: callers (e.g. FloatingAgentService) branch only on
+            // Success, so an error return used to leave the state machine
+            // wedged in PROCESSING with no mic job and no agent turn running.
+            // Every failure below feeds ERROR_RECOVERY — the same state the
+            // mic-start and tool-failure paths use — so recovery logic runs.
+            VoiceAgentRuntime.transition(
+                VoiceAgentState.ERROR_RECOVERY,
+                "transcription failed: ${result.message}"
+            )
+        }
+        return result
+    }
+
+    private suspend fun transcribeFinalUtterance(): Result<String> {
         return if (useAndroidStt && sttEngine == null) {
             androidStt?.stopListening()
             val job = activeSttJob.getAndSet(null)

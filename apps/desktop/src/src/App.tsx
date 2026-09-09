@@ -104,6 +104,27 @@ function App() {
     void (async () => {
       try {
         setBootError('');
+        // If the background DesktopLaunch asset sweep is still running, wait
+        // for it to finish before booting the model server — the backend
+        // gate (start_model_server) refuses to start on unverified assets.
+        const initialStatus = await tauriApi.getStartupStatus();
+        const validationPhase = initialStatus.phase;
+        if (validationPhase === 'CHECKING_ASSETS' || validationPhase === 'VALIDATING_PAI') {
+          await new Promise<void>((resolve, reject) => {
+            const poll = async () => {
+              const status = await tauriApi.getStartupStatus();
+              if (status.phase === 'PAI_CONNECTED') {
+                resolve();
+              } else if (status.phase === 'PAI_INVALID') {
+                reject(new Error('Pocket AI assets failed validation.'));
+              } else {
+                setTimeout(poll, 250);
+              }
+            };
+            poll();
+          });
+        }
+        if (cancelled) return;
         await tauriApi.getHardwareProfile();
         const models = await tauriApi.listModels(vaultRoot);
         const desktopModel = models.find(model =>

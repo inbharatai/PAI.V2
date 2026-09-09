@@ -1,0 +1,83 @@
+{
+  "schema": "inbharat.speech.languages.v1",
+  "notes": [
+    "Single source of truth for PAI speech language aliasing and provider coverage.",
+    "alias -> canonical. Matching is ASCII case-insensitive; canonical form is returned verbatim.",
+    "Tags absent from aliases pass through unchanged (after case normalization) and are NEVER re-rooted to a region (fr stays fr).",
+    "auto is the reserved 'detect' sentinel used by speech manifests.",
+    "Provider coverage is TRUTHFUL capability, not aspiration: a provider may only claim a language here when local assets for it exist or are declared by the pack system. Qwen3-ASR covers Hindi but NOT Assamese; Assamese routes to IndicConformer.",
+    "whisper_cpp lists only the languages the shipped whisper-base.en English model actually supports; multilingual whisper requires a different model and explicit evidence before it is added here."
+  ],
+  "aliases": {
+    "as": "as-IN",
+    "as-in": "as-IN",
+    "as-IN": "as-IN",
+    "hi": "hi-IN",
+    "hi-in": "hi-IN",
+    "hi-IN": "hi-IN",
+    "hinglish": "hi-en-codemix",
+    "hi-en-codemix": "hi-en-codemix",
+    "en": "en-IN",
+    "en-in": "en-IN",
+    "en-IN": "en-IN",
+    "auto": "auto"
+  },
+  "providers": {
+    "qwen3_asr": {
+      "kind": "asr",
+      "languages": [
+        "en-IN",
+        "hi-IN",
+        "hi-en-codemix"
+      ]
+    },
+    "indicconformer-asr": {
+      "kind": "asr",
+      "languages": [
+        "as-IN",
+        "bn-IN",
+        "brx-IN",
+        "doi-IN",
+        "gu-IN",
+        "hi-IN",
+        "kn-IN",
+        "ks-IN",
+        "kok-IN",
+        "mai-IN",
+        "ml-IN",
+        "mni-IN",
+        "mr-IN",
+        "ne-IN",
+        "or-IN",
+        "pa-IN",
+        "sa-IN",
+        "sat-IN",
+        "sd-IN",
+        "ta-IN",
+        "te-IN",
+        "ur-IN"
+      ]
+    },
+    "omnivoice_tts": {
+      "kind": "tts",
+      "languages": [
+        "en-IN",
+        "hi-IN",
+        "hi-en-codemix"
+      ]
+    },
+    "whisper_cpp": {
+      "kind": "both",
+      "languages": [
+        "en-IN",
+        "en-US"
+      ]
+    },
+    "piper_tts": {
+      "kind": "tts",
+      "languages": [
+        "en-IN"
+      ]
+    }
+  }
+}

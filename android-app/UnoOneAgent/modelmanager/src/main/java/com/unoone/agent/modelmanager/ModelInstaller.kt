@@ -30,7 +30,9 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
  * - **Corrupt recovery**: on size/checksum mismatch, deletes the bad file and retries the download
  *   exactly once.
  * - **Archive extraction**: ZIP entries (e.g. espeak-ng-data) are extracted into the model folder
- *   and the archive deleted.
+ *   and the archive deleted. Extraction completion is proven by a marker file written only after
+ *   the whole archive extracted — an interrupted extraction is re-run on the next install, never
+ *   treated as a complete install (finding A2).
  * - **Idempotent**: files already present and valid are skipped (supports re-runs / resume across
  *   app restarts).
  */
@@ -104,10 +106,32 @@ class ModelInstaller(
     ): Boolean {
         val target = File(folder, file.name)
 
-        // Archive fast path: the zip is deleted after extraction, so "valid" means the extracted
-        // directory already exists and is non-empty (not that the zip is present).
-        if (file.archive && archiveAlreadyExtracted(file, folder)) {
-            listener?.onProgress(modelId, index, total, file.name, file.sizeBytes, file.sizeBytes)
+        if (file.archive) {
+            // Archive completion is proven by the extraction marker, never by
+            // "output directory exists and is non-empty": an interrupted
+            // extraction used to leave a partial directory that read as
+            // already-extracted, and the archive was then deleted — the model
+            // became unrecoverable without manual cleanup (finding A2).
+            if (archiveAlreadyExtracted(file, folder)) {
+                listener?.onProgress(modelId, index, total, file.name, file.sizeBytes, file.sizeBytes)
+                return true
+            }
+            // The archive may already sit fully downloaded and verified on
+            // disk (interrupted between extraction and archive delete):
+            // verify it instead of re-downloading, then (re)extract. A
+            // partial extraction is naturally idempotent to overwrite.
+            if (!fileAlreadyValid(target, file)) {
+                val ok = attemptDownloadAndVerify(file, target, modelId, index, total, listener)
+                if (!ok) {
+                    // Leave no corrupt artifact behind — detectModels/health must not see a bad file as present.
+                    runCatching { target.delete() }
+                    runCatching { File(folder, "${file.name}.part").delete() }
+                    return false
+                }
+            }
+            extractArchive(target, folder)
+            markArchiveExtracted(file, folder)
+            if (!target.delete()) Logger.w("ModelInstaller: could not delete archive ${target.name} after extraction")
             return true
         }
 
@@ -123,10 +147,6 @@ class ModelInstaller(
             runCatching { target.delete() }
             runCatching { File(folder, "${file.name}.part").delete() }
             return false
-        }
-        if (file.archive) {
-            extractArchive(target, folder)
-            if (!target.delete()) Logger.w("ModelInstaller: could not delete archive ${target.name} after extraction")
         }
         return true
     }
@@ -189,6 +209,7 @@ class ModelInstaller(
             }
             if (file.archive) {
                 extractArchive(target, folder)
+                markArchiveExtracted(file, folder)
                 if (!target.delete()) Logger.w("ModelInstaller: could not delete asset archive ${target.name} after extraction")
             }
             listener?.onProgress(modelId, index, total, file.name, file.sizeBytes, file.sizeBytes)
@@ -211,10 +232,27 @@ class ModelInstaller(
         if (!file.extractsTo.isNullOrBlank()) File(folder, file.extractsTo)
         else File(folder, file.name.substringBeforeLast('.'))
 
-    /** True when an archive has already been extracted (output dir present and non-empty). */
-    private fun archiveAlreadyExtracted(file: ModelFile, folder: File): Boolean {
+    /** True when an archive's extraction completed fully — the marker exists (finding A2). */
+    private fun archiveAlreadyExtracted(file: ModelFile, folder: File): Boolean =
+        extractionMarker(file, folder).exists()
+
+    /**
+     * The marker written only after [extractArchive] returns for the whole
+     * archive. An interrupted extraction leaves a partial output directory
+     * with NO marker, so the next install attempt re-extracts instead of
+     * treating the partial directory as a complete install (finding A2).
+     */
+    private fun extractionMarker(file: ModelFile, folder: File): File =
+        File(archiveOutputDir(file, folder), EXTRACTION_MARKER)
+
+    /** Records that [file]'s archive extracted completely. Never call mid-extraction. */
+    private fun markArchiveExtracted(file: ModelFile, folder: File) {
         val dir = archiveOutputDir(file, folder)
-        return dir.isDirectory && !dir.listFiles().isNullOrEmpty()
+        runCatching { dir.mkdirs() }
+        val marker = extractionMarker(file, folder)
+        if (!marker.exists()) {
+            runCatching { marker.createNewFile() }
+        }
     }
 
     /** Downloads (with resume) then verifies size/checksum; on mismatch deletes and retries once. */
@@ -476,5 +514,12 @@ class ModelInstaller(
         private const val CONNECT_TIMEOUT_MS = 30_000
         private const val READ_TIMEOUT_MS = 60_000
         private const val BUFFER_SIZE = 64 * 1024
+
+        /**
+         * Written inside an archive's output directory only after the archive
+         * extracted completely (finding A2) — the atomic completion proof the
+         * archive fast path checks, instead of "directory exists and non-empty".
+         */
+        const val EXTRACTION_MARKER = ".unoone-extracted"
     }
 }

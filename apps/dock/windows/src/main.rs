@@ -298,7 +298,10 @@ mod windows_app {
         }
 
         for root in present {
-            let report = validate_package(&root, ValidationScope::DesktopLaunch);
+            // PackageIdentity (not DesktopLaunch): dock launch latency is the
+            // product's first impression; the desktop app performs the full
+            // asset sweep in the background and gates inference on it.
+            let report = validate_package(&root, ValidationScope::PackageIdentity);
             if let Some(package) = report.package {
                 state.invalid_notified.remove(&root);
                 if state.connected.contains_key(&root) {

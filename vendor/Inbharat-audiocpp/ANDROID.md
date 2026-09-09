@@ -22,3 +22,7 @@ Use app-private regular files for future approved models and supply `allowedMode
 8. Vulkan flavor only after actual model operation/parity/fallback tests.
 
 The current sandbox has no Android SDK/NDK, emulator, or device. Therefore Android status is **source scaffold, not built here**. CI defines a build-only arm64 lane; its success still does not change device evidence.
+
+## BUILD-ONLY verification status (2026-08-31, Windows host)
+
+The scaffold IS cross-compiled on a Windows x64 host with NDK r25.1.8937393 (arm64-v8a, android-28): `libibaudio.so`, `libibaudio_jni.so`, and every release-candidate test executable (including the readiness-probe and sherpa seam tests) compile and link cleanly — once plain and once with ASan+UBSan — via `scripts/build_android_scaffold.sh`. This is **BUILD-ONLY evidence**: nothing executed on a device or emulator, and no physical-device claim is made. The Gradle module's `ndkVersion` is property-overridable (`-Pibaudio.ndkVersion=…`) and defaults to r25.1.8937393 so the verified toolchain is what builds out of the box. The eight device gates above remain unchanged and unset.

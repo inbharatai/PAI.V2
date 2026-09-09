@@ -104,11 +104,28 @@ impl SecurityManager {
         format!("{:x}", result)
     }
 
-    /// Compute SHA-256 of a file
+    /// Compute SHA-256 of a file — streamed, never a whole-file read: the
+    /// manifest sweep hashes multi-GB model files, and `std::fs::read` loaded
+    /// each one fully into memory (the audit's unbounded-allocation finding).
     fn compute_file_sha256(&self, path: &PathBuf) -> Result<String, String> {
-        let data =
-            std::fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-        Ok(self.compute_sha256(&data))
+        use std::io::Read;
+        let mut file =
+            std::fs::File::open(path).map_err(|e| format!("Failed to open {}: {}", path.display(), e))?;
+        let mut hasher = Sha256::new();
+        // Heap buffer (see the llama.rs/bharat_audio.rs stack-overflow notes:
+        // never a large stack array) at 1 MiB — large enough that hashing a
+        // 7.6 GB model stays I/O bound.
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
     }
 
     /// D8: Compute HMAC-SHA-256 using the manifest signing key.

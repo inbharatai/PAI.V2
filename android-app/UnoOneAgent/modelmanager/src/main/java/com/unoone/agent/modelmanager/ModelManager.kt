@@ -59,10 +59,17 @@ class ModelManager(
 
         for (file in descriptor.files) {
             if (file.archive) {
+                // An archive is "present" only when its extraction completed —
+                // proven by the marker written after the whole archive
+                // extracted (finding A2). A partial directory from an
+                // interrupted extraction is NOT healthy: it must read as
+                // missing so the repair path re-installs instead of trusting
+                // a half-extracted model.
                 val extractedName = file.extractsTo?.takeIf { it.isNotBlank() }
                     ?: file.name.substringBeforeLast('.')
                 val extracted = File(folder, extractedName)
-                if (!extracted.exists() || !extracted.isDirectory || extracted.listFiles().isNullOrEmpty()) {
+                val marker = File(extracted, ModelInstaller.EXTRACTION_MARKER)
+                if (!marker.exists()) {
                     missing += file.name
                 }
                 continue

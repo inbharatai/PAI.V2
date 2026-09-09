@@ -8,6 +8,7 @@ members = [
     "packages/document-migration",
     "packages/browser-policy",
     "packages/pai-harness-adapter",
+    "packages/speech-contracts",
     "apps/desktop/src-tauri",
     "apps/dock/windows",
     "apps/starter/windows",

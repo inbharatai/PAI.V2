@@ -122,7 +122,15 @@ impl Vault {
             )));
         }
 
-        // Validate vault root path
+        // A fresh root may not exist yet. Creation — and ONLY creation — is
+        // allowed to fabricate the root directory, explicitly and up front;
+        // validation itself never creates anything (see validate_vault_root).
+        // The traversal check inside validation still sees the raw path.
+        std::fs::create_dir_all(vault_root)
+            .map_err(|e| VaultError::Io(std::io::Error::other(format!(
+                "cannot create vault root {}: {e}",
+                vault_root.display()
+            ))))?;
         Self::validate_vault_root(vault_root)?;
 
         // Refuse to silently overwrite an initialised vault: a valid header
@@ -261,10 +269,11 @@ impl Vault {
 
         let master_key = header.unlock_with_password(password)?;
 
-        self.master_key = Some(master_key);
-        self.state = VaultState::Unlocked;
-
-        // Recover from any crash (roll back pending transactions)
+        // Run crash recovery BEFORE committing the Unlocked state. The old
+        // order set state/master key first, so a failed recovery returned an
+        // Err to the caller while the vault object stayed Unlocked with a
+        // live master key — the state machine said one thing, reality another.
+        // Recovery only touches journal files and needs no unlocked state.
         let recovery = self.journal.recover_from_crash()?;
         if recovery.recovery_needed {
             eprintln!(
@@ -272,6 +281,18 @@ impl Vault {
                 recovery.committed_count, recovery.rolled_back_count
             );
         }
+        if !recovery.errors.is_empty() {
+            // A journal that failed integrity verification must not give an
+            // unlocked vault to the caller: surface the failure with the
+            // vault still locked and no key material held.
+            return Err(VaultError::JournalRecoveryFailed(format!(
+                "journal integrity check failed: {}",
+                recovery.errors.join("; ")
+            )));
+        }
+
+        self.master_key = Some(master_key);
+        self.state = VaultState::Unlocked;
 
         Ok(VaultUnlockResult {
             vault_id: header.vault_id.clone(),
@@ -296,11 +317,18 @@ impl Vault {
         let phrase = RecoveryPhrase::from_words(words)?;
         let master_key = header.unlock_with_recovery(phrase.secret())?;
 
+        // Same order as password unlock: recovery first, state last, and a
+        // journal integrity failure leaves the vault locked (audit #6).
+        let recovery = self.journal.recover_from_crash()?;
+        if !recovery.errors.is_empty() {
+            return Err(VaultError::JournalRecoveryFailed(format!(
+                "journal integrity check failed: {}",
+                recovery.errors.join("; ")
+            )));
+        }
+
         self.master_key = Some(master_key);
         self.state = VaultState::Unlocked;
-
-        // Recover from any crash
-        let _ = self.journal.recover_from_crash()?;
 
         Ok(VaultUnlockResult {
             vault_id: header.vault_id.clone(),
@@ -675,22 +703,29 @@ impl Vault {
         Ok(())
     }
 
-    /// Validate that a vault root path is safe (no path traversal)
+    /// Validate that a vault root path is safe. Pure validation — it must
+    /// never create anything. The old version fell back to `create_dir_all`
+    /// when canonicalize failed, so merely OPENING a vault (or probing a
+    /// path) fabricated the directory tree; an open of a missing/removed
+    /// vault had to fail with VaultNotFound, not silently build a fake root.
     fn validate_vault_root(vault_root: &Path) -> Result<(), VaultError> {
-        let canonical = vault_root.canonicalize().or_else(|_| {
-            // Path may not exist yet for creation
-            std::fs::create_dir_all(vault_root)?;
-            vault_root.canonicalize()
-        })?;
-
-        let path_str = canonical.to_string_lossy();
-
-        // Check for path traversal
-        if path_str.contains("..") {
+        // Traversal check on the RAW path: canonicalize resolves `..`, so
+        // the old check on the canonicalized string could never fire.
+        if vault_root
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(VaultError::PathTraversal(
                 "Vault path contains '..'".to_string(),
             ));
         }
+
+        vault_root.canonicalize().map_err(|_| {
+            VaultError::VaultNotFound(format!(
+                "Vault root {} does not exist or is not accessible",
+                vault_root.display()
+            ))
+        })?;
 
         Ok(())
     }
@@ -799,6 +834,43 @@ mod tests {
     fn test_vault_create_and_unlock() {
         let dir = tempfile::tempdir().unwrap();
         let _vault = create_test_vault(&dir);
+    }
+
+    /// Open is pure: a missing root must fail with VaultNotFound and must
+    /// NOT fabricate the directory tree (the old validate_vault_root
+    /// side-effect).
+    #[test]
+    fn open_does_not_create_missing_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-vault");
+        let err = match Vault::open(&missing) {
+            Ok(_) => panic!("Vault::open must fail for a missing root"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, VaultError::VaultNotFound(_)),
+            "missing root must be VaultNotFound, got: {err}"
+        );
+        assert!(
+            !missing.exists(),
+            "Vault::open must never create the vault root"
+        );
+    }
+
+    /// The traversal check must fire on the RAW path — `..` components are
+    /// rejected before anything resolves them.
+    #[test]
+    fn open_rejects_parent_traversal_in_raw_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let traversal = dir.path().join("..").join("outside-vault");
+        let err = match Vault::open(&traversal) {
+            Ok(_) => panic!("Vault::open must reject a `..` path"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, VaultError::PathTraversal(_)),
+            "raw `..` component must be rejected, got: {err}"
+        );
     }
 
     #[test]

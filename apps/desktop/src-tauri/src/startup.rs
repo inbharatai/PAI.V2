@@ -96,6 +96,67 @@ impl StartupCoordinator {
         self.set_phase(StartupPhase::PaiInvalid);
     }
 
+    /// The current status of an already-connected (identity-validated) Pocket
+    /// AI, if any. Returns None while disconnected/invalid/waiting so the
+    /// caller falls through to the full detection path.
+    pub fn connected_status(&self) -> Option<StartupStatus> {
+        let root = self.connected_root.lock().ok()?.clone()?;
+        if root.as_os_str().is_empty() {
+            return None;
+        }
+        let phase = self
+            .phase
+            .lock()
+            .map(|phase| *phase)
+            .unwrap_or(StartupPhase::Error);
+        if matches!(
+            phase,
+            StartupPhase::Disconnected | StartupPhase::PaiInvalid | StartupPhase::WaitingForPai
+        ) {
+            return None;
+        }
+        Some(StartupStatus {
+            phase,
+            vault_root: Some(root.display().to_string()),
+            vault_id: self.vault_id.lock().ok().and_then(|value| value.clone()),
+            validation_failures: self
+                .validation_failures
+                .lock()
+                .map(|value| value.clone())
+                .unwrap_or_default(),
+        })
+    }
+
+    /// True while the background DesktopLaunch asset sweep is still running.
+    pub fn is_validating_assets(&self) -> bool {
+        matches!(
+            self.phase
+                .lock()
+                .map(|phase| *phase)
+                .unwrap_or(StartupPhase::Error),
+            StartupPhase::CheckingAssets
+        )
+    }
+
+    /// True once the background DesktopLaunch asset sweep has finished
+    /// (successfully or in limited mode). The model server refuses to start
+    /// before this, so inference is never served on unverified assets.
+    pub fn is_asset_validation_complete(&self) -> bool {
+        matches!(
+            self.phase
+                .lock()
+                .map(|phase| *phase)
+                .unwrap_or(StartupPhase::Error),
+            StartupPhase::PaiConnected
+                | StartupPhase::ScanningHost
+                | StartupPhase::SelectingBackend
+                | StartupPhase::StartingModel
+                | StartupPhase::VerifyingModel
+                | StartupPhase::Ready
+                | StartupPhase::LimitedMode
+        )
+    }
+
     pub fn limited(&self) {
         self.set_phase(StartupPhase::LimitedMode);
     }

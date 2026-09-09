@@ -73,13 +73,20 @@ class SpeechEngineFunctionalTest {
         val enInit = enStt.initialize()
         Log.i(tag, "<<< STT en transducer init=${enInit.javaClass.simpleName} ${if (enInit is Result.Error) enInit.message else "(online recognizer loaded)"}")
         if (enInit is Result.Error) sttFailures += "en-transducer(${enInit.message})"
-        try { /* release if available */ } catch (_: Throwable) {}
+        // Finding A3: this used to be an empty `try {}` placeholder, so the
+        // transducer's native model stayed resident for the whole process —
+        // with the omnilingual model too that pushed the emulator into OOM.
+        // release() is safe after a failed initialize() as well.
+        try { enStt.release() } catch (_: Throwable) {}
 
         Log.i(tag, ">>> STT Omnilingual init")
         val indicStt = SherpaSttEngine(context, "$base/speech/shared/sherpa-asr-indic", SttMode.OMNILINGUAL, "hi")
         val indicInit = indicStt.initialize()
         Log.i(tag, "<<< STT omnilingual init=${indicInit.javaClass.simpleName} ${if (indicInit is Result.Error) indicInit.message else "(offline omnilingual recognizer loaded)"}")
         if (indicInit is Result.Error) sttFailures += "omnilingual(${indicInit.message})"
+        // Free the omnilingual native model too — the test process keeps
+        // running after this and the resident model is dead weight (finding A3).
+        try { indicStt.release() } catch (_: Throwable) {}
 
         Log.i(tag, "==== END SPEECH TEST — ttsFailures=${ttsFailures.size} sttFailures=${sttFailures.size} ====")
         if (ttsFailures.isNotEmpty()) ttsFailures.forEach { Log.e(tag, "TTS FAIL: $it") }

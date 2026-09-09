@@ -1,22 +1,34 @@
 // AudioCppAsrProvider — real ASR via pinned audio.cpp's Qwen3-ASR, behind the C ABI.
 //
 // Compiled ONLY when IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER=ON. The model is supplied by the
-// caller through a licensed, integrity-verified path (IBAUDIO_AUDIO_CPP_QWEN3_ASR_ROOT) —
-// nothing is downloaded at runtime, and no inference is faked. If the model root is
-// absent or fails to load, run_asr returns UNAVAILABLE.
+// caller through a licensed path (IBAUDIO_AUDIO_CPP_QWEN3_ASR_ROOT) — nothing is
+// downloaded at runtime, and no inference is faked. If the model root is absent or
+// fails to load, run_asr returns UNAVAILABLE.
 //
-// Qwen3-ASR-0.6B is Apache-2.0 (Hugging Face Qwen/Qwen3-ASR-0.6B), SHA-256 verified
-// against the official LFS object id before use. The A1 blocker (no stable upstream C
-// ABI, STL/exceptions across the API) is bridged: every upstream call is wrapped and
-// translated; nothing upstream crosses the InBharat C ABI.
+// Integrity, honestly scoped (finding V6): the readiness probe verifies structure
+// (single .gguf, readable, non-empty, GGUF magic). No digest is pinned next to the
+// shipped weights, so this adapter cannot pin one itself; the shipped digest is
+// enforced by the caller-side chain (package-manifest background validation + the
+// acceptance attestation). When a deployment DOES pin a digest, setting
+// IBAUDIO_AUDIO_CPP_QWEN3_ASR_SHA256 enables a load-time content-hash gate here:
+// a mismatch fails closed with INTEGRITY_ERROR and the weights are never loaded.
+// The bundled Silero VAD weights are covered by the upstream pin + pristine check.
+//
+// Qwen3-ASR-0.6B is Apache-2.0 (Hugging Face Qwen/Qwen3-ASR-0.6B). The A1 blocker
+// (no stable upstream C ABI, STL/exceptions across the API) is bridged: every upstream
+// call is wrapped and translated; nothing upstream crosses the InBharat C ABI.
 
 #ifdef IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER
 
 #include "../../provider.hpp"
 #include "../../internal.hpp"
 
+#include "audio_cpp_probe.hpp"
+
 #include "engine/models/qwen3_asr/loader.h"
 
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 
@@ -34,13 +46,23 @@ public:
             c.privacy_class = "ephemeral";
             c.remote = false;
             // Qwen3-ASR-0.6B covers 30+ languages incl. hi; en-IN/hi-IN are the InBharat
-            // India-pack languages it serves. Language list is the model's coverage.
-            c.languages = {"en-IN", "hi-IN"};
+            // India-pack languages it serves, plus the hi-en codemix alias the
+            // product routes to it. Assamese and the other 19 Scheduled
+            // languages are NOT here on purpose: route() must never return this
+            // provider for them (the IndicConformer seam owns those).
+            c.languages = {"en-IN", "hi-IN", "hi-en-codemix"};
             c.supports_asr = true;
             c.supports_tts = false;
             c.supports_vad = false;
             c.supports_kws = false;
-            c.streaming_asr = true;   // Qwen3-ASR has a true streaming session
+            // Honest capability (finding V8): Qwen3-ASR has an upstream
+            // streaming session, but this adapter implements only the
+            // offline run_asr path — the core stream layer feeds it windowed
+            // offline partials. Claiming streaming_asr would promise a
+            // provider streaming path that does not exist behind this
+            // vtable; the router's require_streaming filter must not see
+            // one either.
+            c.streaming_asr = false;
             c.streaming_tts = false;
             c.streaming_vad = false;
             return c;
@@ -67,7 +89,47 @@ public:
                 std::lock_guard<std::mutex> lock(model_mutex_);
                 if (model_ == nullptr) {
                     if (model_root_.empty()) return IBAUDIO_STATUS_UNAVAILABLE;
+                    // Negative caching (finding V11): a failed load used to be
+                    // retried in full on EVERY inference call under this
+                    // mutex — a missing-weights deployment paid a heavy
+                    // load attempt per utterance. Fail fast while the
+                    // readiness probe still fails; the expensive load is
+                    // retried only after the probe passes again, i.e. when
+                    // the weights were genuinely replaced or mounted.
+                    if (model_load_failed_) {
+                        char probe_reason[192];
+                        if (!ibaudio::audio_cpp_adapter::probe_model_root(
+                                model_root_.c_str(), "audio.cpp ASR", ".gguf", probe_reason,
+                                sizeof(probe_reason))) {
+                            return IBAUDIO_STATUS_UNAVAILABLE;
+                        }
+                        model_load_failed_ = false;
+                    }
+                    // Optional content-hash gate (finding V6): when the
+                    // deployment pins a digest for the baked-root weights,
+                    // verify it before the first load. Without a pin there is
+                    // nothing to verify against — the shipped digest is
+                    // enforced caller-side (package manifest + acceptance
+                    // attestation), never claimed here.
+                    const char *expected_sha256 =
+                        std::getenv("IBAUDIO_AUDIO_CPP_QWEN3_ASR_SHA256");
+                    if (expected_sha256 != nullptr && expected_sha256[0] != '\0') {
+                        char hash_reason[192];
+                        if (!ibaudio::audio_cpp_adapter::verify_model_root_sha256(
+                                model_root_.c_str(), "audio.cpp ASR", ".gguf", nullptr,
+                                expected_sha256, hash_reason, sizeof(hash_reason))) {
+                            fprintf(stderr,
+                                    "[audiocpp-asr] weights hash gate failed: %s\n",
+                                    hash_reason);
+                            return IBAUDIO_STATUS_INTEGRITY_ERROR;
+                        }
+                    }
                     model_ = engine::models::qwen3_asr::load_qwen3_asr_model(model_root_);
+                    if (model_ == nullptr) {
+                        model_load_failed_ = true;
+                        fprintf(stderr, "[audiocpp-asr] model load failed from root: %s\n",
+                                model_root_.c_str());
+                    }
                 }
                 model = model_.get();
             }
@@ -117,6 +179,7 @@ public:
 private:
     std::string model_root_ = IBAUDIO_AUDIO_CPP_QWEN3_ASR_ROOT;
     std::shared_ptr<engine::models::qwen3_asr::Qwen3ASRLoadedModel> model_;
+    bool model_load_failed_ = false;  // set after a failed load; see run_asr
     std::mutex model_mutex_;
 };
 

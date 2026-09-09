@@ -1,0 +1,16 @@
+[package]
+name = "unoone-speech-contracts"
+version = "0.1.0"
+description = "Pocket AI speech contracts — the single source of truth for language canonicalization, provider coverage, and the SpeechBackend interface shared by every speech implementation (InBharat Audio and legacy Whisper/Piper)"
+authors = ["InBharat Ai"]
+edition = "2021"
+
+# Deliberately dependency-light and platform-independent, mirroring
+# unoone-recording-policy: speech-language semantics must be provable by unit
+# test on any host, including CI containers that cannot compile the Tauri
+# desktop shell. The alias/provider table (languages.v1.json) is embedded via
+# include_str! so the crate is self-contained and the same file stays readable
+# by the Android-side sync check (scripts/check_speech_language_sync.py).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

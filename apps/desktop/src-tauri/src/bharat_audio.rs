@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use unoone_speech_contracts::LanguageTag;
 
 const CONFIG_RELATIVE_PATH: &str = "SPEECH/config/inbharat-audio.v1.json";
 const ACCEPTANCE_RELATIVE_PATH: &str = "SPEECH/acceptance/audio-cpp.acceptance.v1.json";
@@ -106,6 +107,16 @@ pub struct BharatAudioStatus {
     pub upstream_commit: Option<String>,
     pub asr_family: Option<String>,
     pub tts_family: Option<String>,
+    /// Runtime facts straight from the universal library's status API, which
+    /// derives readiness from an actual probe of usable local model assets
+    /// (never compile-time truth). Surfaced even when the full production
+    /// gate fails so the UI can show WHY: missing weights read differently
+    /// from a disabled manifest or a stale attestation.
+    pub inference_ready: bool,
+    /// Honest streaming semantics for this route, from the shared contracts
+    /// crate — "buffered-final" means the engine buffers the whole utterance
+    /// and emits one final result; it must never be claimed as streaming.
+    pub streaming_class: String,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +197,42 @@ fn canonical_under(root: &Path, relative: &str, must_exist: bool) -> Result<Path
         ));
     }
     Ok(canonical)
+}
+
+/// Confine a caller-supplied audio input path. Accepted inputs are exactly:
+/// a regular, non-symlink file of at most `MAX_INPUT_AUDIO_BYTES` that lives
+/// under the verified Pocket AI root or under the OS capture subdirectory
+/// (`<temp>/unoone-stt`) where `recording::transcribe_transiently` writes its
+/// transient WAV captures. Anything else — including files merely anywhere in
+/// OS temp, paths that escape via symlink canonicalization, or traversal — is
+/// rejected before any subprocess sees it.
+fn confine_audio_input(root: &Path, audio_path: &str) -> Result<PathBuf, String> {
+    let candidate = Path::new(audio_path);
+    let symlink_meta = std::fs::symlink_metadata(candidate)
+        .map_err(|e| format!("cannot stat audio input: {e}"))?;
+    if symlink_meta.file_type().is_symlink() {
+        return Err("refusing symlinked audio input".to_string());
+    }
+    let input = candidate
+        .canonicalize()
+        .map_err(|e| format!("audio input is unavailable: {e}"))?;
+    let meta = std::fs::metadata(&input).map_err(|e| format!("cannot stat audio input: {e}"))?;
+    if !meta.is_file() || meta.len() > MAX_INPUT_AUDIO_BYTES {
+        return Err("audio input is not a regular file or exceeds 512 MiB".to_string());
+    }
+    let capture_root = std::env::temp_dir().join("unoone-stt");
+    std::fs::create_dir_all(&capture_root)
+        .map_err(|e| format!("cannot prepare the OS capture temp area: {e}"))?;
+    let capture_root = capture_root
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize the OS capture temp area: {e}"))?;
+    if !input.starts_with(root) && !input.starts_with(&capture_root) {
+        return Err(format!(
+            "audio input must live under the Pocket AI root or the unoone-stt capture area: {}",
+            input.display()
+        ));
+    }
+    Ok(input)
 }
 
 fn read_manifest(vault_root: &str) -> Result<(PathBuf, InBharatAudioManifest), String> {
@@ -316,7 +363,12 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| format!("cannot open {} for SHA-256: {e}", path.display()))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // Heap-allocate the read buffer: a 1 MiB stack array overflows the 1 MiB
+    // default Windows thread stack (STATUS_STACK_OVERFLOW 0xC00000FD) — the
+    // same defect the C++ twin already fixed in
+    // vendor/Inbharat-audiocpp/src/sha256.cpp (heap std::vector). Proven by
+    // `sha256_file_runs_on_small_stack_thread`.
+    let mut buffer = vec![0u8; 512 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
@@ -538,10 +590,53 @@ fn verify_pocket_ai_package(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_production_ready(
+/// The three runtime-fact gates every production request must pass. Split out
+/// so tests can exercise the semantics without a real CLI package: the
+/// runtime status must say the adapter was compiled against the reviewed
+/// checkout, the reviewed commit must match the speech pack, and — the fix
+/// for the compile-time-truth bug — the runtime must report
+/// `inference_ready=true`, which the universal library now derives from an
+/// actual probe of usable local model assets, not from the fact that the
+/// adapter was compiled in.
+fn check_runtime_status(
+    manifest: &InBharatAudioManifest,
+    status: &AudioCppReadiness,
+) -> Result<(), String> {
+    if !status.adapter_compiled {
+        return Err(format!(
+            "InBharat Audio was not built against its reviewed audio.cpp checkout: {}",
+            status.reason
+        ));
+    }
+    if !status
+        .reviewed_commit
+        .eq_ignore_ascii_case(&manifest.upstream_commit)
+    {
+        return Err(format!(
+            "audio.cpp commit mismatch: runtime={} config={}",
+            status.reviewed_commit, manifest.upstream_commit
+        ));
+    }
+    if !status.inference_ready {
+        return Err(format!(
+            "audio.cpp inference is not ready on this machine: {}",
+            status.reason
+        ));
+    }
+    Ok(())
+}
+
+/// Manifest sanity + package integrity gate + CLI resolution + acceptance
+/// hash verification + the runtime readiness query. Order is fail-closed, and
+/// the order is the security property: `verify_acceptance` hashes the two
+/// runtime executables (and the ASR/TTS models) against the acceptance
+/// attestation BEFORE `query_readiness` spawns `ibaudio.exe`. Nothing gets
+/// process execution until its bytes have been verified — the audit found the
+/// CLIs were executed first and hash-checked only afterwards.
+fn preflight_speech_gate(
     root: &Path,
     manifest: &InBharatAudioManifest,
-) -> Result<AudioCppReadiness, String> {
+) -> Result<(PathBuf, PathBuf, AudioCppAcceptance, AudioCppReadiness), String> {
     if !manifest.enabled {
         return Err("InBharat Audio is installed but not enabled for production".to_string());
     }
@@ -560,45 +655,58 @@ fn ensure_production_ready(
     verify_pocket_ai_package(root)?;
     let ibaudio_path = ibaudio_cli(root)?;
     let audiocpp_path = audio_cpp_cli(root)?;
+    // Hash-verify the executables and models BEFORE the first spawn.
+    let acceptance = verify_acceptance(root, manifest, &ibaudio_path, &audiocpp_path)?;
     let status = query_readiness(root)?;
-    if !status.adapter_compiled {
-        return Err(format!(
-            "InBharat Audio was not built against its reviewed audio.cpp checkout: {}",
-            status.reason
-        ));
-    }
-    if !status
-        .reviewed_commit
-        .eq_ignore_ascii_case(&manifest.upstream_commit)
-    {
-        return Err(format!(
-            "audio.cpp commit mismatch: runtime={} config={}",
-            status.reviewed_commit, manifest.upstream_commit
-        ));
-    }
+    Ok((ibaudio_path, audiocpp_path, acceptance, status))
+}
+
+fn ensure_production_ready(
+    root: &Path,
+    manifest: &InBharatAudioManifest,
+) -> Result<AudioCppReadiness, String> {
+    let (_ibaudio_path, _audiocpp_path, _acceptance, status) =
+        preflight_speech_gate(root, manifest)?;
+    check_runtime_status(manifest, &status)?;
     // The universal library deliberately does not claim its internal model-family
     // adapter is production-ready yet. Pocket AI uses the real upstream CLI path
-    // and requires a hash-bound end-to-end ASR+TTS acceptance attestation instead.
-    let _acceptance = verify_acceptance(root, manifest, &ibaudio_path, &audiocpp_path)?;
+    // and requires a hash-bound end-to-end ASR+TTS acceptance attestation instead,
+    // verified inside the preflight gate before any process spawn.
     Ok(status)
 }
 
-fn validate_language(manifest: &InBharatAudioManifest, requested: &str) -> Result<(), String> {
-    if requested.trim().is_empty() || manifest.allowed_languages.is_empty() {
-        return Ok(());
+/// Validate a user- or manifest-supplied language against the speech pack's
+/// allowlist, using BCP-47 canonicalization from `unoone-speech-contracts`
+/// (`as`/`as-IN` → `as-IN`, `hi` → `hi-IN`, `hinglish` → `hi-en-codemix`;
+/// global tags like `fr` pass through and are never re-rooted).
+///
+/// Fail-closed by construction: an empty request is an error and an empty
+/// allowlist is an error — the previous silent-bypass (both returned Ok) is
+/// gone. Returns the canonical tag the caller should report in results; the
+/// CLI boundary keeps the original alias string because that is the exact
+/// vocabulary the acceptance attestation pinned.
+fn validate_language(
+    manifest: &InBharatAudioManifest,
+    requested: &str,
+) -> Result<LanguageTag, String> {
+    let tag = unoone_speech_contracts::canonicalize(requested)
+        .map_err(|e| format!("cannot use speech language '{requested}': {e}"))?;
+    if manifest.allowed_languages.is_empty() {
+        return Err(
+            "production speech manifest must explicitly declare allowed_languages".to_string(),
+        );
     }
-    if manifest
-        .allowed_languages
-        .iter()
-        .any(|lang| lang.eq_ignore_ascii_case(requested))
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "language '{}' is not enabled in the Pocket AI speech pack",
-            requested
-        ))
+    for entry in &manifest.allowed_languages {
+        let entry_tag = unoone_speech_contracts::canonicalize(entry)
+            .map_err(|e| format!("speech manifest language '{entry}' is invalid: {e}"))?;
+        if entry_tag == tag {
+            return Ok(tag);
+        }
     }
+    Err(format!(
+        "language '{}' is not enabled in the Pocket AI speech pack",
+        tag
+    ))
 }
 
 #[tauri::command]
@@ -607,6 +715,9 @@ pub fn get_bharat_audio_status(vault_root: String) -> BharatAudioStatus {
 }
 
 pub fn status(vault_root: &str) -> BharatAudioStatus {
+    let streaming_class = unoone_speech_contracts::StreamingClass::BufferedFinal
+        .as_str()
+        .to_string();
     let Ok((root, manifest)) = read_manifest(vault_root) else {
         return BharatAudioStatus {
             configured: false,
@@ -616,9 +727,22 @@ pub fn status(vault_root: &str) -> BharatAudioStatus {
             upstream_commit: None,
             asr_family: None,
             tts_family: None,
+            inference_ready: false,
+            streaming_class,
         };
     };
-    let readiness = ensure_production_ready(&root, &manifest);
+    // One preflight feeds both the surfaced runtime facts and the production
+    // gate, so a status poll never spawns the readiness CLI twice — and the
+    // CLI is only ever spawned after the package integrity gate AND the
+    // acceptance hash verification of the executables passed.
+    let (inference_ready, readiness) = match preflight_speech_gate(&root, &manifest) {
+        Ok((_ibaudio_path, _audiocpp_path, _acceptance, runtime)) => {
+            let ready = runtime.inference_ready;
+            let gate = check_runtime_status(&manifest, &runtime).map(|_| runtime);
+            (ready, gate)
+        }
+        Err(error) => (false, Err(error)),
+    };
     BharatAudioStatus {
         configured: true,
         enabled: manifest.enabled,
@@ -629,6 +753,8 @@ pub fn status(vault_root: &str) -> BharatAudioStatus {
         upstream_commit: Some(manifest.upstream_commit.clone()),
         asr_family: manifest.asr.as_ref().map(|a| a.family.clone()),
         tts_family: manifest.tts.as_ref().map(|a| a.family.clone()),
+        inference_ready,
+        streaming_class,
     }
 }
 
@@ -647,18 +773,14 @@ pub fn transcribe(
     let model = canonical_under(&root, &task.model_relative_path, true)?;
     let cli = audio_cpp_cli(&root)?;
 
-    let input = PathBuf::from(audio_path)
-        .canonicalize()
-        .map_err(|e| format!("audio input is unavailable: {e}"))?;
-    let input_meta =
-        std::fs::metadata(&input).map_err(|e| format!("cannot stat audio input: {e}"))?;
-    if !input_meta.is_file() || input_meta.len() > MAX_INPUT_AUDIO_BYTES {
-        return Err("audio input is not a regular file or exceeds 512 MiB".to_string());
-    }
+    let input = confine_audio_input(&root, audio_path)?;
 
+    // Unique per-call transcript name: a millisecond timestamp collided for
+    // concurrent requests, and the transcript is user speech — a collision
+    // let one request read (and keep or leak) another's words.
     let transcript_rel = format!(
         "VAULT/recordings/transcripts/inbharat_asr_{}.txt",
-        chrono::Utc::now().timestamp_millis()
+        uuid::Uuid::new_v4().simple()
     );
     let transcript_path = canonical_under(&root, &transcript_rel, false)?;
     let mut cmd = Command::new(cli);
@@ -674,30 +796,54 @@ pub fn transcribe(
         .arg(&input)
         .arg("--text-out")
         .arg(&transcript_path);
-    let selected_language = if language.trim().is_empty() {
-        task.default_language.as_deref().unwrap_or("")
+    let trimmed = language.trim();
+    let (cli_language, language_tag) = if trimmed.is_empty() {
+        // Pack default: the speech pack's own declared value. Canonicalized
+        // for the result, but exempt from the user-facing allowlist check —
+        // it is the pack speaking, not a user claim (this is what allows the
+        // truthful "auto" detect directive as a default).
+        let default = task
+            .default_language
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
+        if default.is_empty() {
+            return Err(
+                "ASR language must be explicit or provided by the speech manifest".to_string(),
+            );
+        }
+        let tag = unoone_speech_contracts::canonicalize(default)
+            .map_err(|e| format!("speech manifest default language is invalid: {e}"))?;
+        (default.to_string(), tag)
     } else {
-        language
+        let tag = validate_language(&manifest, trimmed)?;
+        (trimmed.to_string(), tag)
     };
-    if selected_language.is_empty() {
-        return Err("ASR language must be explicit or provided by the speech manifest".to_string());
-    }
-    validate_language(&manifest, selected_language)?;
-    if !selected_language.is_empty() {
-        cmd.arg("--language").arg(selected_language);
-    }
-    let _ = run_command_timeout(cmd, INFERENCE_TIMEOUT)?;
-    let transcript = std::fs::read_to_string(&transcript_path)
-        .map_err(|e| format!("audio.cpp ASR did not produce its declared transcript file: {e}"))?
-        .trim()
-        .to_string();
-    let _ = std::fs::remove_file(&transcript_path);
-    if transcript.is_empty() {
-        return Err("audio.cpp ASR returned an empty transcript".to_string());
-    }
+    cmd.arg("--language").arg(&cli_language);
+    let transcript = {
+        // The transcript file must be deleted on EVERY path — CLI failure,
+        // unreadable output, or success. The old code returned early on the
+        // CLI/read error paths and left the (possibly partial) user speech
+        // file behind in the vault scratch area.
+        let outcome = (|| -> Result<String, String> {
+            run_command_timeout(cmd, INFERENCE_TIMEOUT)?;
+            let transcript = std::fs::read_to_string(&transcript_path)
+                .map_err(|e| {
+                    format!("audio.cpp ASR did not produce its declared transcript file: {e}")
+                })?
+                .trim()
+                .to_string();
+            if transcript.is_empty() {
+                return Err("audio.cpp ASR returned an empty transcript".to_string());
+            }
+            Ok(transcript)
+        })();
+        let _ = std::fs::remove_file(&transcript_path);
+        outcome?
+    };
     Ok(BharatAsrResult {
         transcript,
-        language: selected_language.to_string(),
+        language: language_tag.as_str().to_string(),
         processing_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
 }
@@ -716,8 +862,9 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
     let model = canonical_under(&root, &task.model_relative_path, true)?;
     let cli = audio_cpp_cli(&root)?;
     let relative_output = format!(
+        // Unique per-call output name (see the ASR transcript note above).
         "VAULT/recordings/tts/inbharat_tts_{}.wav",
-        chrono::Utc::now().timestamp_millis()
+        uuid::Uuid::new_v4().simple()
     );
     let output = canonical_under(&root, &relative_output, false)?;
 
@@ -734,17 +881,34 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         .arg(text)
         .arg("--out")
         .arg(&output);
-    let selected_language = if language.trim().is_empty() {
-        task.default_language.as_deref().unwrap_or("")
+    let trimmed = language.trim();
+    let (cli_language, _language_tag) = if trimmed.is_empty() {
+        // Pack default (see transcribe): canonicalized but exempt from the
+        // user-facing allowlist check.
+        let default = task
+            .default_language
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
+        if default.is_empty() {
+            return Err(
+                "TTS language must be explicit or provided by the speech manifest".to_string(),
+            );
+        }
+        let tag = unoone_speech_contracts::canonicalize(default)
+            .map_err(|e| format!("speech manifest default language is invalid: {e}"))?;
+        (default.to_string(), tag)
     } else {
-        language
+        let tag = validate_language(&manifest, trimmed)?;
+        (trimmed.to_string(), tag)
     };
-    if selected_language.is_empty() {
-        return Err("TTS language must be explicit or provided by the speech manifest".to_string());
+    cmd.arg("--language").arg(&cli_language);
+    if let Err(error) = run_command_timeout(cmd, INFERENCE_TIMEOUT) {
+        // A failed run may still have written a partial WAV — remove it so
+        // the vault scratch area never accumulates broken output.
+        let _ = std::fs::remove_file(&output);
+        return Err(error);
     }
-    validate_language(&manifest, selected_language)?;
-    cmd.arg("--language").arg(selected_language);
-    let _ = run_command_timeout(cmd, INFERENCE_TIMEOUT)?;
     if !output.is_file() {
         return Err(
             "audio.cpp TTS completed without producing its declared output file".to_string(),
@@ -796,5 +960,161 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         assert!(ensure_production_ready(&root, &manifest).is_err());
+    }
+
+    fn runtime_readiness(adapter_compiled: bool, inference_ready: bool) -> AudioCppReadiness {
+        AudioCppReadiness {
+            schema: "inbharat.ibaudio.audio_cpp_status.v1".to_string(),
+            adapter_compiled,
+            inference_ready,
+            reviewed_commit: "a".repeat(40),
+            upstream_source: "test://audio.cpp".to_string(),
+            reason: "test reason".to_string(),
+        }
+    }
+
+    /// Req 12/15 regression: a compiled adapter whose local model assets are
+    /// missing must NOT be production-ready. The runtime status API derives
+    /// inference_ready from a real probe; the desktop gate must honor a false
+    /// verdict regardless of the adapter having compiled in.
+    #[test]
+    fn compiled_adapter_with_missing_models_is_not_production_ready() {
+        let manifest = language_manifest(&["en"]);
+        let status = runtime_readiness(true, false);
+        let error = check_runtime_status(&manifest, &status)
+            .expect_err("compiled adapter without usable assets must fail the gate");
+        assert!(error.contains("inference is not ready"), "got: {error}");
+    }
+
+    /// The inverse regression: inference_ready=1 with adapter_compiled=0 is
+    /// compile-time truth again — impossible from the real runtime, but the
+    /// gate must reject the combination defensively, and a non-compiled
+    /// adapter must never pass.
+    #[test]
+    fn not_compiled_adapter_never_passes_even_if_marked_ready() {
+        let manifest = language_manifest(&["en"]);
+        let status = runtime_readiness(false, true);
+        let error = check_runtime_status(&manifest, &status)
+            .expect_err("adapter_compiled=0 must fail the gate");
+        assert!(error.contains("was not built against"), "got: {error}");
+    }
+
+    /// A pin mismatch is rejected before any readiness verdict matters.
+    #[test]
+    fn commit_mismatch_is_rejected() {
+        let manifest = language_manifest(&["en"]);
+        let mut status = runtime_readiness(true, true);
+        status.reviewed_commit = "b".repeat(40);
+        let error = check_runtime_status(&manifest, &status)
+            .expect_err("commit mismatch must fail the gate");
+        assert!(error.contains("commit mismatch"), "got: {error}");
+    }
+
+    /// The 1 MiB read buffer in `sha256_file` MUST be heap allocated: a stack
+    /// array overflows the 1 MiB default Windows thread stack. Run the hash
+    /// on a thread with a deliberately small (128 KiB) stack over a 4 MiB
+    /// file — with a stack buffer this aborts the process; with the heap
+    /// buffer it returns a digest.
+    #[test]
+    fn sha256_file_runs_on_small_stack_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("4mib.bin");
+        let payload = vec![0xA5u8; 4 * 1024 * 1024];
+        std::fs::write(&file, &payload).unwrap();
+        let path = file.clone();
+        let worker = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || sha256_file(&path))
+            .expect("spawn small-stack thread");
+        let digest = worker
+            .join()
+            .expect("small-stack thread must not crash")
+            .expect("hash must succeed");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    fn language_manifest(languages: &[&str]) -> InBharatAudioManifest {
+        InBharatAudioManifest {
+            schema: "inbharat.pai.speech.v1".to_string(),
+            enabled: true,
+            upstream_commit: "a".repeat(40),
+            backend: "cpu".to_string(),
+            allowed_languages: languages.iter().map(|s| s.to_string()).collect(),
+            asr: None,
+            tts: None,
+        }
+    }
+
+    /// The old `validate_language` silently passed on an empty request or an
+    /// empty allowlist. Both must now fail closed.
+    #[test]
+    fn empty_language_and_empty_allowlist_fail_closed() {
+        let manifest = language_manifest(&["en", "hi", "hinglish"]);
+        assert!(validate_language(&manifest, "   ").is_err());
+        assert!(validate_language(&manifest, "").is_err());
+
+        let empty = language_manifest(&[]);
+        assert!(validate_language(&empty, "hi").is_err());
+    }
+
+    /// BCP-47 canonicalization reaches the speech pack gate: `as`/`as-IN`
+    /// address Assamese, `hi`/`hi-IN` address Hindi, and aliases match an
+    /// allowlist written in either form.
+    #[test]
+    fn validate_language_canonicalizes_aliases() {
+        let manifest = language_manifest(&["en", "hi", "hinglish"]);
+        assert_eq!(
+            validate_language(&manifest, "hi-IN").unwrap().as_str(),
+            "hi-IN"
+        );
+        assert_eq!(
+            validate_language(&manifest, "hi").unwrap().as_str(),
+            "hi-IN"
+        );
+        assert_eq!(
+            validate_language(&manifest, "HINGLISH").unwrap().as_str(),
+            "hi-en-codemix"
+        );
+        // Global languages pass through and never join the pack.
+        assert!(validate_language(&manifest, "fr").is_err());
+        assert!(validate_language(&manifest, "en-US").is_err());
+        // Assamese is never enabled by the Qwen3-era pack allowlist.
+        assert!(validate_language(&manifest, "as").is_err());
+        assert!(validate_language(&manifest, "as-IN").is_err());
+        // Malformed tags are rejected, not guessed.
+        assert!(validate_language(&manifest, "french--").is_err());
+    }
+
+    #[test]
+    fn audio_input_is_confined_to_root_or_capture_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        // Inside the root: allowed.
+        let inside = root.join("capture.wav");
+        std::fs::write(&inside, b"RIFF").unwrap();
+        assert!(confine_audio_input(&root, inside.to_str().unwrap()).is_ok());
+
+        // Inside the unoone-stt capture area: allowed (recording writes its
+        // transient WAV captures there).
+        let capture_dir = std::env::temp_dir().join("unoone-stt");
+        std::fs::create_dir_all(&capture_dir).unwrap();
+        let capture = capture_dir.join("unoone-stt-test-confine.wav");
+        std::fs::write(&capture, b"RIFF").unwrap();
+        assert!(confine_audio_input(&root, capture.to_str().unwrap()).is_ok());
+
+        // Merely anywhere else in OS temp is NOT enough — the whole temp root
+        // is untrusted scratch space.
+        let loose_temp = tempfile::tempdir().unwrap();
+        let loose = loose_temp.path().join("loose.wav");
+        std::fs::write(&loose, b"RIFF").unwrap();
+        assert!(
+            confine_audio_input(&root, loose.to_str().unwrap()).is_err(),
+            "a WAV outside the root and outside unoone-stt must be rejected"
+        );
+
+        // Missing file: rejected.
+        assert!(confine_audio_input(&root, "Z:\\does\\not\\exist.wav").is_err());
     }
 }

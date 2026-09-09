@@ -71,6 +71,8 @@ function Get-AssetKind {
 $runtimeRoot = Join-Path $root "RUNTIMES\WINDOWS"
 $modelRoot = Join-Path $root "MODELS\DESKTOP"
 $mobileModelRoot = Join-Path $root "MODELS\MOBILE"
+$speechRoot = Join-Path $root "SPEECH"
+$audioRuntimeRoot = Join-Path $runtimeRoot "AUDIO"
 if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
     throw "Windows runtimes are missing: $runtimeRoot"
 }
@@ -81,6 +83,11 @@ if (-not (Test-Path -LiteralPath $modelRoot -PathType Container)) {
 $runtimeAssets = @()
 $voiceAssets = @()
 foreach ($file in Get-ChildItem -LiteralPath $runtimeRoot -Recurse -File | Sort-Object FullName) {
+    # The InBharat Audio runtime under RUNTIMES\WINDOWS\AUDIO belongs to the
+    # speech section, not the generic runtime list.
+    if ($file.FullName.StartsWith($audioRuntimeRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        continue
+    }
     $kind = Get-AssetKind -File $file -Area "runtime"
     $asset = New-Asset -File $file -Kind $kind -Id ("runtime-" + (Get-RelativePath $file.FullName).ToLowerInvariant())
     if ($file.FullName -match '(?i)[\\/]VOICE[\\/]|whisper|piper') {
@@ -113,10 +120,87 @@ if (Test-Path -LiteralPath $mobileModelRoot -PathType Container) {
     }
 }
 
+# ---- InBharat Audio speech plane (optional: absent SPEECH/ tree -> no section) ----
+# Everything under SPEECH\ and RUNTIMES\WINDOWS\AUDIO is integrity-bound like
+# every other staged asset: speech models, configs, acceptance attestations,
+# and the audio runtime binaries get SHA-256 entries in the manifest. The
+# desktop app verifies them in its background DesktopLaunch sweep; the fast
+# PackageIdentity launch path hashes none of them.
+$speechAssets = $null
+if (Test-Path -LiteralPath $speechRoot -PathType Container) {
+    $speechModelAssets = @()
+    $speechConfigAssets = @()
+    $speechAcceptanceAssets = @()
+    $speechRuntimeAssets = @()
+
+    # Resolve the subdirectories by name (case-insensitive) so manifest paths
+    # keep the casing the drive actually uses.
+    $speechSubdirs = Get-ChildItem -LiteralPath $speechRoot -Directory
+    $speechModelDir = $speechSubdirs | Where-Object { $_.Name -ieq "models" } | Select-Object -First 1
+    $speechConfigDir = $speechSubdirs | Where-Object { $_.Name -ieq "config" } | Select-Object -First 1
+    $speechAcceptanceDir = $speechSubdirs | Where-Object { $_.Name -ieq "acceptance" } | Select-Object -First 1
+
+    if ($speechModelDir) {
+        foreach ($file in Get-ChildItem -LiteralPath $speechModelDir.FullName -Recurse -File | Sort-Object FullName) {
+            if ($file.Extension -ieq ".json") {
+                # Model spec sheets are configuration, not weights.
+                $speechConfigAssets += New-Asset -File $file -Kind "SPEECH_CONFIG" `
+                    -Id ("speech-config-" + (Get-RelativePath $file.FullName).ToLowerInvariant())
+            } else {
+                $speechModelAssets += New-Asset -File $file -Kind "SPEECH_MODEL" `
+                    -Id ("speech-model-" + (Get-RelativePath $file.FullName).ToLowerInvariant())
+            }
+        }
+    }
+
+    if ($speechConfigDir) {
+        foreach ($file in Get-ChildItem -LiteralPath $speechConfigDir.FullName -Recurse -File | Sort-Object FullName) {
+            $speechConfigAssets += New-Asset -File $file -Kind "SPEECH_CONFIG" `
+                -Id ("speech-config-" + (Get-RelativePath $file.FullName).ToLowerInvariant())
+        }
+    }
+
+    if ($speechAcceptanceDir) {
+        foreach ($file in Get-ChildItem -LiteralPath $speechAcceptanceDir.FullName -Recurse -File | Sort-Object FullName) {
+            $speechAcceptanceAssets += New-Asset -File $file -Kind "ACCEPTANCE" `
+                -Id ("speech-acceptance-" + (Get-RelativePath $file.FullName).ToLowerInvariant())
+        }
+    }
+
+    if (Test-Path -LiteralPath $audioRuntimeRoot -PathType Container) {
+        foreach ($file in Get-ChildItem -LiteralPath $audioRuntimeRoot -Recurse -File | Sort-Object FullName) {
+            $speechRuntimeAssets += New-Asset -File $file -Kind "SPEECH_RUNTIME" `
+                -Id ("speech-runtime-" + (Get-RelativePath $file.FullName).ToLowerInvariant())
+        }
+    }
+
+    $speechAssets = [ordered]@{
+        models = @($speechModelAssets)
+        configs = @($speechConfigAssets)
+        acceptance = @($speechAcceptanceAssets)
+        runtimes = @($speechRuntimeAssets)
+    }
+}
+
 $vaultId = (Get-Content -Raw -LiteralPath $vaultIdPath).Trim()
 if (-not $vaultId) { throw "vault.id is empty: $vaultIdPath" }
 $version = (Get-Content -Raw -LiteralPath $versionPath).Trim()
 if (-not $version) { throw "VERSION is empty: $versionPath" }
+
+$windowsPackage = [ordered]@{
+    architectures = @("x86_64")
+    desktop = New-Asset -File (Get-Item -LiteralPath $desktopPath) -Kind "DESKTOP_EXECUTABLE" -Id "unoone-power"
+    dock = New-Asset -File (Get-Item -LiteralPath $dockPath) -Kind "DOCK_EXECUTABLE" -Id "unoone-dock"
+    starter = New-Asset -File (Get-Item -LiteralPath $starterPath) -Kind "STARTER_EXECUTABLE" -Id "start-unoone"
+    runtimes = @($runtimeAssets)
+    models = @($modelAssets)
+    voice = @($voiceAssets)
+}
+# The speech section is emitted only when a SPEECH/ tree exists; absence
+# means the package declares no speech assets (the validator reads that as None).
+if ($null -ne $speechAssets) {
+    $windowsPackage["speech"] = $speechAssets
+}
 
 $manifest = [ordered]@{
     product_id = "com.inbharatai.unoone.pocket-ai"
@@ -129,15 +213,7 @@ $manifest = [ordered]@{
         id_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $vaultIdPath).Hash.ToUpperInvariant()
     }
     platforms = [ordered]@{
-        windows = [ordered]@{
-            architectures = @("x86_64")
-            desktop = New-Asset -File (Get-Item -LiteralPath $desktopPath) -Kind "DESKTOP_EXECUTABLE" -Id "unoone-power"
-            dock = New-Asset -File (Get-Item -LiteralPath $dockPath) -Kind "DOCK_EXECUTABLE" -Id "unoone-dock"
-            starter = New-Asset -File (Get-Item -LiteralPath $starterPath) -Kind "STARTER_EXECUTABLE" -Id "start-unoone"
-            runtimes = @($runtimeAssets)
-            models = @($modelAssets)
-            voice = @($voiceAssets)
-        }
+        windows = $windowsPackage
         mobile = [ordered]@{
             architectures = @("arm64-v8a")
             models = @($mobileModelAssets)
@@ -177,3 +253,10 @@ Write-Host "Runtime assets: $($runtimeAssets.Count)"
 Write-Host "Model assets:   $($modelAssets.Count)"
 Write-Host "Voice assets:   $($voiceAssets.Count)"
 Write-Host "Mobile models:  $($mobileModelAssets.Count)"
+if ($null -ne $speechAssets) {
+    Write-Host ("Speech models:    {0}  configs: {1}  acceptance: {2}  runtimes: {3}" -f `
+        $speechAssets.models.Count, $speechAssets.configs.Count, `
+        $speechAssets.acceptance.Count, $speechAssets.runtimes.Count)
+} else {
+    Write-Host "Speech assets:  none (no SPEECH/ tree staged)"
+}

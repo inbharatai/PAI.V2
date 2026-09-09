@@ -16,7 +16,7 @@ PACKS = ROOT / "packs"
 
 # code, name, primary/accepted scripts, STT candidates, TTS candidates
 LANGUAGES = [
-    ("as-IN", "Assamese", ["Beng"], ["ai4bharat-indicconformer-600m"], ["ai4bharat-indicf5"]),
+    ("as-IN", "Assamese", ["Beng"], ["sherpa-onnx-indicconformer", "ai4bharat-indicconformer-600m"], ["ai4bharat-indicf5"]),
     ("bn-IN", "Bengali", ["Beng"], ["ai4bharat-indicconformer-600m"], ["ai4bharat-indicf5"]),
     ("brx-IN", "Bodo", ["Deva"], ["ai4bharat-indicconformer-600m"], ["ai4bharat-indic-parler-tts"]),
     ("doi-IN", "Dogri", ["Deva"], ["ai4bharat-indicconformer-600m"], ["ai4bharat-indic-parler-tts"]),

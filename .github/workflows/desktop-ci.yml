@@ -6,6 +6,8 @@ on:
     paths:
       - 'apps/desktop/**'
       - 'packages/**'
+      - 'vendor/Inbharat-audiocpp/**'
+      - 'scripts/check_speech_language_sync.py'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/desktop-ci.yml'
@@ -14,6 +16,8 @@ on:
     paths:
       - 'apps/desktop/**'
       - 'packages/**'
+      - 'vendor/Inbharat-audiocpp/**'
+      - 'scripts/check_speech_language_sync.py'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/desktop-ci.yml'
@@ -81,21 +85,81 @@ jobs:
         working-directory: apps/desktop/src
         run: npm run build
 
+  speech-language-sync:
+    name: Speech language table sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The canonical speech language table is packages/speech-contracts/
+      # languages.v1.json; the Android mirror in VoiceLanguage.kt must stay
+      # identical. android-ci.yml runs this same check for Android-path
+      # changes; this job catches Rust/JSON-side edits that must not drift.
+      - name: Kotlin mirror == languages.v1.json
+        run: python3 scripts/check_speech_language_sync.py
+
+  vendor-audio-linux:
+    name: InBharat Audio (Linux, ctest + ABI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build build-essential python3
+
+      # Default (adapter-OFF) build of the universal speech runtime: every
+      # release-candidate test suite runs, then the exported ELF symbol set
+      # must match the reviewed ABI v1 core manifest byte-for-byte. This is
+      # CI evidence only — it never claims a physical Linux deployment.
+      - name: Configure
+        run: >
+          cmake -S vendor/Inbharat-audiocpp -B build/ibaudio -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DIBAUDIO_BUILD_TESTS=ON
+          -DIBAUDIO_BUILD_CLI=ON
+          -DIBAUDIO_ENABLE_AUDIO_CPP_ADAPTER=OFF
+          -DIBAUDIO_ENABLE_SHERPA_ONNX=OFF
+          -DIBAUDIO_ENABLE_VULKAN_PROBE=OFF
+
+      - name: Build
+        run: cmake --build build/ibaudio --parallel 2
+
+      - name: Release-candidate tests
+        run: ctest --test-dir build/ibaudio --output-on-failure
+
+      - name: ABI invariant check
+        run: >
+          python3 vendor/Inbharat-audiocpp/scripts/check_abi.py
+          build/ibaudio/libibaudio.so
+          vendor/Inbharat-audiocpp/abi/ibaudio_symbols_v1_core.txt
+
   rust-check:
     name: Rust Backend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
 
     steps:
       - uses: actions/checkout@v4
+
+      # Tauri v2 on Linux links webkit2gtk; without the dev packages the
+      # workspace check fails before any Rust code is compiled.
+      - name: Install Linux GUI dependencies (tauri)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libasound2-dev
 
       # generate_context! embeds the frontend at compile time (custom-protocol
       # is a default feature), so the dist must exist before ANY cargo command,

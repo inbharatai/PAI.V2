@@ -194,7 +194,12 @@ impl Journal {
         let mut rolled_back_count = 0u32;
         let mut errors = Vec::new();
 
-        let entries = self.list_entries()?;
+        let (entries, integrity_errors) = self.list_entries()?;
+        // Tampered/unparsable journal files are reported but their entries
+        // are NOT processed — a tampered pending entry must not have its
+        // rollback executed, and a tampered committed entry must not be
+        // counted as durable.
+        errors.extend(integrity_errors);
 
         for entry in entries {
             match entry.state {
@@ -246,6 +251,27 @@ impl Journal {
         entry
     }
 
+    /// Verify a journal entry's HMAC against its contents. The HMAC covers
+    /// the entry with `entry_hmac` cleared, exactly as
+    /// `compute_entry_hmac` signed it. The audit found the journal wrote
+    /// HMACs but never verified them on read — a modified pending or
+    /// committed entry was parsed and executed as-is, defeating the
+    /// tamper-evidence the HMAC existed for. An entry with a missing or
+    /// mismatching HMAC fails verification.
+    fn verify_entry_hmac(entry: &JournalEntry) -> bool {
+        if entry.entry_hmac.is_empty() {
+            return false;
+        }
+        let mut cleared = entry.clone();
+        cleared.entry_hmac = String::new();
+        let Ok(json) = serde_json::to_string(&cleared) else {
+            return false;
+        };
+        let expected =
+            hex::encode(crate::crypto::hmac_sha256(b"unoone-vault-journal", json.as_bytes()));
+        expected.eq_ignore_ascii_case(&entry.entry_hmac)
+    }
+
     /// Write a journal entry to disk (atomic write)
     fn write_entry(&self, entry: &JournalEntry) -> Result<(), VaultError> {
         let path = self.entry_path(&entry.transaction_id, &entry.state);
@@ -260,7 +286,9 @@ impl Journal {
         Ok(())
     }
 
-    /// Read a journal entry by transaction ID
+    /// Read a journal entry by transaction ID. The entry's HMAC is verified
+    /// on read — a tampered entry is an error, never a transaction the caller
+    /// gets to commit, roll back, or trust.
     fn read_entry(&self, transaction_id: &str) -> Result<Option<JournalEntry>, VaultError> {
         // Check both pending and committed states
         for state in &[
@@ -273,18 +301,29 @@ impl Journal {
                 let content = std::fs::read_to_string(&path)?;
                 let entry: JournalEntry = serde_json::from_str(&content)
                     .map_err(|e| VaultError::Serialization(e.to_string()))?;
+                if !Self::verify_entry_hmac(&entry) {
+                    return Err(VaultError::JournalRecoveryFailed(format!(
+                        "Journal entry {} failed HMAC verification — it was modified after write",
+                        entry.transaction_id
+                    )));
+                }
                 return Ok(Some(entry));
             }
         }
         Ok(None)
     }
 
-    /// List all journal entries
-    fn list_entries(&self) -> Result<Vec<JournalEntry>, VaultError> {
+    /// List all journal entries. Returns the verifiable entries plus an
+    /// error per journal file that is unparsable or fails HMAC verification
+    /// — tampered entries are excluded from recovery processing and
+    /// surfaced, never silently skipped (the old code skipped unparsable
+    /// files without a trace).
+    fn list_entries(&self) -> Result<(Vec<JournalEntry>, Vec<String>), VaultError> {
         let mut entries = Vec::new();
+        let mut integrity_errors = Vec::new();
 
         if !self.journal_dir.exists() {
-            return Ok(entries);
+            return Ok((entries, integrity_errors));
         }
 
         for entry in std::fs::read_dir(&self.journal_dir)? {
@@ -292,13 +331,26 @@ impl Journal {
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false) {
                 let content = std::fs::read_to_string(&path)?;
-                if let Ok(journal_entry) = serde_json::from_str::<JournalEntry>(&content) {
-                    entries.push(journal_entry);
+                match serde_json::from_str::<JournalEntry>(&content) {
+                    Ok(journal_entry) => {
+                        if Self::verify_entry_hmac(&journal_entry) {
+                            entries.push(journal_entry);
+                        } else {
+                            integrity_errors.push(format!(
+                                "Journal file {} failed HMAC verification — it was modified after write",
+                                path.display()
+                            ));
+                        }
+                    }
+                    Err(_) => integrity_errors.push(format!(
+                        "Journal file {} is unparsable and was skipped",
+                        path.display()
+                    )),
                 }
             }
         }
 
-        Ok(entries)
+        Ok((entries, integrity_errors))
     }
 
     /// Get the path for a journal entry file
@@ -379,17 +431,89 @@ mod tests {
         let journal = Journal::new(dir.path());
 
         // Begin a transaction but don't commit (simulating a crash)
-        let _tx_id = journal
+        let tx_id = journal
             .begin_transaction(vec![JournalOperation::Write {
                 record_id: "rec-003".to_string(),
                 relative_path: "VAULT/records/rec-003.enc".to_string(),
             }])
             .unwrap();
 
-        // Simulate crash recovery
+        // Tamper with the pending entry on disk: the journal must detect the
+        // HMAC mismatch, refuse to execute the entry's rollback, and surface
+        // the tamper instead of silently skipping it.
+        let pending_path = journal.entry_path(&tx_id, &JournalState::Pending);
+        let content = std::fs::read_to_string(&pending_path).unwrap();
+        let tampered = content.replace("rec-003", "rec-forged");
+        std::fs::write(&pending_path, tampered).unwrap();
+
         let result = journal.recover_from_crash().unwrap();
-        assert!(result.recovery_needed);
-        assert!(result.rolled_back_count >= 1);
+        assert!(
+            !result.errors.is_empty(),
+            "a tampered journal entry must be reported, got: {:?}",
+            result.errors
+        );
+        assert!(
+            result.errors.iter().any(|e| e.contains("HMAC verification")),
+            "the error must name the HMAC failure, got: {:?}",
+            result.errors
+        );
+        assert_eq!(result.rolled_back_count, 0);
+    }
+
+    #[test]
+    fn test_commit_refuses_tampered_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::new(dir.path());
+
+        let tx_id = journal
+            .begin_transaction(vec![JournalOperation::Write {
+                record_id: "rec-004".to_string(),
+                relative_path: "VAULT/records/rec-004.enc".to_string(),
+            }])
+            .unwrap();
+
+        // Tamper with the pending entry, then try to commit it: the HMAC
+        // verification on read must refuse.
+        let pending_path = journal.entry_path(&tx_id, &JournalState::Pending);
+        let content = std::fs::read_to_string(&pending_path).unwrap();
+        let tampered = content.replace("rec-004", "rec-forged");
+        std::fs::write(&pending_path, tampered).unwrap();
+
+        let err = journal.commit_transaction(&tx_id).unwrap_err();
+        assert!(
+            err.to_string().contains("HMAC verification"),
+            "commit must refuse a tampered entry, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_hmac_covers_entry_contents() {
+        // A hand-built entry with no HMAC fails verification; the same entry
+        // processed through compute_entry_hmac passes.
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::new(dir.path());
+
+        let raw = JournalEntry {
+            transaction_id: "tx-abc".to_string(),
+            state: JournalState::Pending,
+            record_ids: vec!["rec-001".to_string()],
+            operations: vec![JournalOperation::Write {
+                record_id: "rec-001".to_string(),
+                relative_path: "VAULT/records/rec-001.enc".to_string(),
+            }],
+            created_at: "2026-09-05T00:00:00Z".to_string(),
+            updated_at: "2026-09-05T00:00:00Z".to_string(),
+            entry_hmac: String::new(),
+        };
+        assert!(!Journal::verify_entry_hmac(&raw));
+
+        let signed = journal.compute_entry_hmac(raw);
+        assert!(Journal::verify_entry_hmac(&signed));
+
+        // Any post-signing mutation breaks verification.
+        let mut mutated = signed.clone();
+        mutated.record_ids.push("rec-002".to_string());
+        assert!(!Journal::verify_entry_hmac(&mutated));
     }
 
     #[test]

@@ -21,6 +21,7 @@ option(IBAUDIO_WARNINGS_AS_ERRORS "Treat first-party warnings as errors" ON)
 option(IBAUDIO_ENABLE_ELF_VERSION_SCRIPT "Apply GNU-compatible ELF symbol version script" OFF)
 option(IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES "Compile experimental research modules (neural_codec, prosody_controller, voice_clone_engine) that are placeholders and not production-honest" OFF)
 option(IBAUDIO_REMOTE_PROVIDERS "Compile remote providers (e.g. Sarvam). OFF by default; an offline deployment contains no remote code path at all." OFF)
+option(IBAUDIO_ENABLE_SHERPA_ONNX "Compile the native sherpa-onnx IndicConformer ASR seam (fail-closed; no native inference wired in this cycle)" OFF)
 set(IBAUDIO_AUDIO_CPP_SOURCE_DIR "" CACHE PATH "Pristine audio.cpp checkout at the pinned commit")
 set(IBAUDIO_PINNED_AUDIO_CPP_COMMIT "26dcb5c4cf5aa016ae6285096a7b45f2671e5d17" CACHE STRING "Reviewed audio.cpp pin (release-0.6.1)")
 
@@ -91,6 +92,16 @@ if(IBAUDIO_REMOTE_PROVIDERS)
     list(APPEND IBAUDIO_SOURCES src/providers/sarvam_provider.cpp)
 endif()
 
+# Native sherpa-onnx IndicConformer seam: establishes the local-native route
+# for the `indicconformer-asr` family (Assamese + verified IndicConformer
+# languages) with a fail-closed asset probe. NO native sherpa-onnx runtime is
+# linked in this cycle — run_asr returns UNAVAILABLE; no inference is faked.
+if(IBAUDIO_ENABLE_SHERPA_ONNX)
+    list(APPEND IBAUDIO_SOURCES src/providers/sherpa_onnx_provider.cpp)
+    set(IBAUDIO_SHERPA_ONNX_INDICCONFORMER_ROOT "" CACHE PATH
+        "Local IndicConformer ONNX pack root (probed at runtime; empty = unconfigured = fail closed)")
+endif()
+
 if(IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER)
     if(NOT IBAUDIO_AUDIO_CPP_SOURCE_DIR)
         message(FATAL_ERROR "IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER requires IBAUDIO_AUDIO_CPP_SOURCE_DIR")
@@ -114,6 +125,10 @@ if(IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER)
         message(FATAL_ERROR "audio.cpp adapter refuses a modified upstream checkout")
     endif()
     list(APPEND IBAUDIO_SOURCES src/adapters/audio_cpp/audio_cpp_adapter.cpp)
+    # Runtime asset probe: the single authority for inference_ready. Compiles
+    # alongside the adapter (the runtime status API calls it), self-contained
+    # so it never drags in upstream audio.cpp headers.
+    list(APPEND IBAUDIO_SOURCES src/adapters/audio_cpp/audio_cpp_probe.cpp)
 
     # Real audio.cpp provider (VAD via bundled Silero weights; ASR/TTS gated). Requires
     # the pinned upstream to have been built already (scripts/build_audio_cpp_provider.sh
@@ -138,14 +153,30 @@ if(IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER)
     # import prefix ("lib") and the suffix (".a"->".lib") differ, so pick the right
     # layout per toolchain; the upstream build is otherwise the same set of targets.
     if(MSVC)
+        # Per-config archive directory (finding V9): these paths used to be
+        # hardcoded to Release/, so a Debug build of the adapter silently
+        # linked the Release upstream archives — mismatched CRT objects
+        # (/MD vs /MDd), undefined behavior. Link the archives of the
+        # configuration actually being built; a config whose upstream
+        # archives were not built then fails LOUDLY at link time instead of
+        # silently mixing runtimes. (Release remains the only evidenced
+        # adapter lane; the supported evidence tiers are unchanged.)
+        set(_ac_cfg_dir "$<IF:$<CONFIG:Debug>,Debug,Release>")
+        # Actual VS multi-config layout of the pinned 26dcb5c4 build (verified
+        # twice, 2026-08-31 and 2026-09-08): top-level targets emit
+        # <build>/<CONFIG>/<name>.lib, while subdirectory targets (ggml,
+        # sentencepiece) emit <build>/<target-subdir>/<CONFIG>/<name>.lib.
+        # The earlier <build>/<CONFIG>/<subdir>/<name>.lib paths matched no
+        # real VS build tree — the archives had to be hand-copied into that
+        # shape, which no fresh clone reproduces.
         set(IBAUDIO_AUDIO_CPP_LIBS
-            "${_acb}/Release/engine_runtime.lib"
-            "${_acb}/external/sentencepiece/src/Release/sentencepiece.lib"
-            "${_acb}/ggml/src/Release/ggml.lib"
-            "${_acb}/ggml/src/Release/ggml-base.lib"
-            "${_acb}/ggml/src/Release/ggml-cpu.lib"
-            "${_acb}/Release/cjson_vendor.lib"
-            "${_acb}/Release/yaml_vendor.lib")
+            "${_acb}/${_ac_cfg_dir}/engine_runtime.lib"
+            "${_acb}/${_ac_cfg_dir}/cjson_vendor.lib"
+            "${_acb}/${_ac_cfg_dir}/yaml_vendor.lib"
+            "${_acb}/external/sentencepiece/src/${_ac_cfg_dir}/sentencepiece.lib"
+            "${_acb}/ggml/src/${_ac_cfg_dir}/ggml.lib"
+            "${_acb}/ggml/src/${_ac_cfg_dir}/ggml-base.lib"
+            "${_acb}/ggml/src/${_ac_cfg_dir}/ggml-cpu.lib")
     else()
         set(IBAUDIO_AUDIO_CPP_LIBS
             "${_acb}/libengine_runtime.a"
@@ -157,7 +188,11 @@ if(IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER)
             "${_acb}/libyaml_vendor.a")
     endif()
     # The bundled Silero VAD model root (weights ship inside the pristine checkout).
-    set(IBAUDIO_AUDIO_CPP_SILERO_VAD_ROOT "${_ac}/assets/framework/models/silero_vad")
+    # CACHE so production builds can bake a package-local path instead: a drive
+    # binary probing the build host's checkout would report readiness only on
+    # the machine that built it. Defaults to the bundled checkout weights.
+    set(IBAUDIO_AUDIO_CPP_SILERO_VAD_ROOT "${_ac}/assets/framework/models/silero_vad" CACHE PATH
+        "Silero VAD model root (bundled pinned-checkout weights by default; production packages override with their own staged root)")
     # Licensed, integrity-verified ASR model root (e.g. Qwen/Qwen3-ASR-0.6B, Apache-2.0,
     # SHA-256 verified against the official LFS object id). Empty = ASR provider UNAVAILABLE.
     set(IBAUDIO_AUDIO_CPP_QWEN3_ASR_ROOT "" CACHE PATH "Licensed, hash-verified ASR model directory (e.g. Qwen3-ASR-0.6B)")
@@ -199,7 +234,9 @@ target_compile_definitions(ibaudio PRIVATE
     $<$<BOOL:${IBAUDIO_ENABLE_VULKAN_PROBE}>:IBAUDIO_ENABLE_VULKAN_PROBE=1>
     $<$<BOOL:${IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER}>:IBAUDIO_ENABLE_AUDIO_CPP_ADAPTER=1>
     $<$<BOOL:${IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES}>:IBAUDIO_ENABLE_EXPERIMENTAL_RESEARCH_MODULES=1>
-    $<$<BOOL:${IBAUDIO_REMOTE_PROVIDERS}>:IBAUDIO_REMOTE_PROVIDERS=1>)
+    $<$<BOOL:${IBAUDIO_REMOTE_PROVIDERS}>:IBAUDIO_REMOTE_PROVIDERS=1>
+    $<$<BOOL:${IBAUDIO_ENABLE_SHERPA_ONNX}>:IBAUDIO_ENABLE_SHERPA_ONNX=1>
+    $<$<BOOL:${IBAUDIO_ENABLE_SHERPA_ONNX}>:IBAUDIO_SHERPA_ONNX_INDICCONFORMER_ROOT="${IBAUDIO_SHERPA_ONNX_INDICCONFORMER_ROOT}">)
 
 # audio.cpp provider: static libs and the bundled Silero VAD model root. Upstream headers
 # are added as SYSTEM below (they are third-party and trip -Wshadow/-Wconversion).

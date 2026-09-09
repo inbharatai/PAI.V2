@@ -42,7 +42,11 @@ public:
     }
 
     bool serves_family(const std::string &family) const override {
-        return family == "indicconformer-asr" || family == "indicf5-tts";
+        // The NATIVE IndicConformer route (`indicconformer-asr`) is owned by
+        // the sherpa-onnx provider seam; this local-service (NeMo/Python)
+        // seam claims its own family so the two never race — cross-TU static
+        // registration order is unspecified.
+        return family == "indicconformer-asr-nemo" || family == "indicf5-tts";
     }
 
     ibaudio_status_t run_asr(const AudioData &, const CancellationToken *, uint64_t *, std::string &) override {
