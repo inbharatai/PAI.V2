@@ -78,14 +78,150 @@ impl PaiLlamaLocalProvider {
         )
     }
 
-    fn role(role: inbharat_harness_core::providers::ModelRole) -> &'static str {
-        match role {
-            inbharat_harness_core::providers::ModelRole::System => "system",
-            inbharat_harness_core::providers::ModelRole::User => "user",
-            inbharat_harness_core::providers::ModelRole::Assistant => "assistant",
-            inbharat_harness_core::providers::ModelRole::Tool => "tool",
+}
+
+/// Parses the Harness tool-result transcript format
+/// `tool={tool_id} call={call_id} result={content}`. Tool ids and call ids
+/// never contain spaces, so the first ` call=` and ` result=` separators are
+/// authoritative even when the result content repeats either marker.
+fn parse_tool_transcript(content: &str) -> Option<(String, String, String)> {
+    let rest = content.strip_prefix("tool=")?;
+    let (tool_id, rest) = rest.split_once(" call=")?;
+    let (call_id, result) = rest.split_once(" result=")?;
+    if tool_id.is_empty() || call_id.is_empty() {
+        return None;
+    }
+    Some((tool_id.to_owned(), call_id.to_owned(), result.to_owned()))
+}
+
+fn role_name(role: inbharat_harness_core::providers::ModelRole) -> &'static str {
+    match role {
+        inbharat_harness_core::providers::ModelRole::System => "system",
+        inbharat_harness_core::providers::ModelRole::User => "user",
+        inbharat_harness_core::providers::ModelRole::Assistant => "assistant",
+        inbharat_harness_core::providers::ModelRole::Tool => "tool",
+    }
+}
+
+/// Builds the OpenAI-protocol message array for one llama-server request:
+/// the system prompt, the Harness transcript with tool exchanges
+/// reconstructed into canonical assistant-tool_calls + tool-result pairs,
+/// and (when attachments are present) the last user message rendered as
+/// multimodal parts. Attachment bytes live in `local_attachments`, keyed by
+/// the harness attachment id; ids without local bytes fail closed rather
+/// than silently sending a text-only request the model would answer as if
+/// it had seen the image.
+fn build_openai_messages(
+    system: &str,
+    history: &[inbharat_harness_core::providers::ModelMessage],
+    attachments: &[inbharat_harness_core::providers::AttachmentMetadata],
+    local_attachments: &std::collections::BTreeMap<String, (String, String)>,
+) -> HarnessResult<Vec<JsonValue>> {
+    let mut messages = Vec::with_capacity(history.len().saturating_add(2));
+    if !system.trim().is_empty() {
+        messages.push(json!({"role": "system", "content": system}));
+    }
+    // The Harness transcript records tool exchanges as flat Tool-role
+    // messages ("tool={id} call={call} result={…}") — it never carries the
+    // assistant's own tool-call turn. OpenAI-protocol servers (and the
+    // chat template behind them) require the assistant tool-call turn to
+    // precede its results; without it the model never sees that it already
+    // issued the call, re-issues it every step and the run dies on the
+    // step budget (live-observed: 48/48 steps, budget_exceeded, then a
+    // silent legacy fallback). Reconstruct the canonical pair: one
+    // assistant message carrying the grouped tool_calls, followed by each
+    // tool result with its matching tool_call_id.
+    let mut index = 0;
+    while index < history.len() {
+        let message = &history[index];
+        if message.role == inbharat_harness_core::providers::ModelRole::Tool {
+            let mut calls = Vec::new();
+            let mut results = Vec::new();
+            while index < history.len()
+                && history[index].role == inbharat_harness_core::providers::ModelRole::Tool
+            {
+                let transcript = &history[index].content;
+                if let Some((tool_id, call_id, result)) = parse_tool_transcript(transcript) {
+                    calls.push(json!({
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_id,
+                            "arguments": "{}",
+                        },
+                    }));
+                    results.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": result,
+                    }));
+                } else {
+                    // Not the harness transcript format (defensive): pass
+                    // the message through unchanged rather than guessing a
+                    // structure the model may misread.
+                    results.push(json!({
+                        "role": "tool",
+                        "content": transcript,
+                    }));
+                }
+                index += 1;
+            }
+            if !calls.is_empty() {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": JsonValue::Null,
+                    "tool_calls": calls,
+                }));
+            }
+            messages.extend(results);
+        } else {
+            messages.push(json!({
+                "role": role_name(message.role),
+                "content": message.content,
+            }));
+            index += 1;
         }
     }
+    // Vision: render the last user message as multimodal parts (text +
+    // image_url data URLs). llama-server resolves each image through the
+    // mmproj projector passed at startup.
+    if !attachments.is_empty() {
+        let last_user = messages
+            .iter()
+            .rposition(|message| message.get("role").and_then(JsonValue::as_str) == Some("user"))
+            .ok_or_else(|| {
+                Failure::new(
+                    ErrorCode::ProviderFailed,
+                    FailureClass::Provider,
+                    "pai.model.attachments",
+                    "attachments require a user message to attach to",
+                )
+            })?;
+        let mut parts = vec![json!({
+            "type": "text",
+            "text": messages[last_user].get("content").cloned().unwrap_or(JsonValue::String(String::new())),
+        })];
+        for attachment in attachments {
+            let (media_type, base64_bytes) = local_attachments.get(&attachment.id).ok_or_else(
+                || {
+                    Failure::new(
+                        ErrorCode::ProviderFailed,
+                        FailureClass::Provider,
+                        "pai.model.attachments",
+                        format!("attachment bytes are missing for id {}", attachment.id),
+                    )
+                },
+            )?;
+            parts.push(json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{};base64,{}", media_type, base64_bytes),
+                }
+            }));
+        }
+        messages[last_user]["content"] = JsonValue::Array(parts);
+    }
+    Ok(messages)
 }
 
 impl ModelProvider for PaiLlamaLocalProvider {
@@ -113,56 +249,12 @@ impl ModelProvider for PaiLlamaLocalProvider {
             ));
         }
 
-        let mut messages = Vec::with_capacity(request.messages.len().saturating_add(1));
-        if !request.system.trim().is_empty() {
-            messages.push(json!({"role": "system", "content": request.system}));
-        }
-        for message in &request.messages {
-            messages.push(json!({
-                "role": Self::role(message.role),
-                "content": message.content,
-            }));
-        }
-
-        // Vision: when the request carries attachments, render the last
-        // user message as multimodal parts (text + image_url data URLs).
-        // llama-server resolves the image through the mmproj projector
-        // passed at startup. Attachment ids without local bytes fail closed
-        // rather than silently sending a text-only request the model would
-        // answer as if it had seen the image.
-        if !request.attachments.is_empty() {
-            let last_user = messages
-                .iter()
-                .rposition(|message| message.get("role").and_then(JsonValue::as_str) == Some("user"))
-                .ok_or_else(|| {
-                    Self::failure(
-                        "pai.model.attachments",
-                        "attachments require a user message to attach to",
-                    )
-                })?;
-            let mut parts = vec![json!({
-                "type": "text",
-                "text": messages[last_user].get("content").cloned().unwrap_or(JsonValue::String(String::new())),
-            })];
-            for attachment in &request.attachments {
-                let (media_type, base64_bytes) = self
-                    .attachments
-                    .get(&attachment.id)
-                    .ok_or_else(|| {
-                        Self::failure(
-                            "pai.model.attachments",
-                            format!("attachment bytes are missing for id {}", attachment.id),
-                        )
-                    })?;
-                parts.push(json!({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": format!("data:{};base64,{}", media_type, base64_bytes),
-                    }
-                }));
-            }
-            messages[last_user]["content"] = JsonValue::Array(parts);
-        }
+        let messages = build_openai_messages(
+            &request.system,
+            &request.messages,
+            &request.attachments,
+            &self.attachments,
+        )?;
 
         let tools = request
             .tools
@@ -666,4 +758,106 @@ fn bound(value: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &value[..end])
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+    use inbharat_harness_core::providers::{ModelMessage, ModelRole};
+
+    fn message(role: ModelRole, content: &str) -> ModelMessage {
+        ModelMessage {
+            role,
+            content: content.to_owned(),
+        }
+    }
+
+    #[test]
+    fn tool_transcript_round_trips() {
+        let (tool, call, result) =
+            parse_tool_transcript("tool=fs.write call=r-1-2-1 result=Wrote 12 bytes")
+                .expect("canonical harness format parses");
+        assert_eq!(tool, "fs.write");
+        assert_eq!(call, "r-1-2-1");
+        assert_eq!(result, "Wrote 12 bytes");
+    }
+
+    #[test]
+    fn tool_transcript_tolerates_markers_inside_results() {
+        let (_, _, result) = parse_tool_transcript(
+            "tool=workspace.search call=r-1-3-1 result=hit.txt:1: tool= not a call= marker",
+        )
+        .expect("first separators win");
+        assert_eq!(result, "hit.txt:1: tool= not a call= marker");
+    }
+
+    #[test]
+    fn tool_transcript_rejects_foreign_shapes() {
+        assert!(parse_tool_transcript("").is_none());
+        assert!(parse_tool_transcript("the model wrote something").is_none());
+        assert!(parse_tool_transcript("tool=fs.write missing-call-marker result=x").is_none());
+    }
+
+    #[test]
+    fn tool_results_are_preceded_by_an_assistant_tool_calls_turn() {
+        let history = vec![
+            message(ModelRole::User, "create the marker file"),
+            message(
+                ModelRole::Tool,
+                "tool=fs.write call=r-1-2-1 result=Wrote 41 bytes to live-test.txt",
+            ),
+            message(
+                ModelRole::Tool,
+                "tool=fs.read call=r-1-3-1 result=PAI live acceptance marker XYZ42",
+            ),
+            message(ModelRole::User, "now read it back"),
+        ];
+        let messages = build_openai_messages("system prefix", &history, &[], &Default::default())
+            .expect("build succeeds");
+        // system, user, assistant(tool_calls), tool, tool, user
+        assert_eq!(messages.len(), 6, "{messages:?}");
+        assert_eq!(messages[0], json!({"role": "system", "content": "system prefix"}));
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert!(messages[2]["content"].is_null());
+        let calls = messages[2]["tool_calls"].as_array().expect("grouped calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["function"]["name"], "fs.write");
+        assert_eq!(calls[0]["id"], "r-1-2-1");
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "r-1-2-1");
+        assert_eq!(
+            messages[3]["content"],
+            "Wrote 41 bytes to live-test.txt"
+        );
+        assert_eq!(messages[4]["role"], "tool");
+        assert_eq!(messages[4]["tool_call_id"], "r-1-3-1");
+        assert_eq!(messages[5]["role"], "user");
+    }
+
+    #[test]
+    fn non_transcript_tool_messages_pass_through_without_fabricated_calls() {
+        let history = vec![message(ModelRole::Tool, "raw legacy tool content")];
+        let messages = build_openai_messages("", &history, &[], &Default::default())
+            .expect("build succeeds");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], json!({"role": "tool", "content": "raw legacy tool content"}));
+    }
+
+    #[test]
+    fn plain_history_is_untouched() {
+        let history = vec![
+            message(ModelRole::User, "hello"),
+            message(ModelRole::Assistant, "hi there"),
+        ];
+        let messages = build_openai_messages("", &history, &[], &Default::default())
+            .expect("build succeeds");
+        assert_eq!(
+            messages,
+            vec![
+                json!({"role": "user", "content": "hello"}),
+                json!({"role": "assistant", "content": "hi there"}),
+            ]
+        );
+    }
 }
