@@ -166,6 +166,7 @@ fn main() {
             // Browser workspace
             browser::browser_start_session,
             browser::browser_stop_session,
+            browser::browser_session_status,
             browser::browser_execute,
             browser::get_browser_bridge_script,
             browser::browser_eval,
