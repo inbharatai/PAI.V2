@@ -15,11 +15,13 @@ use crate::{
 use inbharat_harness_core::{
     tools::{ListFilesTool, ReadFileTool, RunProcessTool, WriteFileTool},
     AttachmentMetadata, BudgetLimits, CancellationToken, Capability, CapabilitySet,
-    ConfirmationMode, ConfirmationOutcome, Determinism, ExecutionLevel, HarnessBuilder,
-    HarnessResult, LocalExecutionBroker, MemoryOptions, PermissionDecision, PermissionProvider,
-    RootedFs, RunOptions, SideEffect, StaticConfirmationProvider, Tool, ToolArguments, ToolContext,
-    ToolManifest, ToolOutput, Value,
+    ConfirmationMode, ConfirmationOutcome, Determinism, ErrorCode, ExecutionLevel, Failure,
+    FailureClass, HarnessBuilder, HarnessResult, LocalExecutionBroker, MemoryOptions,
+    PermissionDecision, PermissionProvider, RootedFs, RunOptions, SandboxProvider, SideEffect,
+    StaticConfirmationProvider, Tool, ToolArguments, ToolContext, ToolManifest, ToolOutput,
+    Value,
 };
+use inbharat_harness_core::providers::{EnforcementQuality, SandboxGrant, SandboxRequest};
 use pai_harness_adapter::{
     PaiLlamaLocalProvider, PaiVaultMemoryProvider, PaiVaultMemoryProviderConfig,
 };
@@ -429,6 +431,55 @@ impl PermissionProvider for FullAccessPermission {
         _resource: &str,
     ) -> HarnessResult<PermissionDecision> {
         Ok(PermissionDecision::Allow)
+    }
+}
+
+/// The desktop sandbox policy. The builder default grants only
+/// `[FileRead, Model]`, so without this provider every full-access tool
+/// call — fs.write, workspace.patch, process.run, browser.act — failed the
+/// sandbox stage ("sandbox capability is not granted") and the bridge fell
+/// back to the read-only legacy agent. Full access mirrors the CLI's
+/// --trusted-process posture: the whole lane capability surface is granted
+/// and the allowlisted direct-argv broker is the enforcement boundary
+/// (quality Partial, honestly reported, never silently upgraded). The
+/// read-only chat lane keeps the default in-process fence surface.
+struct DesktopSandbox {
+    granted: CapabilitySet,
+    trusted_process: bool,
+}
+
+impl SandboxProvider for DesktopSandbox {
+    fn resolve(&self, request: &SandboxRequest) -> HarnessResult<SandboxGrant> {
+        if !request.capabilities.is_subset_of(&self.granted) {
+            return Err(Failure::new(
+                ErrorCode::PermissionDenied,
+                FailureClass::Policy,
+                "sandbox.resolve",
+                "sandbox capability is not granted",
+            ));
+        }
+        if request.require_security_boundary && !self.trusted_process {
+            return Err(Failure::new(
+                ErrorCode::SandboxUnavailable,
+                FailureClass::Policy,
+                "sandbox.resolve",
+                "process execution requires the full-access lane",
+            ));
+        }
+        Ok(SandboxGrant {
+            world_id: request.world_id.clone(),
+            backend: if self.trusted_process {
+                "unoone-allowlisted-direct-argv".to_owned()
+            } else {
+                "rooted-fs-fence".to_owned()
+            },
+            quality: if self.trusted_process {
+                EnforcementQuality::Partial
+            } else {
+                EnforcementQuality::InProcessFence
+            },
+            granted: self.granted.clone(),
+        })
     }
 }
 
@@ -1450,6 +1501,16 @@ pub async fn harness_chat(
         // other pipeline stage — validate, confirm, budget, sandbox fence,
         // output bounding, audit — stays non-bypassable. Chat-only mode
         // keeps the deny-by-default vault-rooted read-only builder.
+        // Full access authorizes the full local capability surface, and the
+        // sandbox provider below must mirror that set or every full-access
+        // tool call dies at the sandbox stage. Network, Credential, Job and
+        // Subagent have no registered tools today — the authorization is
+        // forward honesty about the lane's scope, not an unlocked behavior.
+        let capabilities = if full_access {
+            CapabilitySet::all_local()
+        } else {
+            CapabilitySet::from_slice(&[Capability::Model, Capability::FileRead])
+        };
         let workspace_fs = if full_access {
             let workspace = workspace_root().map_err(|error| error.to_string())?;
             Some(
@@ -1478,6 +1539,10 @@ pub async fn harness_chat(
             .map_err(|error| error.to_string())?
             .memory_provider(memory)
             .system_prefix(desktop_system_prefix(full_access))
+            .sandbox_provider(Arc::new(DesktopSandbox {
+                granted: capabilities.clone(),
+                trusted_process: full_access,
+            }))
             .confirmation_provider(Arc::new(StaticConfirmationProvider {
                 outcome: if full_access {
                     ConfirmationOutcome::AllowedOnce
@@ -1503,15 +1568,6 @@ pub async fn harness_chat(
             }
         }
         let harness = builder.build();
-        // Full access authorizes the full local capability surface. Network,
-        // Credential, Job and Subagent have no registered tools today — the
-        // authorization is forward honesty about the lane's scope, not an
-        // unlocked behavior.
-        let capabilities = if full_access {
-            CapabilitySet::all_local()
-        } else {
-            CapabilitySet::from_slice(&[Capability::Model, Capability::FileRead])
-        };
         let mut options = RunOptions {
             actor: "local-user".to_owned(),
             capabilities,
@@ -1671,6 +1727,78 @@ mod workspace_tool_tests {
                 "{capability:?} must be allowed in full-access mode"
             );
         }
+    }
+
+    #[test]
+    fn desktop_sandbox_grants_the_full_access_tool_surface() {
+        // The full-access lane: every tool capability resolves, including
+        // process/browser calls that require a security boundary — the
+        // allowlisted direct-argv broker is the boundary and its Partial
+        // quality is reported, never silently upgraded.
+        let full = DesktopSandbox {
+            granted: CapabilitySet::all_local(),
+            trusted_process: true,
+        };
+        let fs_write = full
+            .resolve(&SandboxRequest {
+                world_id: "w1".to_owned(),
+                capabilities: CapabilitySet::from_slice(&[Capability::FileWrite]),
+                require_security_boundary: false,
+            })
+            .expect("fs.write sandbox grant");
+        assert_eq!(fs_write.world_id, "w1");
+        assert_eq!(fs_write.backend, "unoone-allowlisted-direct-argv");
+        assert_eq!(fs_write.quality, EnforcementQuality::Partial);
+        full.resolve(&SandboxRequest {
+            world_id: "w1".to_owned(),
+            capabilities: CapabilitySet::from_slice(&[Capability::FileRead]),
+            require_security_boundary: false,
+        })
+        .expect("fs.read sandbox grant");
+        full.resolve(&SandboxRequest {
+            world_id: "w1".to_owned(),
+            capabilities: CapabilitySet::from_slice(&[Capability::ProcessSpawn]),
+            require_security_boundary: true,
+        })
+        .expect("process.run sandbox grant");
+        full.resolve(&SandboxRequest {
+            world_id: "w1".to_owned(),
+            capabilities: CapabilitySet::from_slice(&[Capability::Workspace]),
+            require_security_boundary: true,
+        })
+        .expect("browser.act sandbox grant");
+
+        // The read-only chat lane: reads pass behind the in-process fence,
+        // writes and boundary-requiring effects fail closed — the builder
+        // default posture that the shipped full-access build had accidentally
+        // applied everywhere, killing the whole lane live.
+        let read_only = DesktopSandbox {
+            granted: CapabilitySet::from_slice(&[Capability::Model, Capability::FileRead]),
+            trusted_process: false,
+        };
+        let read = read_only
+            .resolve(&SandboxRequest {
+                world_id: "w2".to_owned(),
+                capabilities: CapabilitySet::from_slice(&[Capability::FileRead]),
+                require_security_boundary: false,
+            })
+            .expect("read-only fs.read grant");
+        assert_eq!(read.quality, EnforcementQuality::InProcessFence);
+        let denied_write = read_only.resolve(&SandboxRequest {
+            world_id: "w2".to_owned(),
+            capabilities: CapabilitySet::from_slice(&[Capability::FileWrite]),
+            require_security_boundary: false,
+        });
+        assert!(denied_write.is_err(), "writes must fail closed in chat mode");
+        let denied_process = read_only.resolve(&SandboxRequest {
+            world_id: "w2".to_owned(),
+            capabilities: CapabilitySet::from_slice(&[Capability::FileRead]),
+            require_security_boundary: true,
+        });
+        assert!(
+            denied_process.is_err(),
+            "boundary effects must fail closed in chat mode"
+        );
     }
 
     #[test]
