@@ -511,6 +511,35 @@ fn desktop_system_prefix(full_access: bool) -> String {
     }
 }
 
+/// Reduce the llama-server-reported model id to a harness-registry-safe value.
+///
+/// llama-server advertises `/v1/models` ids from the model's launch path — on
+/// Windows that is the full `C:\...\D333….gguf` string. The vendored harness
+/// registry's `valid_model_id` charset is `[A-Za-z0-9._-/:]` (no backslash),
+/// so registering the raw id failed with `conflict:model.register` on EVERY
+/// Windows chat — observed live: harness_chat always threw and the UI
+/// silently fell back to the legacy vault-only agent, which is how the model
+/// came to claim it "only operates within the encrypted USB vault". The
+/// basename keeps the id stable, honest (it is the real model file — the
+/// manifest-sha256 filename for cached launches, the model filename for
+/// drive launches) and registry-valid on every platform. Every path-like
+/// report reduces to its basename; plain registry-safe ids pass through.
+fn registry_safe_model_id(reported: &str) -> String {
+    let basename = reported
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(reported)
+        .trim();
+    if basename.is_empty() {
+        // Nothing path-like in the report: keep the original string so an
+        // id-less server still surfaces as an explicit registry rejection
+        // rather than a silently re-labelled one.
+        reported.trim().to_owned()
+    } else {
+        basename.to_owned()
+    }
+}
+
 /// The coding/automation workspace root. Full-access file tools and
 /// subprocesses are rooted here — never the encrypted pendrive vault — so
 /// agent writes land on rewritable host disk, not the read-mostly package.
@@ -1353,9 +1382,12 @@ pub async fn harness_chat(
         let manager = guard
             .as_ref()
             .ok_or_else(|| "Local model is not running".to_owned())?;
-        let model_id = manager
-            .running_model_id()
-            .ok_or_else(|| "Local model has not passed identity verification".to_owned())?;
+        let model_id = registry_safe_model_id(
+            manager
+                .running_model_id()
+                .as_deref()
+                .ok_or_else(|| "Local model has not passed identity verification".to_owned())?,
+        );
         let port = *model_state
             .server_port
             .lock()
@@ -1591,6 +1623,30 @@ mod workspace_tool_tests {
             .iter()
             .map(|(key, value)| ((*key).to_owned(), Value::String((*value).to_owned())))
             .collect()
+    }
+
+    #[test]
+    fn registry_safe_model_id_strips_windows_paths() {
+        // What llama-server actually reports on Windows (live-observed): the
+        // full launch path, backslashes included. The raw string is rejected
+        // by the harness model registry, killing every harness_chat call.
+        let cached = "C:\\Users\\reetu\\AppData\\Local\\UnoOne\\model-cache\\D333B368BE6CD655563FCE18AEDE26027E208FDB13816D35EB06983CE054044B.gguf";
+        assert_eq!(
+            registry_safe_model_id(cached),
+            "D333B368BE6CD655563FCE18AEDE26027E208FDB13816D35EB06983CE054044B.gguf"
+        );
+        let drive = "\\\\?\\D:\\UNOONE\\MODELS\\DESKTOP\\Gemma-12B\\gemma-4-12B-it-Q4_K_M.gguf";
+        assert_eq!(
+            registry_safe_model_id(drive),
+            "gemma-4-12B-it-Q4_K_M.gguf"
+        );
+        // POSIX-style launch paths reduce to the same basename.
+        assert_eq!(
+            registry_safe_model_id("models/gemma-4-12b-it-q4_k_m.gguf"),
+            "gemma-4-12b-it-q4_k_m.gguf"
+        );
+        // A plain id with no separators is preserved.
+        assert_eq!(registry_safe_model_id("pai-gemma"), "pai-gemma");
     }
 
     #[test]

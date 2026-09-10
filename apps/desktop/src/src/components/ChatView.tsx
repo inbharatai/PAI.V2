@@ -205,20 +205,24 @@ export function ChatView() {
           steps: telemetry ? [{ type: 'Thinking', text: telemetry }] : undefined,
         };
       } catch (harnessErr) {
-        // Rollback to the legacy ReAct agent. A "command not registered" style
-        // error means this build simply lacks the bridge; anything else is a
-        // real bridge failure worth surfacing in the console.
+        // Rollback to the legacy ReAct agent. This lane change must never be
+        // silent: the legacy agent has a smaller, vault-read-only toolset, so
+        // an answer produced here can truthfully describe fewer abilities than
+        // the enabled full-access session. Surface the fallback and its
+        // reason as a step the user can read.
         const harnessMsg = harnessErr instanceof Error ? harnessErr.message : String(harnessErr);
-        if (!/harness_chat|not.*registered|no such command|not found|unavailable/i.test(harnessMsg)) {
-          console.warn('Harness bridge fell back to legacy agent:', harnessMsg);
-        }
+        console.warn('Harness bridge fell back to legacy agent:', harnessMsg);
         const result = await tauriApi.agentChat(input.trim(), conversationHistory);
+        const fallbackStep = {
+          type: 'Thinking' as const,
+          text: `Fell back to the read-only legacy agent (the primary agent pipeline could not start: ${harnessMsg}). This fallback can only read vault records — its answers may understate what this session can do.`,
+        };
         assistantMessage = {
           id: crypto.randomUUID(),
           role: 'assistant',
           content: result.final_text,
           timestamp: Date.now(),
-          steps: result.steps,
+          steps: [fallbackStep, ...(result.steps ?? [])],
         };
       }
       setMessages(prev => [...prev, assistantMessage]);
