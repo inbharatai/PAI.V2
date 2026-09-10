@@ -6,8 +6,12 @@
 
 ## 1. Vision lane (mmproj multimodal chat)
 
-Chat now accepts images. The shipped drive already carries
-`mmproj-gemma-4-12B-it-f16.gguf`; this lane wires it into the harness chat
+Chat now accepts images. The shipped drive carried
+`mmproj-gemma-4-12B-it-f16.gguf` when this lane landed; the 2026-09-10 live
+acceptance test caught that projector producing garbage vision output
+(`<unused49>` spam) and it was replaced with the official BF16 mmproj — see
+`docs/verification/2026-09-10/77_VISION_MMPROJ_BF16_FIX.md`. This lane wires
+the mmproj into the harness chat
 plane:
 
 - **UI** (`ChatView.tsx`): paperclip button → up to 4 images (png/jpeg/webp/gif)

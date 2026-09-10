@@ -55,7 +55,7 @@ D:\UNOONE
 | llama-server (CPU) | `RUNTIMES\WINDOWS\CPU\llama-server.exe` + DLLs | **VERIFIED_WORKING** |
 | llama-server (Vulkan) | `RUNTIMES\WINDOWS\VULKAN\llama-server.exe` + DLLs | **VERIFIED_WORKING** |
 | Gemma 12B GGUF | `MODELS\DESKTOP\Gemma-12B\gemma-4-12B-it-Q4_K_M.gguf` | **VERIFIED_WORKING** |
-| Gemma mmproj | `MODELS\DESKTOP\Gemma-12B\mmproj-gemma-4-12B-it-f16.gguf` | **VERIFIED_WORKING** |
+| Gemma mmproj | `MODELS\DESKTOP\Gemma-12B\mmproj-gemma-4-12B-it-bf16.gguf` | **VERIFIED_WORKING** (the earlier `-f16` file was the broken projector of llama.cpp [#24146](https://github.com/ggml-org/llama.cpp/issues/24146) — see `docs/verification/2026-09-10/77_VISION_MMPROJ_BF16_FIX.md`) |
 
 ### 4.2 Missing assets
 

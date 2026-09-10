@@ -315,7 +315,7 @@ UNOONE/
 │   └── DESKTOP/
 │       └── Gemma-12B/
 │           ├── gemma-4-12B-it-Q4_K_M.gguf  (7.14 GiB)
-│           └── mmproj-gemma-4-12B-it-f16.gguf (116 MiB)
+│           └── mmproj-gemma-4-12B-it-bf16.gguf (167 MiB)
 ├── VAULT/
 │   ├── identity/vault.id
 │   ├── header/
