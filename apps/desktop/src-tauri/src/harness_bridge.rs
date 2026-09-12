@@ -611,23 +611,29 @@ fn registry_safe_model_id(reported: &str) -> String {
 /// The coding/automation workspace root. Full-access file tools and
 /// subprocesses are rooted here — never the encrypted pendrive vault — so
 /// agent writes land on rewritable host disk, not the read-mostly package.
-/// The L3 full-access session budget. A backstop against pathological loops,
-/// not a task cap: hundreds of steps, thousands of tool calls, hours of wall
-/// time, 64 MiB of accumulated tool output. Live-caught 2026-09-12 (defect
-/// #16): this shape must stay within the harness's hard safety bounds — the
-/// 64 MiB cumulative output figure was once rejected by the validator, every
-/// full-access chat call threw, and the UI silently fell back to the
-/// read-only vault agent (the model then truthfully told the user it could
-/// not write files). `full_access_budget_is_accepted_by_the_harness` pins it.
+/// The L3 full-access session budget, set to the MAXIMUM the harness's hard
+/// safety bounds permit (`validate_run_options`): 10,000 steps, 100,000 tool
+/// calls, 1,000 rounds, 24 h of wall time, 64 MiB of accumulated tool output.
+/// The user's standing directive is "no cap" — the full-access lane runs at
+/// the validator ceiling in every dimension, so no real task is ever cut
+/// short by a desktop-side budget. Only jobs/subagent-depth stay at their
+/// conservative defaults (the desktop lane spawns no subagents or job
+/// queues today; raising them is meaningless until those lanes exist).
+/// Live-caught 2026-09-12 (defect #16): this shape must stay within the
+/// harness's hard safety bounds — the 64 MiB cumulative output figure was
+/// once rejected by the validator, every full-access chat call threw, and
+/// the UI silently fell back to the read-only vault agent (the model then
+/// truthfully told the user it could not write files).
+/// `full_access_budget_is_accepted_by_the_harness` pins it.
 fn full_access_budget() -> BudgetLimits {
     BudgetLimits {
-        max_steps: 512,
-        max_tool_calls: 1024,
-        max_rounds: 8,
+        max_steps: 10_000,
+        max_tool_calls: 100_000,
+        max_rounds: 1_000,
         max_jobs: 0,
         max_subagent_depth: 0,
         max_output_bytes: 64 * 1024 * 1024,
-        max_duration: Duration::from_secs(21_600),
+        max_duration: Duration::from_secs(24 * 60 * 60),
     }
 }
 
