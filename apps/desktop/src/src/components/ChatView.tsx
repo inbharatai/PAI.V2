@@ -8,6 +8,16 @@ interface ChatMessage {
   content: string;
   timestamp: number;
   steps?: AgentStep[];
+  // Set when the user has this assistant message spoken back (STS out).
+  audioUrl?: string;
+}
+
+/** Non-image attachment staged for the next turn (text/doc content). */
+interface PendingFile {
+  name: string;
+  kind: string;
+  truncated: boolean;
+  text: string;
 }
 
 interface AgentStep {
@@ -20,6 +30,16 @@ interface AgentStep {
   confidence?: number | null;
   approved?: boolean;
 }
+
+/** Extensions parsed by the backend's audited document extractors. */
+const PARSED_DOC_EXTS = ['pdf', 'docx', 'xlsx', 'pptx'];
+/** Text-like attachments the WebView reads directly (bounded, client-side). */
+const TEXT_FILE_EXTS = [
+  'txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'log', 'xml', 'yaml', 'yml',
+  'toml', 'ini', 'html', 'htm', 'css', 'js', 'jsx', 'ts', 'tsx', 'py', 'rs',
+  'go', 'java', 'kt', 'c', 'h', 'cpp', 'hpp', 'cs', 'sh', 'ps1', 'bat', 'sql',
+];
+const extOf = (name: string) => name.split('.').pop()?.toLowerCase() || '';
 
 export function ChatView() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -37,7 +57,27 @@ export function ChatView() {
   // re-validates (media type allowlist, base64 decode, 8 MiB per image, 4
   // images max) and hashes each one — this state only previews and transports.
   const [pendingImages, setPendingImages] = useState<string[]>([]);
+  // Pending non-image attachments (txt/md/csv/json/code read client-side,
+  // pdf/docx/xlsx/pptx parsed by the backend's audited extractors).
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [attachError, setAttachError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // STS in: mic capture rides the same audited recording pipeline the
+  // Recordings view uses, at TRANSCRIPT_ONLY privacy — audio is transcribed
+  // then destroyed, only the encrypted transcript is kept.
+  const [vaultRoot, setVaultRoot] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const [micError, setMicError] = useState('');
+  const recordTimerRef = useRef<number | undefined>(undefined);
+  // STS out: synthesize assistant replies through the offline speech lane.
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const [autoSpeak, setAutoSpeak] = useState<boolean>(() => {
+    try { return localStorage.getItem('unoone.autoSpeak') === 'on'; } catch { return false; }
+  });
+  const [speechLang, setSpeechLang] = useState<string>(() => {
+    try { return localStorage.getItem('unoone.speechLang') || 'en'; } catch { return 'en'; }
+  });
   // Stable Harness conversation namespace for this chat session. Harness memory
   // is long-term only; canonical chat history stays in UNOONE MESSAGE records
   // passed in as read-only context, never duplicated into Harness memory.
@@ -128,25 +168,94 @@ export function ChatView() {
     };
   }, [checkModelStatus]);
 
+  // Voice input/output need the vault root (recording pipeline + speech
+  // lane). The chat itself does not — so detection failure is silent and
+  // only degrades the mic/speaker buttons.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const info = await tauriApi.detectVault();
+        if (!cancelled && info.detected) setVaultRoot(info.vault_root);
+      } catch {
+        // Vault detection unavailable — mic/speak surface their own error.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Never leak the recording timer.
+  useEffect(() => () => {
+    if (recordTimerRef.current !== undefined) window.clearInterval(recordTimerRef.current);
+  }, []);
+
   const handleAttachImages = (files: FileList | null) => {
     if (!files) return;
-    const readers: Promise<string>[] = [];
+    setAttachError('');
+    const images: Promise<string>[] = [];
+    const docs: Promise<PendingFile | null>[] = [];
     for (const file of Array.from(files)) {
-      if (pendingImages.length + readers.length >= 4) break;
-      if (!file.type.startsWith('image/')) continue;
-      readers.push(
-        new Promise(resolve => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
-          reader.onerror = () => resolve('');
-          reader.readAsDataURL(file);
-        }),
-      );
+      if (file.type.startsWith('image/')) {
+        if (pendingImages.length + images.length >= 4) continue;
+        images.push(
+          new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+            reader.onerror = () => resolve('');
+            reader.readAsDataURL(file);
+          }),
+        );
+      } else if (pendingFiles.length + docs.length >= 4) {
+        continue;
+      } else if (PARSED_DOC_EXTS.includes(extOf(file.name))) {
+        // PDF/DOCX/XLSX/PPTX — parsed by the backend's audited extractors.
+        docs.push(
+          new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onload = async () => {
+              const b64 = String(reader.result || '').split(',')[1] || '';
+              try {
+                const parsed = await tauriApi.parseAttachedDocument(file.name, b64);
+                resolve({ name: file.name, kind: parsed.kind, truncated: parsed.truncated, text: parsed.text });
+              } catch (err) {
+                setAttachError(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
+                resolve(null);
+              }
+            };
+            reader.onerror = () => { setAttachError(`${file.name}: could not be read`); resolve(null); };
+            reader.readAsDataURL(file);
+          }),
+        );
+      } else if (TEXT_FILE_EXTS.includes(extOf(file.name))) {
+        // Text-like files — read client-side, bounded.
+        if (file.size > 256 * 1024) {
+          setAttachError(`${file.name} is over the 256 KB text-attachment limit`);
+          continue;
+        }
+        docs.push(
+          new Promise(resolve => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const text = String(reader.result || '');
+              resolve({ name: file.name, kind: 'text', truncated: false, text });
+            };
+            reader.onerror = () => { setAttachError(`${file.name}: could not be read`); resolve(null); };
+            reader.readAsText(file);
+          }),
+        );
+      } else {
+        setAttachError(`${file.name}: unsupported attachment type (images, ${PARSED_DOC_EXTS.join('/')}, and text/code files are supported)`);
+      }
     }
-    void Promise.all(readers).then(dataUrls => {
+    void Promise.all(images).then(dataUrls => {
       const valid = dataUrls.filter(url => url.startsWith('data:image/'));
       if (valid.length === 0) return;
       setPendingImages(prev => [...prev, ...valid].slice(0, 4));
+    });
+    void Promise.all(docs).then(parsed => {
+      const ok = parsed.filter((p): p is PendingFile => p !== null);
+      if (ok.length === 0) return;
+      setPendingFiles(prev => [...prev, ...ok].slice(0, 4));
     });
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
@@ -155,20 +264,91 @@ export function ChatView() {
     setPendingImages(prev => prev.filter((_, i) => i !== index));
   };
 
+  const removePendingFile = (index: number) => {
+    setPendingFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  /** STS in — mic via the audited recording pipeline (TRANSCRIPT_ONLY). */
+  const toggleMic = async () => {
+    setMicError('');
+    try {
+      if (!isRecording) {
+        if (!vaultRoot) { setMicError('Vault not detected — voice input needs the Pocket USB.'); return; }
+        await tauriApi.startRecording('VOICE_MEMO', 'TRANSCRIPT_ONLY', vaultRoot, speechLang);
+        setIsRecording(true);
+        setRecordSeconds(0);
+        recordTimerRef.current = window.setInterval(() => setRecordSeconds(s => s + 1), 1000);
+      } else {
+        const session = await tauriApi.stopRecording();
+        if (recordTimerRef.current !== undefined) { window.clearInterval(recordTimerRef.current); recordTimerRef.current = undefined; }
+        setIsRecording(false);
+        const recordId = session.transcript_path?.replace('vault://records/', '');
+        if (!recordId) {
+          setMicError('No transcript was produced — nothing was heard. Try again closer to the mic, or type your message.');
+          return;
+        }
+        const transcript = await tauriApi.vaultReadRecord(recordId);
+        const text = transcript.trim();
+        if (!text) {
+          setMicError('The transcript came back empty. Try again, or type your message.');
+          return;
+        }
+        setInput(prev => (prev.trim() ? `${prev.trim()} ${text}` : text));
+      }
+    } catch (err) {
+      if (recordTimerRef.current !== undefined) { window.clearInterval(recordTimerRef.current); recordTimerRef.current = undefined; }
+      setIsRecording(false);
+      setMicError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  /** STS out — speak an assistant reply through the offline TTS lane. */
+  const speakMessage = async (msg: ChatMessage) => {
+    if (!vaultRoot) { setMicError('Vault not detected — speech output needs the Pocket USB.'); return; }
+    try {
+      setSpeakingMessageId(msg.id);
+      // Long replies are spoken up to a sensible cap; the tail notes the cut.
+      const ttsText = msg.content.length > 2000
+        ? `${msg.content.slice(0, 2000)}… [reply truncated for speech]`
+        : msg.content;
+      const result = await tauriApi.synthesizeSpeech(ttsText, vaultRoot, speechLang);
+      if (result.error || !result.audio_path) {
+        setMicError(result.error || 'Speech synthesis returned no audio.');
+        return;
+      }
+      setMessages(prev => prev.map(m => (m.id === msg.id ? { ...m, audioUrl: tauriApi.convertFileSrc(result.audio_path!) } : m)));
+    } catch (err) {
+      setMicError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSpeakingMessageId(null);
+    }
+  };
+
   const handleSend = async () => {
     if (!input.trim() || isGenerating) return;
 
     const images = pendingImages;
+    const files = pendingFiles;
+    // Non-image attachments travel as labelled text blocks appended to the
+    // prompt (bounded by the parsers / 256 KB client cap upstream), so the
+    // model sees their contents directly in this turn.
+    const fileBlocks = files.map(f =>
+      `\n\n[attached file: ${f.name}${f.kind !== 'text' ? ` (${f.kind})` : ''}${f.truncated ? ' — content truncated' : ''}]\n${f.text}`
+    );
+    const composedPrompt = `${input.trim()}${fileBlocks.join('')}${
+      images.length > 0 ? `\n\n[${images.length} image(s) attached]` : ''
+    }`;
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: images.length > 0 ? `${input.trim()}\n\n[${images.length} image(s) attached]` : input.trim(),
+      content: composedPrompt,
       timestamp: Date.now(),
     };
 
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setPendingImages([]);
+    setPendingFiles([]);
     setIsGenerating(true);
     setServerError('');
 
@@ -184,7 +364,7 @@ export function ChatView() {
       let assistantMessage: ChatMessage;
       try {
         const harness = await tauriApi.harnessChat(
-          input.trim(),
+          composedPrompt,
           conversationHistory,
           conversationIdRef.current,
           fullAccess,
@@ -212,7 +392,7 @@ export function ChatView() {
         // reason as a step the user can read.
         const harnessMsg = harnessErr instanceof Error ? harnessErr.message : String(harnessErr);
         console.warn('Harness bridge fell back to legacy agent:', harnessMsg);
-        const result = await tauriApi.agentChat(input.trim(), conversationHistory);
+        const result = await tauriApi.agentChat(composedPrompt, conversationHistory);
         const fallbackStep = {
           type: 'Thinking' as const,
           text: `Fell back to the read-only legacy agent (the primary agent pipeline could not start: ${harnessMsg}). This fallback can only read vault records — its answers may understate what this session can do.`,
@@ -226,6 +406,8 @@ export function ChatView() {
         };
       }
       setMessages(prev => [...prev, assistantMessage]);
+      // STS out: with auto-speak on, the reply is voiced as it lands.
+      if (autoSpeak && vaultRoot) void speakMessage(assistantMessage);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       if (errorMsg.includes('Failed to connect') || errorMsg.includes('ECONNREFUSED') || errorMsg.includes('llama-server')) {
@@ -360,6 +542,36 @@ export function ChatView() {
             <div className="chat-bubble">
               <div style={{ whiteSpace: 'pre-wrap', lineHeight: '1.6' }}>{msg.content}</div>
 
+              {msg.role === 'assistant' && (
+                <div style={{ marginTop: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  {!msg.audioUrl ? (
+                    <button
+                      onClick={() => void speakMessage(msg)}
+                      disabled={speakingMessageId === msg.id}
+                      title="Speak this reply (offline TTS)"
+                      style={{
+                        background: 'none',
+                        border: '1px solid var(--border-color, #333)',
+                        borderRadius: '12px',
+                        padding: '3px 10px',
+                        fontSize: '11px',
+                        color: 'var(--text-secondary, #888)',
+                        cursor: speakingMessageId === msg.id ? 'default' : 'pointer',
+                      }}
+                    >
+                      {speakingMessageId === msg.id ? '🔊 synthesizing…' : '🔊 Speak'}
+                    </button>
+                  ) : (
+                    <audio
+                      controls
+                      src={msg.audioUrl}
+                      style={{ width: '100%', maxWidth: '360px', height: '32px' }}
+                      aria-label="Spoken reply playback"
+                    />
+                  )}
+                </div>
+              )}
+
               {msg.steps && msg.steps.length > 0 && (
                 <div style={{ marginTop: '8px' }}>
                   {/* Collapsible step summary — like Gemini's "Used: tool" pill */}
@@ -440,7 +652,45 @@ export function ChatView() {
               </span>
             </span>
           </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', userSelect: 'none' }}>
+            <input
+              type="checkbox"
+              checked={autoSpeak}
+              onChange={e => {
+                setAutoSpeak(e.target.checked);
+                try { localStorage.setItem('unoone.autoSpeak', e.target.checked ? 'on' : 'off'); } catch { /* session-only */ }
+              }}
+            />
+            <span>Speak replies aloud (offline TTS)</span>
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', userSelect: 'none' }}>
+            <span>Voice language</span>
+            <select
+              value={speechLang}
+              onChange={e => {
+                setSpeechLang(e.target.value);
+                try { localStorage.setItem('unoone.speechLang', e.target.value); } catch { /* session-only */ }
+              }}
+              style={{ fontSize: '12px' }}
+            >
+              <option value="en">English</option>
+              <option value="hi">हिन्दी</option>
+              <option value="hinglish">Hinglish</option>
+            </select>
+          </label>
         </div>
+        {(micError || attachError) && (
+          <div style={{
+            padding: '6px 12px',
+            marginBottom: '8px',
+            background: 'rgba(239,68,68,0.08)',
+            borderRadius: '8px',
+            fontSize: '12px',
+            color: 'var(--danger, #f87171)',
+          }}>
+            {micError || attachError}
+          </div>
+        )}
         {pendingImages.length > 0 && (
           <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
             {pendingImages.map((dataUrl, i) => (
@@ -481,11 +731,35 @@ export function ChatView() {
             ))}
           </div>
         )}
+        {pendingFiles.length > 0 && (
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+            {pendingFiles.map((file, i) => (
+              <div key={`${file.name}-${i}`} style={{
+                display: 'flex', alignItems: 'center', gap: '6px',
+                padding: '4px 10px', borderRadius: '8px',
+                border: '1px solid var(--border-color, #333)',
+                fontSize: '12px', color: 'var(--text-secondary, #888)',
+                maxWidth: '280px',
+              }}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  📄 {file.name}{file.truncated ? ' (truncated)' : ''}
+                </span>
+                <button
+                  onClick={() => removePendingFile(i)}
+                  title="Remove attachment"
+                  style={{ background: 'none', border: 'none', color: 'var(--danger, #f87171)', cursor: 'pointer', padding: 0, fontSize: '13px' }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="chat-input-row">
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
+            accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.xlsx,.pptx,.txt,.md,.markdown,.csv,.tsv,.json,.log,.xml,.yaml,.yml,.toml,.ini,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.rs,.go,.java,.kt,.c,.h,.cpp,.hpp,.cs,.sh,.ps1,.bat,.sql"
             multiple
             style={{ display: 'none' }}
             onChange={e => handleAttachImages(e.target.files)}
@@ -493,13 +767,35 @@ export function ChatView() {
           <button
             className="btn"
             onClick={() => fileInputRef.current?.click()}
-            disabled={isGenerating || modelStatus === 'not_loaded' || pendingImages.length >= 4}
-            title="Attach images (up to 4) — the model sees them via its mmproj vision encoder"
+            disabled={isGenerating || modelStatus === 'not_loaded' || (pendingImages.length >= 4 && pendingFiles.length >= 4)}
+            title="Attach images, PDF/DOCX/XLSX/PPTX or text/code files (up to 4 each) — images go to the vision encoder, documents are parsed and their text is shown to the model"
             style={{ padding: '8px' }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
+          </button>
+          <button
+            className="btn"
+            onClick={() => void toggleMic()}
+            disabled={isGenerating && !isRecording}
+            title={isRecording ? 'Stop and transcribe — your words drop into the box (audio is destroyed, only the encrypted transcript is kept)' : 'Speak your message — recorded at Transcript Only privacy, transcribed on-device'}
+            style={{
+              padding: '8px',
+              ...(isRecording ? { background: 'rgba(239,68,68,0.15)', borderColor: 'var(--danger, #f87171)' } : {}),
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+            {isRecording && (
+              <span style={{ marginLeft: '6px', fontSize: '12px', color: 'var(--danger, #f87171)' }}>
+                {Math.floor(recordSeconds / 60)}:{String(recordSeconds % 60).padStart(2, '0')}
+              </span>
+            )}
           </button>
           <textarea
             className="chat-input"

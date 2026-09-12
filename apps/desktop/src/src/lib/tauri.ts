@@ -494,6 +494,8 @@ export const tauriApi = {
 
   // Documents
   listDocuments: (vaultRoot: string) => invoke<DocumentMetadata[]>('list_documents', { vault_root: vaultRoot }),
+  parseAttachedDocument: (filename: string, dataBase64: string) =>
+    invoke<{ kind: string; text: string; truncated: boolean }>('parse_attached_document', { filename, data_base64: dataBase64 }),
   searchMemories: (query: { query: string; memory_types: string[]; limit: number; min_relevance: number }, vaultRoot: string) =>
     invoke<Array<{ id: string; memory_type: string; title: string; preview: string; relevance: number; created_at: string }>>('search_memories', { query, vault_root: vaultRoot }),
 
