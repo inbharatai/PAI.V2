@@ -1575,12 +1575,14 @@ mod tests {
     use crate::providers::InMemoryMemoryProvider;
 
     /// Live-caught 2026-09-12: the desktop full-access lane (L3 autonomous
-    /// coding sessions) ships a 64 MiB cumulative output budget, and the
-    /// validator here rejected it against the old 8 MiB cap — so every
-    /// full-access chat call failed at run-options validation and the UI
-    /// silently fell back to the read-only vault agent. The production
-    /// budget shape must validate; the per-item 8 MiB caps elsewhere
-    /// (tools.rs, providers.rs, value.rs) stay untouched.
+    /// coding sessions) now runs at the VALIDATOR CEILING in every dimension
+    /// (user directive "no cap"): 10,000 steps, 100,000 tool calls, 1,000
+    /// rounds, 24 h, 64 MiB cumulative output. The validator here once
+    /// rejected the 64 MiB figure against an 8 MiB cap — every full-access
+    /// chat call failed at run-options validation and the UI silently fell
+    /// back to the read-only vault agent. The maximum budget shape must
+    /// validate; the per-item 8 MiB caps elsewhere (tools.rs, providers.rs,
+    /// value.rs) stay untouched.
     #[test]
     fn production_full_access_budget_passes_validation() {
         let options = RunOptions {
@@ -1588,29 +1590,37 @@ mod tests {
             provider: "pai-llama-local".to_owned(),
             model: "gemma-4-12b-it".to_owned(),
             budget: Some(BudgetLimits {
-                max_steps: 512,
-                max_tool_calls: 1024,
-                max_rounds: 8,
+                max_steps: 10_000,
+                max_tool_calls: 100_000,
+                max_rounds: 1_000,
                 max_jobs: 0,
                 max_subagent_depth: 0,
                 max_output_bytes: 64 * 1024 * 1024,
-                max_duration: Duration::from_secs(21_600),
+                max_duration: Duration::from_secs(24 * 60 * 60),
             }),
             ..RunOptions::default()
         };
         assert!(
             validate_run_options(&options).is_ok(),
-            "the production full-access budget must pass hard safety bounds"
+            "the ceiling-level full-access budget must pass hard safety bounds"
         );
         // And the pathological backstops still reject: a budget that would
         // let a runaway session accumulate unbounded output stays invalid.
-        let mut runaway = options;
+        let mut runaway = options.clone();
         if let Some(budget) = runaway.budget.as_mut() {
             budget.max_output_bytes = 64 * 1024 * 1024 + 1;
         }
         assert!(
             validate_run_options(&runaway).is_err(),
             "output budgets beyond the 64 MiB backstop must stay invalid"
+        );
+        let mut runaway_steps = options.clone();
+        if let Some(budget) = runaway_steps.budget.as_mut() {
+            budget.max_steps = 10_001;
+        }
+        assert!(
+            validate_run_options(&runaway_steps).is_err(),
+            "step budgets beyond the 10,000 backstop must stay invalid"
         );
     }
 
