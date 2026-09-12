@@ -1504,4 +1504,27 @@ mod parse_attached_document_tests {
         let parsed = parse_attached_document("photo.png".to_owned(), b64(&png)).expect("parse");
         assert_eq!(parsed.kind, "text");
     }
+
+    #[test]
+    fn pdf_attachment_extracts_real_text() {
+        // Hand-built minimal PDF (tests/fixtures/minimal-report.pdf) with
+        // one `(sentence) Tj` per page — the exact shape the lopdf-based
+        // extractor parses — so the PDF attachment lane has a regression
+        // test that does not depend on an external PDF library.
+        let pdf = include_bytes!("../tests/fixtures/minimal-report.pdf");
+        let parsed =
+            parse_attached_document("minimal-report.pdf".to_owned(), b64(pdf)).expect("parse");
+        assert_eq!(parsed.kind, "pdf");
+        assert!(!parsed.truncated);
+        assert!(
+            parsed.text.contains("Meridian Foods"),
+            "extraction missed the company name: {:?}",
+            parsed.text
+        );
+        assert!(
+            parsed.text.contains("Howrah"),
+            "extraction missed the second page: {:?}",
+            parsed.text
+        );
+    }
 }
