@@ -205,6 +205,39 @@ fn get_device_id() -> String {
         .unwrap_or_else(|_| "desktop-unknown".to_string())
 }
 
+/// Runtime probe for the capability profile: does the default capture device
+/// offer a configuration the capture thread can actually use? Mirrors the
+/// preference order of `audio_capture_thread` (default config first, then the
+/// first F32/I16/U16 config — see defect #15) but never opens a stream, so the
+/// probe cannot touch the microphone without the user starting a recording.
+pub fn probe_input_support() -> Result<String, String> {
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .ok_or_else(|| "No audio input device found".to_string())?;
+    let supported_config = match device.default_input_config() {
+        Ok(c) => c,
+        Err(_) => device
+            .supported_input_configs()
+            .map_err(|e| format!("Audio config query failed: {e}"))?
+            .find(|c| {
+                matches!(
+                    c.sample_format(),
+                    cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::U16
+                )
+            })
+            .ok_or_else(|| "Device offers no F32/I16/U16 input format".to_string())?
+            .with_max_sample_rate(),
+    };
+    let sample_rate = supported_config.sample_rate().0;
+    Ok(format!(
+        "{} @ {} Hz {:?}",
+        device.name().unwrap_or_else(|_| "input device".to_string()),
+        sample_rate,
+        supported_config.sample_format()
+    ))
+}
+
 /// Dedicated audio thread. The cpal `Stream` is created and stays on this thread
 /// because it is not `Send`. The callback pushes interleaved f32 samples into
 /// the shared `audio_buffer`. The thread loop handles pause/resume/stop commands.
