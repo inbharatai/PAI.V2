@@ -446,6 +446,24 @@ window.__unooneBrowserBridge = {
 const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
 const NAVIGATE_POLL_LIMIT: Duration = Duration::from_secs(20);
 
+/// WebView2's `ExecuteScript` — what `eval_with_callback` bottoms out in on
+/// Windows — hands the callback the *JSON encoding of the script's completion
+/// value*. Every bridge script ends by returning a string (the JSON envelope),
+/// so the payload arrives double-encoded: `"{\"ok\":true,…}"` with an outer
+/// JSON-string layer. Strip exactly that one layer so downstream parsers see
+/// the envelope the scripts actually produce. Plain (single-encoded) results
+/// pass through unchanged, as do non-string JSON values.
+fn strip_json_string_layer(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('"') {
+        return raw.to_owned();
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(serde_json::Value::String(inner)) => inner,
+        _ => raw.to_owned(),
+    }
+}
+
 fn eval_bridge(app: &tauri::AppHandle, window_label: &str, script: &str) -> Result<String, String> {
     let window = app
         .get_webview_window(window_label)
@@ -459,12 +477,14 @@ fn eval_bridge(app: &tauri::AppHandle, window_label: &str, script: &str) -> Resu
         })
         .map_err(|e| format!("Eval failed: {}", e))?;
 
-    rx.recv_timeout(EVAL_TIMEOUT).map_err(|e| {
-        format!(
-            "Eval timed out or channel closed after {:?}: {}",
-            EVAL_TIMEOUT, e
-        )
-    })
+    rx.recv_timeout(EVAL_TIMEOUT)
+        .map(|raw| strip_json_string_layer(&raw))
+        .map_err(|e| {
+            format!(
+                "Eval timed out or channel closed after {:?}: {}",
+                EVAL_TIMEOUT, e
+            )
+        })
 }
 
 /// Read page info, tolerating failure (returns None).
@@ -1075,6 +1095,49 @@ pub async fn browser_eval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- webview result encoding ---------------------------------------------
+    // WebView2's ExecuteScript delivers the JSON encoding of the script's
+    // completion value; since every bridge script returns a string, the
+    // envelope arrives double-encoded. eval_bridge strips exactly one layer,
+    // so parse_bridge_result must accept the post-strip shape and the strip
+    // must leave plain results alone.
+
+    #[test]
+    fn eval_results_strip_the_webview_json_string_layer() {
+        // Byte-for-byte what ExecuteScript handed the callback in live
+        // testing on Windows (outer JSON-string quotes around the envelope).
+        let raw = "\"{\\\"ok\\\":true,\\\"data\\\":{\\\"readyState\\\":\\\"complete\\\"}}\"";
+        let stripped = strip_json_string_layer(raw);
+        let payload = parse_bridge_result(&stripped).expect("stripped envelope must parse");
+        assert_eq!(payload["data"]["readyState"], "complete");
+    }
+
+    #[test]
+    fn single_layer_results_pass_through_unchanged() {
+        let raw = r#"{"ok":true,"data":{"url":"https://example.com/"}}"#;
+        assert_eq!(strip_json_string_layer(raw), raw);
+        assert!(parse_bridge_result(&strip_json_string_layer(raw)).is_ok());
+    }
+
+    #[test]
+    fn non_string_json_results_pass_through_unchanged() {
+        // A script whose completion value is an object arrives as an object
+        // encoding — no string layer to strip, nothing corrupted.
+        let raw = r#"{"ok":true,"data":{"filled":2}}"#;
+        assert_eq!(strip_json_string_layer(raw), raw);
+    }
+
+    #[test]
+    fn quoted_plain_text_is_not_over_stripped() {
+        // A result that is a JSON string but not an inner envelope must not
+        // be mangled into something parse_bridge_result misreads.
+        let raw = r#""just a status string""#;
+        let stripped = strip_json_string_layer(raw);
+        assert_eq!(stripped, "just a status string");
+        // and it must be rejected as a bridge envelope (missing 'ok'), not crash
+        assert!(parse_bridge_result(&stripped).is_err());
+    }
 
     // -- scheme validation ---------------------------------------------------
 
