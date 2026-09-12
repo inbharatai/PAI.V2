@@ -592,6 +592,10 @@ export const tauriApi = {
   // Unified capability profile
   getDesktopCapabilityProfile: () => invoke<DesktopCapabilityProfile>('get_desktop_capability_profile'),
 
-  // Utility: convert a filesystem path to a webview-loadable URL
-  convertFileSrc,
+  // Utility: convert a filesystem path to a webview-loadable URL.
+  // Backend commands return canonicalized Windows paths carrying the `\\?\`
+  // long-path prefix; the asset protocol cannot resolve that form
+  // (live-caught 2026-09-12: every spoken reply failed playback with
+  // MEDIA_ERR_SRC_NOT_SUPPORTED), so strip it before converting.
+  convertFileSrc: (path: string) => convertFileSrc(path.replace(/^\\\\\?\\/, '')),
 };
