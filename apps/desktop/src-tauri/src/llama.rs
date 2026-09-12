@@ -111,7 +111,7 @@ fn detected_ram_gib() -> Option<u32> {
             .lines()
             .find(|line| line.starts_with("MemTotal:"))
             .and_then(|line| line.split_whitespace().nth(1).and_then(|v| v.parse().ok()))?;
-        Some(u32::try_from(kb / (1024 * 1024)).ok()?)
+        u32::try_from(kb / (1024 * 1024)).ok()
     }
     #[cfg(target_os = "macos")]
     {
@@ -121,7 +121,7 @@ fn detected_ram_gib() -> Option<u32> {
             .output()
             .ok()?;
         let bytes: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
-        Some(u32::try_from(bytes / (1024 * 1024 * 1024)).ok()?)
+        u32::try_from(bytes / (1024 * 1024 * 1024)).ok()
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     None
