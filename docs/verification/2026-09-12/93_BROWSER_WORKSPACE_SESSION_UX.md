@@ -43,8 +43,13 @@ checklist below.
 
 ## 4. Live verification checklist (post re-stage)
 
-- [ ] Fresh app → Browser view → type google.com → Navigate: page
-      appears in front without pressing Start Session first
+Verified live on the re-staged drive (bundle `f08f8b8`),
+2026-09-12 (`browser-retest.js` PASS):
+
+- [x] Fresh app → Browser view → type google.com → Navigate: page
+      appears in front without pressing Start Session first (cold
+      Navigate auto-started the session; google.com loaded in ~2 s and
+      showed as a live CDP target)
 - [ ] Session indicator shows active; Stop Session closes the window
 - [ ] Navigate after manually closing the window recovers
 - [ ] Chat-side browser.act lane still works (same session state)

@@ -395,7 +395,7 @@ export function ChatView() {
         const result = await tauriApi.agentChat(composedPrompt, conversationHistory);
         const fallbackStep = {
           type: 'Thinking' as const,
-          text: `Fell back to the read-only legacy agent (the primary agent pipeline could not start: ${harnessMsg}). This fallback can only read vault records — its answers may understate what this session can do.`,
+          text: `Fell back to the read-only legacy agent (the primary agent pipeline stopped: ${harnessMsg}). This fallback can only read vault records — its answers may understate what this session can do.`,
         };
         assistantMessage = {
           id: crypto.randomUUID(),

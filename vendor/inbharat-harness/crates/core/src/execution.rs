@@ -209,8 +209,12 @@ impl RootedFs {
 
     /// Creates an in-root directory path one component at a time, validating every ancestor.
     pub fn create_dir_all(&self, relative: impl AsRef<Path>) -> HarnessResult<()> {
-        let relative = relative.as_ref();
-        let _validated = self.lexical_join(relative)?;
+        // Absolute in-root paths are rebased first (defect #22): the ancestor
+        // walk below operates on the root-relative remainder only, so a
+        // model-supplied absolute path can no longer trip the Prefix arm here.
+        let relative = self.in_root_path(relative.as_ref())?;
+        self.ensure_no_escape(&relative)?;
+        let _validated = self.lexical_join(&relative)?;
         let mut current = self.root.clone();
         for component in relative.components() {
             match component {
@@ -325,14 +329,86 @@ impl RootedFs {
         Ok(())
     }
 
-    fn lexical_join(&self, relative: &Path) -> HarnessResult<PathBuf> {
-        if relative.as_os_str().is_empty() {
+    fn lexical_join(&self, path: &Path) -> HarnessResult<PathBuf> {
+        // Live-caught (2026-09-12 long-coding acceptance, defect #22): agent
+        // models naturally emit absolute host paths for workspace files
+        // (e.g. `C:\Users\...\workspace\task-board\index.html`), and rejecting
+        // every absolute path outright killed the whole run on `fs.resolve`.
+        // Absolute paths are now accepted ONLY when they lexically designate
+        // somewhere inside the configured root — they are rebased onto the
+        // root's canonical form so every downstream fence (component scan,
+        // canonicalize + ensure_inside) still applies unchanged. Genuinely
+        // outside-root absolute paths are still an escape and denied.
+        let effective = self.in_root_path(path)?;
+        if effective.as_os_str().is_empty() {
             return Ok(self.root.clone());
         }
-        if relative.is_absolute() {
-            return Err(escape_failure());
+        self.ensure_no_escape(&effective)?;
+        Ok(self.root.join(&effective))
+    }
+
+    /// Rebases a caller-supplied path onto the root. Relative paths pass
+    /// through untouched; absolute paths are accepted only when they lexically
+    /// sit inside the root, returning the root-relative remainder. Anything
+    /// else escapes and is reported as such.
+    fn in_root_path(&self, path: &Path) -> HarnessResult<PathBuf> {
+        if !path.is_absolute() {
+            return Ok(path.to_path_buf());
         }
-        for component in relative.components() {
+        self.strip_root_prefix(path).ok_or_else(escape_failure)
+    }
+
+    /// Lexical containment check of an absolute path against the configured
+    /// root. Exact component-prefix match first; on Windows hosts two further
+    /// spellings of the SAME in-root path are accepted: the `\\?\` verbatim
+    /// prefix that `fs::canonicalize` produces (the stored root is verbatim
+    /// while callers spell the volume `C:\...`, and vice versa), and case
+    /// variants (Windows filesystems are case-insensitive, and the agent
+    /// model may emit `c:\users\...`). The returned remainder keeps the
+    /// caller's casing and separators; `lexical_join` re-joins it onto the
+    /// root so the canonical root form is what reaches the filesystem.
+    fn strip_root_prefix(&self, path: &Path) -> Option<PathBuf> {
+        if let Ok(stripped) = path.strip_prefix(&self.root) {
+            return Some(stripped.to_path_buf());
+        }
+        #[cfg(windows)]
+        {
+            let raw = path.to_string_lossy();
+            let raw = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+            let root_raw = self.root.to_string_lossy();
+            let root_raw = root_raw.strip_prefix(r"\\?\").unwrap_or(&root_raw);
+            // Models frequently spell Windows paths with forward slashes
+            // (JSON-escaping habit); both replacements below are strictly
+            // length-preserving, so the match offset still maps back onto the
+            // caller's original string.
+            let candidate = raw.to_ascii_lowercase().replace('/', "\\");
+            let root = root_raw
+                .to_ascii_lowercase()
+                .replace('/', "\\")
+                .trim_end_matches('\\')
+                .to_owned();
+            let rest = candidate.strip_prefix(&root)?;
+            // Boundary guard: `C:\rootx` must not count as inside root
+            // `C:\root` — the matched prefix must end at a component boundary.
+            if !rest.is_empty() && !rest.starts_with('\\') {
+                return None;
+            }
+            // ASCII lowercasing and separator normalization are both
+            // length-preserving, so the match maps back onto the original
+            // casing and separators: keep the caller's component spelling,
+            // only the root prefix is replaced.
+            let offset = raw.len() - rest.len();
+            let remainder = &raw[offset..];
+            Some(PathBuf::from(remainder.trim_start_matches(['/', '\\'])))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    fn ensure_no_escape(&self, effective: &Path) -> HarnessResult<()> {
+        for component in effective.components() {
             match component {
                 Component::Normal(_) | Component::CurDir => {}
                 Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
@@ -340,7 +416,7 @@ impl RootedFs {
                 }
             }
         }
-        Ok(self.root.join(relative))
+        Ok(())
     }
 
     fn ensure_inside(&self, path: &Path) -> HarnessResult<()> {
@@ -985,14 +1061,166 @@ mod tests {
     }
 
     /// Remove a path when the test scope ends, ignoring errors (best-effort).
-    fn scopeguard_remove(path: &Path) -> impl Drop {
-        struct Cleanup(PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-                let _ = fs::remove_file(&self.0);
-            }
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+            let _ = fs::remove_file(&self.0);
         }
+    }
+    fn scopeguard_remove(path: &Path) -> Cleanup {
         Cleanup(path.to_path_buf())
+    }
+
+    // Regression for defect #22 (live-caught 2026-09-12): a model emitting an
+    // absolute host path for a workspace file killed the whole run with
+    // `filesystem_denied:fs.resolve: path escapes the configured root`. The
+    // fence must accept absolute paths that sit inside the root and rebase
+    // them, while still denying every genuinely-outside path.
+
+    fn abs_fs(label: &str) -> HarnessResult<(PathBuf, Cleanup, RootedFs)> {
+        let base = std::env::temp_dir().join(format!(
+            "inbharat-abs-{label}-{}",
+            std::process::id()
+        ));
+        let cleanup = scopeguard_remove(&base.clone());
+        fs::create_dir_all(&base).map_err(|e| {
+            Failure::new(
+                ErrorCode::FilesystemDenied,
+                FailureClass::Execution,
+                "test.setup",
+                e.to_string(),
+            )
+        })?;
+        let rooted = RootedFs::new(&base)?;
+        // The canonical root the fence stores — on Windows this carries the
+        // `\\?\` verbatim prefix from fs::canonicalize. Tests exercise the
+        // user/model spelling (no verbatim prefix) of the same path, which is
+        // exactly what the live 12B model emitted.
+        Ok((rooted.root().to_path_buf(), cleanup, rooted))
+    }
+
+    /// The caller-friendly spelling of a canonical path: `\\?\` stripped.
+    fn spelled(canonical: &Path) -> PathBuf {
+        let raw = canonical.to_string_lossy();
+        PathBuf::from(raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_owned())
+    }
+
+    #[test]
+    fn absolute_in_root_path_is_rebased_not_denied() -> HarnessResult<()> {
+        let (root, _cleanup, fs) = abs_fs("rebase")?;
+        let user = spelled(&root);
+
+        // Absolute paths inside the root must work across the whole surface:
+        // create_dir_all, write_text_atomic, read_text, and list — spelled
+        // the way a user or model writes them, without the verbatim prefix.
+        fs.create_dir_all(user.join("nested").join("deeper"))?;
+        fs.write_text_atomic(user.join("nested").join("deeper").join("file.txt"), "absolute ok")?;
+        assert_eq!(
+            fs.read_text(user.join("nested").join("deeper").join("file.txt"))?,
+            "absolute ok"
+        );
+        // The same file is reachable by its relative form too (the rebased
+        // write landed inside the root, not beside it).
+        assert_eq!(fs.read_text("nested/deeper/file.txt")?, "absolute ok");
+        assert!(fs.list("nested/deeper")?.contains(&"file.txt".to_owned()));
+        // The canonical (verbatim) spelling works too — exact strip-prefix.
+        fs.write_text_atomic(root.join("verbatim.txt"), "canonical form")?;
+        assert_eq!(fs.read_text("verbatim.txt")?, "canonical form");
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_outside_root_path_is_still_denied() -> HarnessResult<()> {
+        let (root, _cleanup, fs) = abs_fs("outside")?;
+        let user = spelled(&root);
+
+        // The root's parent directory is strictly outside.
+        let Some(parent) = user.parent() else {
+            return Err(Failure::invalid("test.setup", "root has no parent"));
+        };
+        let outside = parent.join("inbharat-abs-outside-probe.txt");
+        let err = match fs.read_text(&outside) {
+            Err(failure) => failure,
+            Ok(_) => {
+                return Err(Failure::invalid(
+                    "test.assert",
+                    "outside-root absolute read must be denied",
+                ))
+            }
+        };
+        assert_eq!(err.code, ErrorCode::FilesystemDenied, "got: {err}");
+        assert!(err.message.contains("escapes"), "got: {err}");
+
+        // A write whose absolute target sits beside the root must be denied,
+        // not silently redirected inside.
+        let result = fs.write_text_atomic(
+            user.join("..").join("inbharat-abs-beside.txt"),
+            "x",
+        );
+        assert!(result.is_err(), "beside-root absolute write must be denied");
+        Ok(())
+    }
+
+    #[test]
+    fn absolute_path_with_dotdot_after_root_prefix_is_denied() -> HarnessResult<()> {
+        let (root, _cleanup, fs) = abs_fs("dotdot")?;
+        let user = spelled(&root);
+        // `C:\...\root\..\x` matches the root prefix lexically but escapes via
+        // ParentDir — the component re-scan must still catch it.
+        let err = match fs.read_text(user.join("..").join("escape.txt")) {
+            Err(failure) => failure,
+            Ok(_) => {
+                return Err(Failure::invalid(
+                    "test.assert",
+                    "dotdot after root prefix must be denied",
+                ))
+            }
+        };
+        assert!(err.message.contains("escapes"), "got: {err}");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absolute_in_root_path_case_variant_is_accepted() -> HarnessResult<()> {
+        let (root, _cleanup, fs) = abs_fs("case")?;
+        // Windows filesystems are case-insensitive: `c:\users\...` and
+        // `C:\Users\...` designate the same in-root file, so a case-variant
+        // spelling from the model must be rebased, not denied.
+        let lowered = spelled(&root).to_string_lossy().to_ascii_lowercase();
+        fs.write_text_atomic(PathBuf::from(lowered).join("case.txt"), "cased")?;
+        assert_eq!(fs.read_text("case.txt")?, "cased");
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn sibling_directory_sharing_root_prefix_is_denied() -> HarnessResult<()> {
+        let (root, _cleanup, fs) = abs_fs("sibling")?;
+        let user = spelled(&root);
+        // `C:\...\inbharat-abs-sibling` must NOT count as inside root
+        // `C:\...\inbharat-abs`: the containment fallback has to respect
+        // component boundaries.
+        let Some(parent) = user.parent() else {
+            return Err(Failure::invalid("test.setup", "root has no parent"));
+        };
+        let Some(name) = root.file_name() else {
+            return Err(Failure::invalid("test.setup", "root has no file name"));
+        };
+        let sibling = parent
+            .join(format!("{}-sibling", name.to_string_lossy()))
+            .join("file.txt");
+        let err = match fs.write_text_atomic(&sibling, "x") {
+            Err(failure) => failure,
+            Ok(_) => {
+                return Err(Failure::invalid(
+                    "test.assert",
+                    "prefix-sibling path must be denied",
+                ))
+            }
+        };
+        assert!(err.message.contains("escapes"), "got: {err}");
+        Ok(())
     }
 }
