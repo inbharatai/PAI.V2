@@ -123,6 +123,12 @@ export function AccessibilityView() {
     }
   }, [reducedMotion]);
 
+  /** True while the camera stream has at least one live video track. */
+  function hasLiveCamera(): boolean {
+    const stream = streamRef.current;
+    return !!stream && stream.getVideoTracks().some(track => track.readyState === 'live');
+  }
+
   function stopCamera() {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
@@ -136,27 +142,63 @@ export function AccessibilityView() {
 
   async function startCamera() {
     setCameraError('');
+    // Live-caught 2026-09-12 (defect #20): a stale/dead stream wedged the
+    // camera — "Camera On" disabled the Start button while the track had
+    // already ended, with no way to restart and no feedback. Release any
+    // previous stream and always acquire a fresh one.
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       streamRef.current = stream;
+      // If the device is unplugged or claimed by another app, surface it
+      // immediately instead of leaving a silent dead preview.
+      stream.getVideoTracks().forEach(track => {
+        track.addEventListener('ended', () => {
+          setCameraActive(false);
+          setCameraError(
+            'Camera stream ended — the device may have been disconnected or claimed by another app. Press Start Camera to retry.'
+          );
+        });
+      });
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        try {
+          await videoRef.current.play();
+        } catch {
+          // Autoplay policy hiccup; muted video recovers on its own.
+        }
       }
       setCameraActive(true);
     } catch (err) {
       setCameraError(`Camera access failed: ${err instanceof Error ? err.message : String(err)}`);
+      setCameraActive(false);
     }
   }
 
   async function captureSnapshot() {
     const video = videoRef.current;
-    if (!video || video.videoWidth === 0) return;
+    // Live-caught 2026-09-12 (defect #20): this used to return silently when
+    // the frame was not ready — a blind user pressed Capture and nothing
+    // happened, with no explanation. Always give feedback.
+    if (!video || video.videoWidth === 0 || !hasLiveCamera()) {
+      setCameraError(
+        'Camera is not ready yet. Press Start Camera and wait for the preview to show live video, then capture again.'
+      );
+      setCameraActive(false);
+      return;
+    }
 
     const canvas = document.createElement('canvas');
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      setCameraError('Cannot capture: the browser did not provide a 2D canvas.');
+      return;
+    }
 
     ctx.drawImage(video, 0, 0);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
@@ -175,6 +217,23 @@ export function AccessibilityView() {
       }
     } catch (err) {
       setCameraError(`Snapshot save failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Live-caught 2026-09-12 (defect #20): the Screen Reader Description assist
+   * only ever described camera snapshots — a blind user could not ask "what is
+   * on my screen right now?". Capture the app's main window and feed it
+   * through the same describe-and-speak path.
+   */
+  async function describeScreen() {
+    setVisionError('');
+    try {
+      const screenPath = await tauriApi.captureScreenSnapshot();
+      setImagePath(screenPath);
+      await runDescribeOn(screenPath);
+    } catch (err) {
+      setVisionError(`Screen capture failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -395,9 +454,9 @@ export function AccessibilityView() {
                         <button
                           className="btn btn-primary btn-sm"
                           onClick={startCamera}
-                          disabled={cameraActive}
+                          disabled={cameraActive && hasLiveCamera()}
                         >
-                          {cameraActive ? 'Camera On' : 'Start Camera'}
+                          {cameraActive && hasLiveCamera() ? 'Camera On' : 'Start Camera'}
                         </button>
                         <button
                           className="btn btn-secondary btn-sm"
@@ -524,6 +583,16 @@ export function AccessibilityView() {
                             disabled={isProcessingVision || !imagePath.trim()}
                           >
                             Describe Image
+                          </button>
+                        )}
+                        {screenReaderDescription && (
+                          <button
+                            className="btn btn-success btn-sm"
+                            onClick={describeScreen}
+                            disabled={isProcessingVision}
+                            title="Capture this app window and describe what is on screen"
+                          >
+                            Describe Screen
                           </button>
                         )}
                       </div>

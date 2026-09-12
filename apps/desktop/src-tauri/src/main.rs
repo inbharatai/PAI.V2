@@ -184,6 +184,7 @@ fn main() {
             accessibility::describe_image,
             accessibility::get_camera_info,
             accessibility::save_vision_snapshot,
+            accessibility::capture_screen_snapshot,
             accessibility::encode_image_for_vision,
             // Security hardening
             security::generate_manifest,

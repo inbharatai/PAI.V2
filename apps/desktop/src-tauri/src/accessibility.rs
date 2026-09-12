@@ -312,18 +312,40 @@ pub fn save_vision_snapshot(data_url: String) -> Result<String, String> {
     let image_bytes = base64::engine::general_purpose::STANDARD
         .decode(payload.trim())
         .map_err(|e| format!("Snapshot payload is not valid base64: {e}"))?;
+    write_vision_artifact("snapshot", extension, &image_bytes)
+}
+
+/// Write an image into the vision pipeline's host-temp directory and return
+/// its path. Never the read-mostly vault package.
+fn write_vision_artifact(
+    prefix: &str,
+    extension: &str,
+    image_bytes: &[u8],
+) -> Result<String, String> {
     if image_bytes.is_empty() {
-        return Err("Snapshot payload is empty".to_string());
+        return Err("Image payload is empty".to_string());
     }
     let dir = std::env::temp_dir().join("unoone-vision");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create snapshot dir: {e}"))?;
     let filename = format!(
-        "snapshot-{}.{extension}",
+        "{prefix}-{}.{extension}",
         chrono::Utc::now().format("%Y%m%dT%H%M%S%.3f")
     );
     let path = dir.join(filename);
-    std::fs::write(&path, &image_bytes).map_err(|e| format!("Cannot write snapshot: {e}"))?;
+    std::fs::write(&path, image_bytes).map_err(|e| format!("Cannot write snapshot: {e}"))?;
     Ok(path.to_string_lossy().to_string())
+}
+
+/// Capture the main window's on-screen region as a PNG into the vision
+/// pipeline and return its path, ready for `describe_image`/`perform_ocr`.
+/// Live-caught 2026-09-12 (defect #20): the Screen Reader Description assist
+/// could only describe camera snapshots — a blind user had no way to ask
+/// "what is on my screen right now?". This captures what the app is actually
+/// showing and feeds the same describe-and-speak path.
+#[tauri::command]
+pub fn capture_screen_snapshot(app: tauri::AppHandle) -> Result<String, String> {
+    let png_bytes = crate::browser::capture_window_png(&app, "main")?;
+    write_vision_artifact("screen", "png", &png_bytes)
 }
 
 /// Camera info — enumerates available video capture devices.
@@ -439,5 +461,35 @@ mod tests {
         assert!(
             save_vision_snapshot("data:image/png;base64,!!!not-base64!!!".to_string()).is_err()
         );
+    }
+
+    /// Defect #20: the screen-reader describe path must persist its capture as
+    /// a PNG artifact in the same host-temp vision directory, and must never
+    /// accept an empty payload.
+    #[test]
+    fn write_vision_artifact_persists_screen_png_and_rejects_empty() {
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        ];
+        let path = write_vision_artifact("screen", "png", png).expect("artifact save");
+        let saved = PathBuf::from(&path);
+        assert!(saved.exists(), "screen capture must exist at {path}");
+        assert_eq!(saved.extension().and_then(|e| e.to_str()), Some("png"));
+        assert!(
+            saved.starts_with(std::env::temp_dir().join("unoone-vision")),
+            "screen captures must stay in the host temp area, not the vault"
+        );
+        assert!(
+            saved
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("screen-"))
+                .unwrap_or(false),
+            "screen captures must be distinguishable from camera snapshots"
+        );
+        assert_eq!(std::fs::read(&saved).expect("read back"), png);
+        std::fs::remove_file(&saved).ok();
+
+        assert!(write_vision_artifact("screen", "png", &[]).is_err());
     }
 }
