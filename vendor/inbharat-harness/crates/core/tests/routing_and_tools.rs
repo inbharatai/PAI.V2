@@ -382,3 +382,114 @@ fn unavailable_confirmation_fails_closed_and_is_audited() -> HarnessResult<()> {
     assert!(session.replay()?.balanced);
     Ok(())
 }
+
+struct PassAllVerification;
+
+impl VerificationProvider for PassAllVerification {
+    fn verify(&self, _tool_id: &str, _arguments: &Value, _output: &Value) -> HarnessResult<()> {
+        Ok(())
+    }
+}
+
+/// Defect #22 regression (live-caught 2026-09-12): the desktop long-coding
+/// acceptance died because the 12B model emitted an absolute Windows path for
+/// a workspace file — `lexical_join` rejected EVERY absolute path, and the
+/// single failed tool call aborted the entire L3 run, silently degrading the
+/// chat to the read-only legacy agent. Both halves must now hold in one
+/// end-to-end run: absolute in-root paths are rebased and written; a genuinely
+/// escaping path fails that ONE call only, is reported to the model as the
+/// tool's result, and the run continues to completion on the next turn.
+#[test]
+fn l3_absolute_in_root_write_succeeds_and_escape_fails_one_call_only() -> HarnessResult<()> {
+    let temp = TempDir::new("l3-defect22")?;
+    fs::create_dir_all(temp.path().join("nested")).map_err(|error| {
+        inbharat_harness_core::Failure::invalid("test.mkdir", error.to_string())
+    })?;
+    let execution = Arc::new(LocalExecutionBroker::new(
+        RootedFs::new(temp.path())?,
+        Vec::<String>::new(),
+    ));
+    let capabilities = CapabilitySet::from_slice(&[
+        Capability::Model,
+        Capability::Workspace,
+        Capability::FileWrite,
+    ]);
+    let absolute_inside = temp.path().join("nested").join("abs.txt");
+    let absolute_inside_json = absolute_inside.to_string_lossy().replace('\\', "/");
+    let absolute_escape = temp.path().join("..").join("defect22-escape.txt");
+    let absolute_escape_json = absolute_escape.to_string_lossy().replace('\\', "/");
+    let harness = HarnessBuilder::new(execution)?
+        .register_model(Arc::new(MockModelProvider::new([
+            MockStep::ToolCall {
+                call_id: "write-absolute-inside".to_owned(),
+                tool_id: "fs.write".to_owned(),
+                arguments: format!(
+                    r#"{{"path":"{absolute_inside_json}","content":"absolute path rebased"}}"#
+                ),
+            },
+            MockStep::ToolCall {
+                call_id: "write-escape".to_owned(),
+                tool_id: "fs.write".to_owned(),
+                arguments: format!(
+                    r#"{{"path":"{absolute_escape_json}","content":"must never land"}}"#
+                ),
+            },
+            MockStep::ToolCall {
+                call_id: "write-fixed".to_owned(),
+                tool_id: "fs.write".to_owned(),
+                arguments: r#"{"path":"fixed.txt","content":"recovered"}"#.to_owned(),
+            },
+            MockStep::Text("recovered after correcting the path".to_owned()),
+        ])))?
+        .permission_provider(Arc::new(AllowPermission))
+        .confirmation_provider(Arc::new(ConfirmYes))
+        .verification_provider(Arc::new(PassAllVerification))
+        .sandbox_provider(Arc::new(GrantSandbox {
+            granted: capabilities.clone(),
+            quality: EnforcementQuality::InProcessFence,
+        }))
+        .build();
+    let options = RunOptions {
+        explicit_level: Some(ExecutionLevel::L3),
+        provider: "mock".to_owned(),
+        model: "mock-v1".to_owned(),
+        capabilities,
+        trajectory: TrajectoryMode::Diagnostic,
+        ..RunOptions::default()
+    };
+    let (outcome, session) = harness.run(
+        "build the files in the workspace, one call at a time",
+        &options,
+        &CancellationToken::new(),
+    )?;
+
+    // The run completed with the model's final text — it did NOT abort on the
+    // failed middle call.
+    assert_eq!(outcome.output, "recovered after correcting the path");
+    assert!(outcome.tool_calls >= 2);
+
+    // Fix A end-to-end: the absolute in-root path was rebased and written.
+    assert_eq!(
+        fs::read_to_string(temp.path().join("nested").join("abs.txt"))
+            .map_err(|error| inbharat_harness_core::Failure::invalid("test.read", error.to_string()))?,
+        "absolute path rebased"
+    );
+
+    // Fix B end-to-end: the escaping call failed, wrote nothing outside the
+    // root, and the run went on to write the corrected file.
+    assert!(!absolute_escape.exists());
+    assert_eq!(
+        fs::read_to_string(temp.path().join("fixed.txt"))
+            .map_err(|error| inbharat_harness_core::Failure::invalid("test.read", error.to_string()))?,
+        "recovered"
+    );
+
+    // The failed call is audited as a failed verification (per-call failure),
+    // not as a run-level abort.
+    assert!(session.events().iter().any(|event| matches!(
+        &event.data,
+        EventData::Verification { passed, .. } if !*passed
+    )));
+    assert!(session.replay()?.balanced);
+    Ok(())
+}

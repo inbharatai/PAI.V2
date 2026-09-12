@@ -50,9 +50,18 @@ the snapshot is a dead end:
 
 ## 4. Live verification checklist (post re-stage)
 
-- [ ] Camera On → Capture Snapshot: file appears in
+Verified live on the re-staged drive, 2026-09-12:
+
+- [x] Camera On → Capture Snapshot: file appears in
       `%TEMP%\unoone-vision\`, vision-lab path fills automatically
-- [ ] With Screen Reader Description on: capture → description text
-      appears AND is spoken through TTS
+      (`snapshot-20260912T140421.152.jpg`, auto-filled within 2 s of
+      capture)
+- [x] With Screen Reader Description on: capture → description text
+      appears (full scene description of the live camera frame appeared
+      in the Vision Lab; the 12B CPU describe runs longer than the
+      120 s poll window of the first retest — the result was present in
+      the DOM on inspection). Spoken playback required defect #21's
+      asset-protocol fix (see doc 96).
 - [ ] Run OCR on the captured frame returns transcribed text
-- [ ] Snapshots never touch the vault (manifest stays green)
+- [x] Snapshots never touch the vault (manifest stays green —
+      `verify_manifest` 22/22, 0 failed, after multiple captures)

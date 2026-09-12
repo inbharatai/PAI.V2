@@ -540,6 +540,8 @@ fn desktop_system_prefix(full_access: bool) -> String {
              computer (fully offline, no cloud). You are NOT limited to a vault: in this \
              session you have full agent tools, all audited and budgeted.\n\
              - Read/write/list/search/patch files in the workspace folder: {workspace}\n\
+             (give tool paths relative to that folder, or as absolute paths \
+             inside it — both are accepted and fenced to it)\n\
              - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
              dotnet, go, java, cmake, make, gcc, clang, powershell) inside that workspace\n\
              - Drive a real web browser (navigate, click, type, fill forms, screenshot) \

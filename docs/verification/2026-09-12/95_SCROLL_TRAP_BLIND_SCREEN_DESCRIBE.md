@@ -95,11 +95,21 @@ failures in it — re-tested exactly the way a user would:
 
 ## 4. Live verification checklist (post re-stage)
 
-- [ ] Accessibility view at default window size: scroll reaches the
-      Keyboard section at the bottom (scrollbar engages)
-- [ ] Camera: Stop Camera → Start Camera cycles repeatedly; capture
-      with the preview black/not ready shows the "not ready" message
-- [ ] Screen Reader Description on → Describe Screen: description of
-      the app's own UI appears AND is spoken
-- [ ] Screen capture file appears in `%TEMP%\unoone-vision\screen-*.png`
-- [ ] Manifest stays green (captures never touch the vault)
+Verified live on the drive after PR #24 re-stage (bundle `f7a6d3c`),
+2026-09-12 (`defect20-retest.js`, all 11 checks PASS):
+
+- [x] Accessibility view at default window size: scroll reaches the
+      Keyboard section at the bottom (scrollbar engages — measured
+      clientHeight 644 vs scrollHeight 1575, scrolled to max)
+- [x] Camera: Stop Camera → Start Camera cycles repeatedly (two full
+      cycles live-verified; Start button re-enables the moment the track
+      dies); capture with the preview not ready shows the "not ready"
+      message
+- [x] Screen Reader Description on → Describe Screen: description of
+      the app's own UI appears (the model read the Blind View panel text
+      back from the capture, ~151 s CPU inference) — spoken output
+      needed defect #21's asset-protocol fix, verified separately
+- [x] Screen capture file appears in `%TEMP%\unoone-vision\screen-*.png`
+      (`screen-20260912T152030.995.png` on disk)
+- [x] Manifest stays green (captures never touch the vault) —
+      `verify_manifest`: 22/22 entries, 0 failed, hmac valid

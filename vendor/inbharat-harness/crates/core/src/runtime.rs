@@ -891,14 +891,51 @@ impl Harness {
                                             passed: false,
                                             detail: failure.code.as_str().to_owned(),
                                         })?;
-                                        session.append(EventData::Failure {
-                                            code: failure.code.as_str().to_owned(),
-                                            operation: failure.operation.clone(),
-                                            message: failure.message.clone(),
-                                            retryable: failure.retryable,
-                                            attempt: failure.attempt,
-                                        })?;
-                                        return Err(failure);
+                                        // Defect #22 (live-caught 2026-09-12):
+                                        // one failed tool call used to abort
+                                        // the entire multi-step run — a single
+                                        // misspelled or escaped path killed
+                                        // harness_chat and the desktop fell
+                                        // back to a read-only agent. Only
+                                        // failures that make the loop itself
+                                        // unable to continue are fatal; every
+                                        // per-call failure (bad path, missing
+                                        // file, denied subprocess, invalid
+                                        // arguments) is handed back to the
+                                        // model as the tool's result so the
+                                        // next turn can self-correct. Each
+                                        // retry still consumes a step from
+                                        // the same bounded budget
+                                        // (`budget.reserve_step` above), so a
+                                        // flailing model cannot spin forever.
+                                        let fatal = matches!(
+                                            failure.code,
+                                            ErrorCode::Cancelled
+                                                | ErrorCode::BudgetExceeded
+                                                | ErrorCode::SessionCorrupt
+                                                | ErrorCode::Internal
+                                                | ErrorCode::SandboxUnavailable
+                                        );
+                                        if decision.level == ExecutionLevel::L1 || fatal {
+                                            // L1 is single-action by contract: a
+                                            // failed call leaves no output to
+                                            // return, so it stays fatal.
+                                            session.append(EventData::Failure {
+                                                code: failure.code.as_str().to_owned(),
+                                                operation: failure.operation.clone(),
+                                                message: failure.message.clone(),
+                                                retryable: failure.retryable,
+                                                attempt: failure.attempt,
+                                            })?;
+                                            return Err(failure);
+                                        }
+                                        messages.push(ModelMessage {
+                                            role: ModelRole::Tool,
+                                            content: format!(
+                                                "tool={} call={} error={}",
+                                                tool_id, call_id, failure
+                                            ),
+                                        });
                                     }
                                 }
                             }
