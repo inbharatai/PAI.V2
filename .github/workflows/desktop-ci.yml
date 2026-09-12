@@ -6,6 +6,7 @@ on:
     paths:
       - 'apps/desktop/**'
       - 'packages/**'
+      - 'vendor/inbharat-harness/**'
       - 'vendor/Inbharat-audiocpp/**'
       - 'scripts/check_speech_language_sync.py'
       - 'Cargo.toml'
@@ -16,6 +17,7 @@ on:
     paths:
       - 'apps/desktop/**'
       - 'packages/**'
+      - 'vendor/inbharat-harness/**'
       - 'vendor/Inbharat-audiocpp/**'
       - 'scripts/check_speech_language_sync.py'
       - 'Cargo.toml'
