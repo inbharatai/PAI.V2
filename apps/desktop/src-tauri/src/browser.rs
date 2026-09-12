@@ -130,6 +130,7 @@ impl BrowserActionResult {
 }
 
 /// Active browser session state
+#[derive(Clone)]
 pub struct BrowserSession {
     pub window_label: String,
     pub current_url: Option<String>,
@@ -665,6 +666,36 @@ pub fn browser_stop_session(
         screenshot_path: None,
         screenshot_sha256: None,
     })
+}
+
+/// Report whether a browser session is active. The BrowserWorkspace is a view
+/// inside the main window: switching views unmounts the component, and the
+/// remounted view must re-sync with the backend session state instead of
+/// assuming a fresh start — the session (and its separate OS window) is meant
+/// to survive view switches so the chat-side browser.act lane stays usable.
+#[tauri::command]
+pub fn browser_session_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<BrowserStateHolder>>,
+) -> Result<serde_json::Value, String> {
+    let (current_url, current_title) = session_snapshot_url_title(&state);
+    let session = with_session(&state, |session| session.clone())?;
+    let Some(session) = session else {
+        return Ok(serde_json::json!({
+            "active": false,
+            "window_label": null,
+            "current_url": null,
+            "current_title": null,
+        }));
+    };
+    let window_alive = app.get_webview_window(&session.window_label).is_some();
+    Ok(serde_json::json!({
+        "active": window_alive,
+        "window_label": session.window_label,
+        "current_url": current_url,
+        "current_title": current_title,
+        "window_alive": window_alive,
+    }))
 }
 
 /// Execute a typed action against the real webview and report what actually

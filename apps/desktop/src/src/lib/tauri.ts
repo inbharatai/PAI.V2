@@ -570,6 +570,8 @@ export const tauriApi = {
   startBrowserSession: (config: BrowserConfig | undefined, windowLabel: string) =>
     invoke<BrowserActionResult>('browser_start_session', { config, window_label: windowLabel }),
   stopBrowserSession: () => invoke<BrowserActionResult>('browser_stop_session'),
+  browserSessionStatus: () =>
+    invoke<{ active: boolean; window_label: string | null; current_url: string | null; current_title: string | null }>('browser_session_status'),
   executeBrowserAction: (action: BrowserAction, confirmed = false) =>
     invoke<BrowserActionResult>('browser_execute', { action, confirmed }),
   getBrowserBridgeScript: () => invoke<string>('get_browser_bridge_script'),

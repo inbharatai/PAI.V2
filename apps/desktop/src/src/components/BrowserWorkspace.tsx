@@ -15,9 +15,18 @@ export function BrowserWorkspace() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    return () => {
-      void stopSession();
-    };
+    // The session (and its separate OS window) lives in backend state and
+    // survives view switches — the chat-side browser.act lane depends on it.
+    // On mount, re-sync the UI with the backend instead of starting fresh;
+    // stopping happens only through the explicit Stop Session button.
+    void (async () => {
+      try {
+        const status = await tauriApi.browserSessionStatus();
+        setSessionActive(status.active);
+      } catch {
+        setSessionActive(false);
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
