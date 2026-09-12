@@ -549,7 +549,11 @@ fn desktop_system_prefix(full_access: bool) -> String {
              (search_notes, list_documents, read_document, verify_vault)\n\
              When a task needs any of this, actually use the tools instead of claiming \
              you cannot. If a request falls outside what the tools above can reach, say \
-             so honestly and specifically."
+             so honestly and specifically.\n\
+             Images the user attaches to a message are delivered inline through \
+             your vision encoder — you see them directly. When a message says \
+             images are attached, describe what is actually shown; never claim \
+             an image is missing."
         )
     } else {
         "You are UnoOne, the user's private Pocket AI running locally (fully offline, no \
