@@ -21,6 +21,8 @@ export function AccessibilityView() {
   const [cameraError, setCameraError] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  // Shared speech player (voice lab + spoken blind-aid descriptions).
+  const speechAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Vision lab state
   const [imagePath, setImagePath] = useState('');
@@ -146,7 +148,7 @@ export function AccessibilityView() {
     }
   }
 
-  function captureSnapshot() {
+  async function captureSnapshot() {
     const video = videoRef.current;
     if (!video || video.videoWidth === 0) return;
 
@@ -159,6 +161,21 @@ export function AccessibilityView() {
     ctx.drawImage(video, 0, 0);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
     setSnapshots(prev => [dataUrl, ...prev].slice(0, 8));
+
+    // Live-caught 2026-09-12 (defect #19): a blind aid's snapshot must reach
+    // the vision pipeline, not die as a preview-only DOM thumbnail. Persist
+    // the frame to disk so describe/OCR can read it; when the Screen Reader
+    // Description assist is on, describe it immediately and speak it.
+    setCameraError('');
+    try {
+      const savedPath = await tauriApi.saveVisionSnapshot(dataUrl);
+      setImagePath(savedPath);
+      if (screenReaderDescription) {
+        await runDescribeOn(savedPath);
+      }
+    } catch (err) {
+      setCameraError(`Snapshot save failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   useEffect(() => {
@@ -189,16 +206,48 @@ export function AccessibilityView() {
 
   async function runDescribe() {
     if (!imagePath.trim()) return;
+    await runDescribeOn(imagePath.trim());
+  }
+
+  /** Describe a saved image; in the blind-aid flow the result is SPOKEN, not
+   * just printed — a blind user cannot read the text box. */
+  async function runDescribeOn(path: string) {
     setIsProcessingVision(true);
     setVisionError('');
     setVisionResult('');
     try {
-      const result = await tauriApi.describeImage(imagePath.trim());
+      const result = await tauriApi.describeImage(path);
       setVisionResult(result.description);
+      await speakText(result.description);
     } catch (err) {
       setVisionError(`Describe failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsProcessingVision(false);
+    }
+  }
+
+  /** Speak text through the vault speech engine, reusing the voice-lab
+   * player element so the description is audible immediately. */
+  async function speakText(text: string) {
+    if (!vaultRoot || !text.trim()) return;
+    try {
+      const result = await tauriApi.synthesizeSpeech(text.trim(), vaultRoot, ttsLanguage);
+      if (result.audio_path) {
+        setTtsAudioPath(result.audio_path);
+        requestAnimationFrame(() => {
+          const el = speechAudioRef.current;
+          if (el) {
+            el.src = tauriApi.convertFileSrc(result.audio_path as string);
+            el.play().catch(() => {
+              // Autoplay may be refused without a fresh gesture; the controls
+              // on the audio element remain the user's manual fallback.
+            });
+          }
+        });
+      }
+    } catch {
+      // Speech is an enhancement for the description; the visible text
+      // result is the durable output, so a TTS failure is non-fatal.
     }
   }
 
@@ -419,7 +468,7 @@ export function AccessibilityView() {
                       {snapshots.length > 0 && (
                         <div style={{ marginTop: '12px' }}>
                           <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                            Captured snapshots (preview only)
+                            Captured snapshots (saved to the vision pipeline; Describe speaks them when Screen Reader Description is on)
                           </div>
                           <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                             {snapshots.map((src, idx) => (
@@ -811,6 +860,7 @@ export function AccessibilityView() {
                   {ttsAudioPath && (
                     <audio
                       controls
+                      ref={speechAudioRef}
                       src={tauriApi.convertFileSrc(ttsAudioPath)}
                       style={{
                         marginTop: '12px',
