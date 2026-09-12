@@ -1260,6 +1260,99 @@ pub fn process_document(document_id: String, vault_root: String) -> DocumentProc
     processor.process_document(&document_id)
 }
 
+/// Chat attachment the frontend could not interpret itself (PDF/DOCX/XLSX/
+/// PPTX), extracted server-side through the same audited parser lane the
+/// document processor uses. The bytes arrive base64-encoded from the
+/// WebView file picker (which deliberately does not hand out host paths),
+/// are decoded under a hard size cap, parsed from a temp file that is
+/// deleted afterwards, and only the extracted text ever reaches the chat.
+#[derive(Debug, Clone, Serialize)]
+pub struct ParsedAttachment {
+    pub kind: String,
+    pub text: String,
+    pub truncated: bool,
+}
+
+/// Hard cap on a single attached document. Generous for real documents,
+/// small enough that a hostile attachment cannot exhaust memory.
+const ATTACHED_DOCUMENT_MAX_BYTES: usize = 20 * 1024 * 1024;
+
+#[tauri::command]
+pub fn parse_attached_document(
+    filename: String,
+    data_base64: String,
+) -> Result<ParsedAttachment, String> {
+    use base64::Engine as _;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.trim())
+        .map_err(|e| format!("Attachment is not valid base64: {}", e))?;
+    if bytes.len() > ATTACHED_DOCUMENT_MAX_BYTES {
+        return Err(format!(
+            "Attachment is {} MiB; the limit is {} MiB.",
+            bytes.len() / (1024 * 1024),
+            ATTACHED_DOCUMENT_MAX_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let ext = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let kind = match ext.as_str() {
+        "pdf" => "pdf",
+        "docx" => "docx",
+        "xlsx" => "xlsx",
+        "pptx" => "pptx",
+        _ => "text",
+    }
+    .to_owned();
+
+    // Parse from a temp file: every extractor in this module is path-based
+    // (lopdf and the zip readers need seekable files). The file is deleted
+    // in the same breath as parsing finishes.
+    let temp_dir = std::env::temp_dir();
+    let temp_path = temp_dir.join(format!(
+        "unoone-chat-attach-{}-{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        if ext.is_empty() {
+            "txt".to_owned()
+        } else {
+            ext.clone()
+        }
+    ));
+    std::fs::write(&temp_path, &bytes)
+        .map_err(|e| format!("Failed to stage attachment for parsing: {}", e))?;
+    let text = match ext.as_str() {
+        "pdf" => extract_pdf_text(&temp_path),
+        "docx" => extract_docx_text(&temp_path),
+        "xlsx" => extract_xlsx_text(&temp_path),
+        "pptx" => extract_pptx_text(&temp_path),
+        // Plain-text and code attachments: utf-8 decode (lossy for binary
+        // junk) plus the shared truncation notice.
+        _ => Ok(unoone_text::truncate_bytes_with_notice(
+            &String::from_utf8_lossy(&bytes),
+            8000,
+        )),
+    };
+    let _ = std::fs::remove_file(&temp_path);
+
+    let text = text?;
+    // truncate_bytes_with_notice marks a cut with a trailing notice line;
+    // surfacing that as a flag lets the chat UI label the attachment.
+    const TRUNCATION_NOTICE: &str = "[Truncated — ";
+    Ok(ParsedAttachment {
+        kind,
+        truncated: text.contains(TRUNCATION_NOTICE),
+        text,
+    })
+}
+
 #[tauri::command]
 pub fn search_memories(
     query: MemorySearchQuery,
@@ -1354,5 +1447,84 @@ mod migrated_readpath_tests {
         // Unlocked-handle absence: all three paths return empty/None.
         assert!(search_migrated_contents(&query, &root, None).is_empty());
         assert!(list_migrated_documents(&root, None).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod parse_attached_document_tests {
+    use super::*;
+
+    fn b64(data: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(data)
+    }
+
+    #[test]
+    fn text_attachment_round_trips() {
+        let parsed = parse_attached_document(
+            "notes.md".to_owned(),
+            b64(b"# Title\nBody text for the chat attachment."),
+        )
+        .expect("parse");
+        assert_eq!(parsed.kind, "text");
+        assert!(!parsed.truncated);
+        assert!(parsed.text.contains("Body text for the chat attachment."));
+    }
+
+    #[test]
+    fn long_text_attachment_is_truncated_with_a_notice() {
+        let long = "word ".repeat(10_000);
+        let parsed =
+            parse_attached_document("big.txt".to_owned(), b64(long.as_bytes())).expect("parse");
+        assert!(parsed.truncated);
+        assert!(parsed.text.contains("[Truncated — "));
+    }
+
+    #[test]
+    fn oversized_attachment_is_rejected_before_parsing() {
+        let mut data = vec![0u8; ATTACHED_DOCUMENT_MAX_BYTES + 1];
+        data[0] = b'x';
+        let err = parse_attached_document("huge.bin".to_owned(), b64(&data)).unwrap_err();
+        assert!(err.contains("limit"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn invalid_base64_is_rejected() {
+        let err =
+            parse_attached_document("x.txt".to_owned(), "!!!not-base64!!!".to_owned()).unwrap_err();
+        assert!(err.contains("base64"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn image_bytes_reported_as_text_do_not_panic() {
+        // The chat frontend routes images through the vision lane; if
+        // something posts raw PNG bytes here anyway, the lossy utf-8 decode
+        // path must return text (garbled is fine), not an error or panic.
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff];
+        let parsed = parse_attached_document("photo.png".to_owned(), b64(&png)).expect("parse");
+        assert_eq!(parsed.kind, "text");
+    }
+
+    #[test]
+    fn pdf_attachment_extracts_real_text() {
+        // Hand-built minimal PDF (tests/fixtures/minimal-report.pdf) with
+        // one `(sentence) Tj` per page — the exact shape the lopdf-based
+        // extractor parses — so the PDF attachment lane has a regression
+        // test that does not depend on an external PDF library.
+        let pdf = include_bytes!("../tests/fixtures/minimal-report.pdf");
+        let parsed =
+            parse_attached_document("minimal-report.pdf".to_owned(), b64(pdf)).expect("parse");
+        assert_eq!(parsed.kind, "pdf");
+        assert!(!parsed.truncated);
+        assert!(
+            parsed.text.contains("Meridian Foods"),
+            "extraction missed the company name: {:?}",
+            parsed.text
+        );
+        assert!(
+            parsed.text.contains("Howrah"),
+            "extraction missed the second page: {:?}",
+            parsed.text
+        );
     }
 }

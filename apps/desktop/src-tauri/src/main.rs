@@ -174,6 +174,7 @@ fn main() {
             capability::get_desktop_capability_profile,
             // Documents and memory
             documents::list_documents,
+            documents::parse_attached_document,
             documents::process_document,
             documents::search_memories,
             migrate_plaintext_documents_to_vault,

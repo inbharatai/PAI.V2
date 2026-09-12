@@ -1,0 +1,7 @@
+# Binary fixtures must never go through line-ending conversion: a PDF's
+# internal byte offsets (xref table) break if any LF becomes CRLF.
+*.pdf -text
+*.png -text
+*.jpg -text
+*.wav -text
+*.gguf -text
