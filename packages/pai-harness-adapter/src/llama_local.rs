@@ -57,7 +57,8 @@ impl PaiLlamaLocalProvider {
         media_type: impl Into<String>,
         base64_bytes: impl Into<String>,
     ) -> Self {
-        self.attachments.insert(id.into(), (media_type.into(), base64_bytes.into()));
+        self.attachments
+            .insert(id.into(), (media_type.into(), base64_bytes.into()));
         self
     }
 
@@ -77,7 +78,6 @@ impl PaiLlamaLocalProvider {
             message,
         )
     }
-
 }
 
 /// Parses the Harness tool-result transcript format
@@ -202,16 +202,15 @@ fn build_openai_messages(
             "text": messages[last_user].get("content").cloned().unwrap_or(JsonValue::String(String::new())),
         })];
         for attachment in attachments {
-            let (media_type, base64_bytes) = local_attachments.get(&attachment.id).ok_or_else(
-                || {
+            let (media_type, base64_bytes) =
+                local_attachments.get(&attachment.id).ok_or_else(|| {
                     Failure::new(
                         ErrorCode::ProviderFailed,
                         FailureClass::Provider,
                         "pai.model.attachments",
                         format!("attachment bytes are missing for id {}", attachment.id),
                     )
-                },
-            )?;
+                })?;
             parts.push(json!({
                 "type": "image_url",
                 "image_url": {
@@ -816,7 +815,10 @@ mod transcript_tests {
             .expect("build succeeds");
         // system, user, assistant(tool_calls), tool, tool, user
         assert_eq!(messages.len(), 6, "{messages:?}");
-        assert_eq!(messages[0], json!({"role": "system", "content": "system prefix"}));
+        assert_eq!(
+            messages[0],
+            json!({"role": "system", "content": "system prefix"})
+        );
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(messages[2]["role"], "assistant");
         assert!(messages[2]["content"].is_null());
@@ -826,10 +828,7 @@ mod transcript_tests {
         assert_eq!(calls[0]["id"], "r-1-2-1");
         assert_eq!(messages[3]["role"], "tool");
         assert_eq!(messages[3]["tool_call_id"], "r-1-2-1");
-        assert_eq!(
-            messages[3]["content"],
-            "Wrote 41 bytes to live-test.txt"
-        );
+        assert_eq!(messages[3]["content"], "Wrote 41 bytes to live-test.txt");
         assert_eq!(messages[4]["role"], "tool");
         assert_eq!(messages[4]["tool_call_id"], "r-1-3-1");
         assert_eq!(messages[5]["role"], "user");
@@ -838,10 +837,13 @@ mod transcript_tests {
     #[test]
     fn non_transcript_tool_messages_pass_through_without_fabricated_calls() {
         let history = vec![message(ModelRole::Tool, "raw legacy tool content")];
-        let messages = build_openai_messages("", &history, &[], &Default::default())
-            .expect("build succeeds");
+        let messages =
+            build_openai_messages("", &history, &[], &Default::default()).expect("build succeeds");
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0], json!({"role": "tool", "content": "raw legacy tool content"}));
+        assert_eq!(
+            messages[0],
+            json!({"role": "tool", "content": "raw legacy tool content"})
+        );
     }
 
     #[test]
@@ -850,8 +852,8 @@ mod transcript_tests {
             message(ModelRole::User, "hello"),
             message(ModelRole::Assistant, "hi there"),
         ];
-        let messages = build_openai_messages("", &history, &[], &Default::default())
-            .expect("build succeeds");
+        let messages =
+            build_openai_messages("", &history, &[], &Default::default()).expect("build succeeds");
         assert_eq!(
             messages,
             vec![
@@ -952,29 +954,34 @@ mod transcript_tests {
         let provider = PaiLlamaLocalProvider::new("test-model", port)
             .expect("build provider")
             .with_attachment("attach-1", "image/png", "aGVsbG8=");
-        let request = vision_request(vec![
-            inbharat_harness_core::providers::AttachmentMetadata {
-                id: "attach-1".to_owned(),
-                media_type: "image/png".to_owned(),
-                byte_len: 5,
-                digest: "deadbeef".to_owned(),
-                display_name: None,
-            },
-        ]);
+        let request = vision_request(vec![inbharat_harness_core::providers::AttachmentMetadata {
+            id: "attach-1".to_owned(),
+            media_type: "image/png".to_owned(),
+            byte_len: 5,
+            digest: "deadbeef".to_owned(),
+            display_name: None,
+        }]);
         let cancel = CancellationToken::new();
         let response = provider
             .stream(&request, &cancel, &mut |_chunk| Ok(()))
             .expect("stream succeeds");
         assert_eq!(response.text, "ok");
-        let body = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("captured");
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("captured");
         let parsed: JsonValue = serde_json::from_str(&body).expect("posted body is JSON");
         let user = &parsed["messages"][1];
         assert_eq!(user["role"], "user", "{body}");
-        let parts = user["content"].as_array().expect("user content is multimodal parts");
+        let parts = user["content"]
+            .as_array()
+            .expect("user content is multimodal parts");
         assert_eq!(parts[0]["type"], "text");
         assert_eq!(parts[0]["text"], "what is in this image?");
         assert_eq!(parts[1]["type"], "image_url", "{body}");
-        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,aGVsbG8=");
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
     }
 
     /// A metadata attachment without matching local bytes must fail closed —
@@ -982,17 +989,14 @@ mod transcript_tests {
     #[test]
     fn attachments_without_local_bytes_fail_closed() {
         let (port, _rx) = capture_server();
-        let provider =
-            PaiLlamaLocalProvider::new("test-model", port).expect("build provider");
-        let request = vision_request(vec![
-            inbharat_harness_core::providers::AttachmentMetadata {
-                id: "attach-1".to_owned(),
-                media_type: "image/png".to_owned(),
-                byte_len: 5,
-                digest: "deadbeef".to_owned(),
-                display_name: None,
-            },
-        ]);
+        let provider = PaiLlamaLocalProvider::new("test-model", port).expect("build provider");
+        let request = vision_request(vec![inbharat_harness_core::providers::AttachmentMetadata {
+            id: "attach-1".to_owned(),
+            media_type: "image/png".to_owned(),
+            byte_len: 5,
+            digest: "deadbeef".to_owned(),
+            display_name: None,
+        }]);
         let cancel = CancellationToken::new();
         let error = provider
             .stream(&request, &cancel, &mut |_chunk| Ok(()))

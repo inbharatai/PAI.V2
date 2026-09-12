@@ -12,16 +12,15 @@ use crate::{
     safety::{DesktopSafetyGuard, SafetyGuardState, ToolAction},
     security, DesktopVaultState,
 };
+use inbharat_harness_core::providers::{EnforcementQuality, SandboxGrant, SandboxRequest};
 use inbharat_harness_core::{
     tools::{ListFilesTool, ReadFileTool, RunProcessTool, WriteFileTool},
     AttachmentMetadata, BudgetLimits, CancellationToken, Capability, CapabilitySet,
     ConfirmationMode, ConfirmationOutcome, Determinism, ErrorCode, ExecutionLevel, Failure,
     FailureClass, HarnessBuilder, HarnessResult, LocalExecutionBroker, MemoryOptions,
     PermissionDecision, PermissionProvider, RootedFs, RunOptions, SandboxProvider, SideEffect,
-    StaticConfirmationProvider, Tool, ToolArguments, ToolContext, ToolManifest, ToolOutput,
-    Value,
+    StaticConfirmationProvider, Tool, ToolArguments, ToolContext, ToolManifest, ToolOutput, Value,
 };
-use inbharat_harness_core::providers::{EnforcementQuality, SandboxGrant, SandboxRequest};
 use pai_harness_adapter::{
     PaiLlamaLocalProvider, PaiVaultMemoryProvider, PaiVaultMemoryProviderConfig,
 };
@@ -1446,23 +1445,22 @@ pub async fn harness_chat(
     // Read the verified model id and port under the tokio lock. ModelManager is
     // intentionally not Clone (it owns the llama-server child); the Harness
     // bridge only needs the identity string + port, which are read by reference.
-    let (model_id, port) = {
-        let guard = model_state.manager.lock().await;
-        let manager = guard
-            .as_ref()
-            .ok_or_else(|| "Local model is not running".to_owned())?;
-        let model_id = registry_safe_model_id(
-            manager
-                .running_model_id()
-                .as_deref()
-                .ok_or_else(|| "Local model has not passed identity verification".to_owned())?,
-        );
-        let port = *model_state
-            .server_port
-            .lock()
-            .map_err(|_| "Model port state lock failed".to_owned())?;
-        (model_id, port)
-    };
+    let (model_id, port) =
+        {
+            let guard = model_state.manager.lock().await;
+            let manager = guard
+                .as_ref()
+                .ok_or_else(|| "Local model is not running".to_owned())?;
+            let model_id =
+                registry_safe_model_id(manager.running_model_id().as_deref().ok_or_else(|| {
+                    "Local model has not passed identity verification".to_owned()
+                })?);
+            let port = *model_state
+                .server_port
+                .lock()
+                .map_err(|_| "Model port state lock failed".to_owned())?;
+            (model_id, port)
+        };
 
     let vault_root = vault_state
         .vault_root
@@ -1715,10 +1713,7 @@ mod workspace_tool_tests {
             "D333B368BE6CD655563FCE18AEDE26027E208FDB13816D35EB06983CE054044B.gguf"
         );
         let drive = "\\\\?\\D:\\UNOONE\\MODELS\\DESKTOP\\Gemma-12B\\gemma-4-12B-it-Q4_K_M.gguf";
-        assert_eq!(
-            registry_safe_model_id(drive),
-            "gemma-4-12B-it-Q4_K_M.gguf"
-        );
+        assert_eq!(registry_safe_model_id(drive), "gemma-4-12B-it-Q4_K_M.gguf");
         // POSIX-style launch paths reduce to the same basename.
         assert_eq!(
             registry_safe_model_id("models/gemma-4-12b-it-q4_k_m.gguf"),
@@ -1812,7 +1807,10 @@ mod workspace_tool_tests {
             capabilities: CapabilitySet::from_slice(&[Capability::FileWrite]),
             require_security_boundary: false,
         });
-        assert!(denied_write.is_err(), "writes must fail closed in chat mode");
+        assert!(
+            denied_write.is_err(),
+            "writes must fail closed in chat mode"
+        );
         let denied_process = read_only.resolve(&SandboxRequest {
             world_id: "w2".to_owned(),
             capabilities: CapabilitySet::from_slice(&[Capability::FileRead]),
