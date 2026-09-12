@@ -426,6 +426,11 @@ html, body, #root {
 
 .main-body {
   flex: 1;
+  /* Live-caught 2026-09-12 (defect #20): without min-height:0 a column flex
+     child grows to its content height inside the overflow:hidden
+     .main-content, so tall views (Accessibility etc.) get clipped with no
+     scrollbar — everything below the fold is unreachable. */
+  min-height: 0;
   overflow-y: auto;
   padding: 24px;
 }

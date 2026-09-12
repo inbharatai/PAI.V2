@@ -538,10 +538,13 @@ fn poll_page_ready(
     }
 }
 
-fn capture_screenshot(
+/// Encode the on-screen region of a webview window as PNG bytes.
+/// Shared by the browser-lane Screenshot action and the blind-view
+/// "describe what's on the screen" assist (defect #20).
+pub fn capture_window_png(
     app: &tauri::AppHandle,
     window_label: &str,
-) -> Result<(String, String), String> {
+) -> Result<Vec<u8>, String> {
     let window = app
         .get_webview_window(window_label)
         .ok_or_else(|| format!("Webview window '{}' not found", window_label))?;
@@ -574,7 +577,14 @@ fn capture_screenshot(
             .write_image_data(image.as_raw())
             .map_err(|e| format!("PNG encode error: {}", e))?;
     }
+    Ok(png_bytes)
+}
 
+fn capture_screenshot(
+    app: &tauri::AppHandle,
+    window_label: &str,
+) -> Result<(String, String), String> {
+    let png_bytes = capture_window_png(app, window_label)?;
     let sha = sha2_hex(&png_bytes);
     let dir = std::env::temp_dir().join("unoone-browser");
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create screenshot dir: {}", e))?;
