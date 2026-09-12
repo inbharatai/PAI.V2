@@ -283,6 +283,49 @@ pub async fn describe_image(
     })
 }
 
+/// Save a captured camera frame (a `data:image/jpeg;base64,...` data URL from
+/// the Vision Lab's canvas snapshot) to a file the vision pipeline can read,
+/// and return its path. Live-caught 2026-09-12 (defect #19): captured frames
+/// used to live only as DOM thumbnails — a blind user's snapshot could never
+/// reach `describe_image`/`perform_ocr`, which take a file path. Snapshots are
+/// written to the host temp area (never the read-mostly vault package).
+#[tauri::command]
+pub fn save_vision_snapshot(data_url: String) -> Result<String, String> {
+    let (header, payload) = data_url
+        .split_once(',')
+        .ok_or_else(|| "Snapshot data URL is malformed (no comma separator)".to_string())?;
+    if !header.starts_with("data:image/") {
+        return Err(format!("Snapshot data URL is not an image: {header}"));
+    }
+    let mime_subtype = header
+        .strip_prefix("data:image/")
+        .and_then(|rest| rest.split(';').next())
+        .unwrap_or("jpeg")
+        .to_owned();
+    let extension = match mime_subtype.as_str() {
+        "png" => "png",
+        "gif" => "gif",
+        "webp" => "webp",
+        "bmp" => "bmp",
+        _ => "jpg",
+    };
+    let image_bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .map_err(|e| format!("Snapshot payload is not valid base64: {e}"))?;
+    if image_bytes.is_empty() {
+        return Err("Snapshot payload is empty".to_string());
+    }
+    let dir = std::env::temp_dir().join("unoone-vision");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create snapshot dir: {e}"))?;
+    let filename = format!(
+        "snapshot-{}.{extension}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3f")
+    );
+    let path = dir.join(filename);
+    std::fs::write(&path, &image_bytes).map_err(|e| format!("Cannot write snapshot: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// Camera info — enumerates available video capture devices.
 /// Actual frame capture uses the frontend WebView + getUserMedia API.
 #[tauri::command]
@@ -359,4 +402,42 @@ pub fn encode_image_for_vision(image_path: String) -> Result<String, String> {
 
     // Return as data URI for direct use in vision requests
     Ok(format!("data:{};base64,{}", mime_type, base64_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Defect #19: a captured camera frame (data URL) must land on disk as a
+    /// decodable image the vision pipeline can read, with an extension that
+    /// matches its MIME type.
+    #[test]
+    fn save_vision_snapshot_persists_a_readable_jpeg() {
+        // 1x1 red JPEG (smallest valid baseline JPEG).
+        let jpeg: &[u8] = &[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+        ];
+        let mut data_url = String::from("data:image/jpeg;base64,");
+        data_url.push_str(&base64::engine::general_purpose::STANDARD.encode(jpeg));
+
+        let path = save_vision_snapshot(data_url).expect("snapshot save");
+        let saved = PathBuf::from(&path);
+        assert!(saved.exists(), "snapshot file must exist at {path}");
+        assert_eq!(saved.extension().and_then(|e| e.to_str()), Some("jpg"));
+        assert!(
+            saved.starts_with(std::env::temp_dir().join("unoone-vision")),
+            "snapshots must stay in the host temp area, not the vault"
+        );
+        assert_eq!(std::fs::read(&saved).expect("read back"), jpeg);
+        std::fs::remove_file(&saved).ok();
+    }
+
+    #[test]
+    fn save_vision_snapshot_rejects_non_image_and_garbage() {
+        assert!(save_vision_snapshot("not a data url".to_string()).is_err());
+        assert!(
+            save_vision_snapshot("data:image/png;base64,!!!not-base64!!!".to_string()).is_err()
+        );
+    }
 }

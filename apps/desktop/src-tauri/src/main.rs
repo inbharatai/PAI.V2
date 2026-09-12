@@ -183,6 +183,7 @@ fn main() {
             accessibility::perform_ocr,
             accessibility::describe_image,
             accessibility::get_camera_info,
+            accessibility::save_vision_snapshot,
             accessibility::encode_image_for_vision,
             // Security hardening
             security::generate_manifest,

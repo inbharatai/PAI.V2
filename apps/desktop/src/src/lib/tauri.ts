@@ -504,6 +504,8 @@ export const tauriApi = {
   performOcr: (imagePath: string) => invoke<OcrResult>('perform_ocr', { image_path: imagePath }),
   describeImage: (imagePath: string) => invoke<BlindViewResult>('describe_image', { image_path: imagePath }),
   getCameraInfo: () => invoke<CameraInfo>('get_camera_info'),
+  saveVisionSnapshot: (dataUrl: string) =>
+    invoke<string>('save_vision_snapshot', { data_url: dataUrl }),
   encodeImageForVision: (imagePath: string) => invoke<string>('encode_image_for_vision', { image_path: imagePath }),
 
   // Security

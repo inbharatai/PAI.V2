@@ -45,29 +45,61 @@ export function BrowserWorkspace() {
     }
   };
 
-  const startSession = async () => {
+  const startSession = async (): Promise<boolean> => {
+    if (sessionActive) return true;
     setError('');
-    setLastResult('');
     try {
       const bind = await tauriApi.startBrowserSession(undefined, WEBVIEW_LABEL);
       if (!bind.success) {
         throw new Error(bind.error || 'Backend refused to bind a browser session');
+      }
+      // The OS window may already exist (the user closed the main session flow
+      // and came back, or the backend session outlived the view switch). Reuse
+      // it instead of colliding on the label.
+      const existing = await WebviewWindow.getByLabel(WEBVIEW_LABEL).catch(() => null);
+      if (existing) {
+        setSessionActive(true);
+        await existing.setFocus();
+        return true;
       }
       const webview = new WebviewWindow(WEBVIEW_LABEL, {
         url: 'about:blank',
         width: 1280,
         height: 800,
         title: 'Browser Workspace',
+        center: true,
       });
-      webview.once('tauri://error', e => {
-        setOpError(e instanceof Error ? e : new Error(String(e)));
-      });
-      webview.once('tauri://created', () => {
-        setSessionActive(true);
-        void injectBridge();
+      // Live-caught 2026-09-12 (defect #18): resolve when the window exists so
+      // callers can navigate immediately, and never leave the new window
+      // hidden behind the main window — a page that loads unseen reads as
+      // "it failed" to the user.
+      return await new Promise<boolean>(resolve => {
+        webview.once('tauri://error', e => {
+          setOpError(e instanceof Error ? e : new Error(String(e)));
+          resolve(false);
+        });
+        webview.once('tauri://created', () => {
+          setSessionActive(true);
+          void injectBridge();
+          void webview.setFocus();
+          resolve(true);
+        });
       });
     } catch (e) {
       setOpError(e);
+      return false;
+    }
+  };
+
+  /** Bring the browser window in front of the main window (non-fatal). */
+  const focusBrowserWindow = async () => {
+    try {
+      const webview = await WebviewWindow.getByLabel(WEBVIEW_LABEL);
+      if (webview) {
+        await webview.setFocus();
+      }
+    } catch {
+      // The window may already be closing; the action result carries the truth.
     }
   };
 
@@ -132,7 +164,17 @@ export function BrowserWorkspace() {
   };
 
   const navigate = async () => {
+    // Live-caught 2026-09-12 (defect #18): typing a URL and pressing Navigate
+    // without a session showed a developer-facing "Call browser_start_session
+    // first" failure. A user should never need to know sessions exist — start
+    // one automatically, then navigate, then show the page in front.
+    const ready = await startSession();
+    if (!ready) {
+      setError('Could not open the browser window — see the error above.');
+      return;
+    }
     await runAction({ type: 'Navigate', url });
+    await focusBrowserWindow();
   };
 
   const extractText = async () => {
