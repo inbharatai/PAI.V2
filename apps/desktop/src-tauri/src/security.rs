@@ -268,6 +268,13 @@ impl SecurityManager {
 
         for entry in &manifest.entries {
             let file_path = PathBuf::from(&entry.path);
+            // Baselines generated before the accessibility.json exclusion may
+            // still carry its (now stale) entry — user preference changes are
+            // runtime mutations by design, not tampering, so skip instead of
+            // failing the whole gate.
+            if self.is_runtime_mutated_path(&file_path) {
+                continue;
+            }
             if !file_path.exists() {
                 failed += 1;
                 errors.push(format!("Missing file: {}", entry.path));
@@ -414,6 +421,11 @@ impl SecurityManager {
     /// - `config/manifest.json` — the manifest cannot hash itself; without
     ///   this skip, regenerating the baseline would pin the previous
     ///   baseline file's bytes as an entry of the new one.
+    /// - `config/accessibility.json` — user preferences (voice language,
+    ///   contrast, font scale); `set_accessibility_status` rewrites this
+    ///   file on every preference change (live-caught 2026-09-12: picking
+    ///   the Hindi voice in the Accessibility view broke the package
+    ///   integrity gate and blocked TTS/STT for the rest of the session).
     fn is_runtime_mutated_path(&self, path: &Path) -> bool {
         let vault = PathBuf::from(&self.vault_root).join("VAULT");
         let rel = match path.strip_prefix(&vault) {
@@ -424,9 +436,11 @@ impl SecurityManager {
         match components.next() {
             Some(component) if component.as_os_str() == "locks" => true,
             Some(component) if component.as_os_str() == "recordings" => true,
-            Some(component) if component.as_os_str() == "config" => components
-                .next()
-                .is_some_and(|name| name.as_os_str() == "manifest.json"),
+            Some(component) if component.as_os_str() == "config" => {
+                components.next().is_some_and(|name| {
+                    name.as_os_str() == "manifest.json" || name.as_os_str() == "accessibility.json"
+                })
+            }
             _ => false,
         }
     }
@@ -588,6 +602,11 @@ mod baseline_tests {
             "{\"previous\":\"baseline\"}",
         )
         .expect("old manifest");
+        std::fs::write(
+            vault.join("config").join("accessibility.json"),
+            "{\"tts_language\":\"en\",\"stt_language\":\"en\"}",
+        )
+        .expect("accessibility prefs");
         dir
     }
 
@@ -621,7 +640,12 @@ mod baseline_tests {
             paths.iter().any(|p| p.ends_with("vault.id")),
             "identity must stay in the baseline: {paths:?}"
         );
-        for fragment in ["/locks/", "/recordings/", "manifest.json"] {
+        for fragment in [
+            "/locks/",
+            "/recordings/",
+            "manifest.json",
+            "accessibility.json",
+        ] {
             assert!(
                 paths
                     .iter()
@@ -662,6 +686,78 @@ mod baseline_tests {
         assert!(
             report.entries_failed > 0,
             "tampering with static vault content must still be detected"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Live-caught 2026-09-12: picking the Hindi voice in the Accessibility
+    /// view rewrote config/accessibility.json via `set_accessibility_status`
+    /// and the integrity gate blocked TTS/STT for the rest of the session.
+    /// Preference writes must never fail the baseline — new baselines exclude
+    /// the file, and old baselines that still carry the entry skip it.
+    #[test]
+    fn verification_survives_accessibility_settings_change() {
+        let root = temp_vault("prefs");
+        let manager = SecurityManager::new(&root.to_string_lossy());
+        let manifest = manager.generate_manifest().expect("generate baseline");
+        // New baselines must not hash the preferences file at all.
+        assert!(
+            manifest
+                .entries
+                .iter()
+                .all(|e| !e.path.replace('\\', "/").ends_with("accessibility.json")),
+            "accessibility preferences leaked into the baseline: {:?}",
+            manifest.entries.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+        // Simulate the user changing the voice language mid-session.
+        std::fs::write(
+            root.join("VAULT").join("config").join("accessibility.json"),
+            "{\"tts_language\":\"hi\",\"stt_language\":\"hi\"}",
+        )
+        .expect("language change");
+        let report = manager.verify_manifest(&manifest).expect("verify runs");
+        assert!(
+            report.entries_failed == 0 && report.manifest_valid,
+            "a preference change must not fail the baseline: {report:?}"
+        );
+        // An OLD baseline (pre-exclusion) still carrying a stale entry for the
+        // file must also verify green — the entry is skipped, not failed.
+        let mut old_style = manager.generate_manifest().expect("regenerate");
+        assert!(
+            old_style
+                .entries
+                .iter()
+                .all(|e| !e.path.replace('\\', "/").ends_with("accessibility.json")),
+            "regenerated baseline must exclude preferences too"
+        );
+        old_style.entries.push(ManifestEntry {
+            path: root
+                .join("VAULT")
+                .join("config")
+                .join("accessibility.json")
+                .to_string_lossy()
+                .to_string(),
+            sha256: "stale-hash-from-an-old-baseline".to_string(),
+            entry_hmac: "ignored-by-the-skip".to_string(),
+            size_bytes: 2,
+            created_at: String::new(),
+            modified_at: String::new(),
+            version: 2,
+        });
+        // Re-sign so the old-style manifest passes its own signature checks.
+        let entries_json = serde_json::to_string(&old_style.entries).expect("serialize entries");
+        old_style.manifest_sha256 = manager.compute_sha256(entries_json.as_bytes());
+        old_style.total_entries = old_style.entries.len() as u32;
+        let signing_key = manager.get_signing_key().expect("signing key");
+        old_style.manifest_hmac = manager
+            .compute_hmac(old_style.manifest_sha256.as_bytes(), &signing_key)
+            .expect("sign manifest");
+        let report = manager
+            .verify_manifest(&old_style)
+            .expect("verify runs on old-style manifest");
+        assert!(
+            report.entries_failed == 0,
+            "a stale preferences entry from an old baseline must be skipped: {report:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
