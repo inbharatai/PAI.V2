@@ -611,6 +611,29 @@ fn registry_safe_model_id(reported: &str) -> String {
 /// The coding/automation workspace root. Full-access file tools and
 /// subprocesses are rooted here — never the encrypted pendrive vault — so
 /// agent writes land on rewritable host disk, not the read-mostly package.
+/// The L3 full-access session budget. A backstop against pathological loops,
+/// not a task cap: hundreds of steps, thousands of tool calls, hours of wall
+/// time, 64 MiB of accumulated tool output. Live-caught 2026-09-12 (defect
+/// #16): this shape must stay within the harness's hard safety bounds — the
+/// 64 MiB cumulative output figure was once rejected by the validator, every
+/// full-access chat call threw, and the UI silently fell back to the
+/// read-only vault agent (the model then truthfully told the user it could
+/// not write files). `full_access_budget_is_accepted_by_the_harness` pins it.
+fn full_access_budget() -> BudgetLimits {
+    BudgetLimits {
+        max_steps: 512,
+        max_tool_calls: 1024,
+        max_rounds: 8,
+        max_jobs: 0,
+        max_subagent_depth: 0,
+        max_output_bytes: 64 * 1024 * 1024,
+        max_duration: Duration::from_secs(21_600),
+    }
+}
+
+/// The coding/automation workspace root. Full-access file tools and
+/// subprocesses are rooted here — never the encrypted pendrive vault — so
+/// agent writes land on rewritable host disk, not the read-mostly package.
 fn workspace_root() -> Result<PathBuf, String> {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -1619,15 +1642,7 @@ pub async fn harness_chat(
             // task cap: hundreds of steps, thousands of tool calls,
             // hours of wall time, 64 MiB of accumulated tool output.
             options.explicit_level = Some(ExecutionLevel::L3);
-            options.budget = Some(BudgetLimits {
-                max_steps: 512,
-                max_tool_calls: 1024,
-                max_rounds: 8,
-                max_jobs: 0,
-                max_subagent_depth: 0,
-                max_output_bytes: 64 * 1024 * 1024,
-                max_duration: Duration::from_secs(21_600),
-            });
+            options.budget = Some(full_access_budget());
         }
         let cancel = CancellationToken::new();
         let (outcome, _session) = harness
@@ -1700,6 +1715,42 @@ mod workspace_tool_tests {
             .iter()
             .map(|(key, value)| ((*key).to_owned(), Value::String((*value).to_owned())))
             .collect()
+    }
+
+    /// Defect #16 regression (live-caught 2026-09-12): the production L3
+    /// full-access budget must be accepted by the harness's run-options
+    /// validation. When it was rejected (64 MiB cumulative output vs the old
+    /// 8 MiB validator cap), every full-access harness_chat call threw and
+    /// the UI silently fell back to the read-only vault agent — the model
+    /// then truthfully told users it could not write files or run commands,
+    /// even with the full-access toggle on.
+    #[test]
+    fn full_access_budget_is_accepted_by_the_harness() {
+        let harness = HarnessBuilder::local(".")
+            .expect("local harness builder")
+            .register_model(Arc::new(inbharat_harness_core::EchoModelProvider::default()))
+            .expect("register echo model")
+            .confirmation_provider(Arc::new(StaticConfirmationProvider {
+                outcome: ConfirmationOutcome::AllowedOnce,
+            }))
+            .build();
+        let options = RunOptions {
+            actor: "local-user".to_owned(),
+            provider: "echo".to_owned(),
+            model: "echo-v1".to_owned(),
+            explicit_level: Some(ExecutionLevel::L3),
+            budget: Some(full_access_budget()),
+            capabilities: CapabilitySet::all_local(),
+            ..RunOptions::default()
+        };
+        let (outcome, session) = harness
+            .run("build something", &options, &CancellationToken::new())
+            .expect("the production full-access budget must survive run-options validation");
+        let _ = outcome.steps;
+        assert!(
+            session.replay().expect("replay session").balanced,
+            "the session must stay audit-balanced under the production budget"
+        );
     }
 
     #[test]

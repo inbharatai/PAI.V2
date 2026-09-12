@@ -727,6 +727,12 @@ impl Harness {
                     system: system.clone(),
                 })?;
                 session.checkpoint()?;
+                // The session budget's output cap is cumulative across the
+                // whole run (Budget::account_output, up to the 64 MiB L3
+                // backstop), while any single model call is additionally
+                // bounded by the provider request cap — model.prepare rejects
+                // requests above 8 MiB. Clamp per call, keep the session total.
+                let per_call_output_bytes = budget.limits().max_output_bytes.min(8 * 1024 * 1024);
                 let request = ModelRequest {
                     request_id: request_id.clone(),
                     provider: options.provider.clone(),
@@ -735,7 +741,7 @@ impl Harness {
                     messages: messages.clone(),
                     tools: model_tools,
                     attachments: options.attachments.clone(),
-                    max_output_bytes: budget.limits().max_output_bytes,
+                    max_output_bytes: per_call_output_bytes,
                 };
                 let mut prepared = self.models.prepare(request)?;
                 self.metrics.record_model_call();
@@ -743,7 +749,7 @@ impl Harness {
                 let mut chunk_index = 0_u32;
                 let mut streamed_chunks = 0_u32;
                 let mut streamed_bytes = 0_usize;
-                let stream_limit = budget.limits().max_output_bytes;
+                let stream_limit = per_call_output_bytes;
                 let result = prepared.stream(cancel, &mut |chunk| {
                     streamed_chunks = streamed_chunks.saturating_add(1);
                     if streamed_chunks > 16_384 {
@@ -1286,7 +1292,14 @@ fn validate_run_options(options: &RunOptions) -> HarnessResult<()> {
             || limits.max_jobs > 1_000
             || limits.max_subagent_depth > 16
             || limits.max_output_bytes == 0
-            || limits.max_output_bytes > 8 * 1024 * 1024
+            // The cumulative session budget may far exceed the per-item 8 MiB
+            // output cap (tools.rs/providers.rs keep that invariant): a
+            // long L3 coding session accumulates megabytes of audited tool
+            // output across hundreds of steps. Live-caught 2026-09-12: the
+            // desktop full-access lane requested a 64 MiB session budget and
+            // this validator rejected it — every full-access chat call threw
+            // and the UI silently fell back to the read-only vault agent.
+            || limits.max_output_bytes > 64 * 1024 * 1024
             || limits.max_duration.is_zero()
             || limits.max_duration > Duration::from_secs(24 * 60 * 60)
         {
@@ -1560,6 +1573,46 @@ fn finish_name(reason: FinishReason) -> &'static str {
 mod tests {
     use super::*;
     use crate::providers::InMemoryMemoryProvider;
+
+    /// Live-caught 2026-09-12: the desktop full-access lane (L3 autonomous
+    /// coding sessions) ships a 64 MiB cumulative output budget, and the
+    /// validator here rejected it against the old 8 MiB cap — so every
+    /// full-access chat call failed at run-options validation and the UI
+    /// silently fell back to the read-only vault agent. The production
+    /// budget shape must validate; the per-item 8 MiB caps elsewhere
+    /// (tools.rs, providers.rs, value.rs) stay untouched.
+    #[test]
+    fn production_full_access_budget_passes_validation() {
+        let options = RunOptions {
+            actor: "local-user".to_owned(),
+            provider: "pai-llama-local".to_owned(),
+            model: "gemma-4-12b-it".to_owned(),
+            budget: Some(BudgetLimits {
+                max_steps: 512,
+                max_tool_calls: 1024,
+                max_rounds: 8,
+                max_jobs: 0,
+                max_subagent_depth: 0,
+                max_output_bytes: 64 * 1024 * 1024,
+                max_duration: Duration::from_secs(21_600),
+            }),
+            ..RunOptions::default()
+        };
+        assert!(
+            validate_run_options(&options).is_ok(),
+            "the production full-access budget must pass hard safety bounds"
+        );
+        // And the pathological backstops still reject: a budget that would
+        // let a runaway session accumulate unbounded output stays invalid.
+        let mut runaway = options;
+        if let Some(budget) = runaway.budget.as_mut() {
+            budget.max_output_bytes = 64 * 1024 * 1024 + 1;
+        }
+        assert!(
+            validate_run_options(&runaway).is_err(),
+            "output budgets beyond the 64 MiB backstop must stay invalid"
+        );
+    }
 
     #[test]
     fn system_prompt_with_memory_prefixes_embedding_briefing() {
