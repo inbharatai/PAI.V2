@@ -778,7 +778,13 @@ mod tests {
         // supplied environment layers on top.
         let fs = RootedFs::new(".")?;
         let broker = LocalExecutionBroker::new(fs, vec!["cmd".to_owned()]);
-        let mut spec = ProcessSpec::new("cmd", vec!["/C".to_owned(), "echo %SystemRoot% %BASELINE_PROBE%".to_owned()]);
+        let mut spec = ProcessSpec::new(
+            "cmd",
+            vec![
+                "/C".to_owned(),
+                "echo %SystemRoot% %BASELINE_PROBE%".to_owned(),
+            ],
+        );
         spec.environment
             .insert("BASELINE_PROBE".to_owned(), "layered".to_owned());
         let output = broker.run_process(&spec, &CancellationToken::new())?;

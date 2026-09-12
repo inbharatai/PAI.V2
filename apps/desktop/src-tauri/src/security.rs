@@ -10,7 +10,7 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Manifest entry for a vault file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +404,33 @@ impl SecurityManager {
         }
     }
 
+    /// Runtime-mutable VAULT state that can never pass a static baseline:
+    ///
+    /// - `locks/` — the lock marker is written on every lock/unlock by
+    ///   design (write-only, no reader anywhere).
+    /// - `recordings/` — TTS output and user recordings are created at
+    ///   runtime (live-caught: Hindi TTS failed the package integrity gate
+    ///   because the baseline had hashed the empty lock marker).
+    /// - `config/manifest.json` — the manifest cannot hash itself; without
+    ///   this skip, regenerating the baseline would pin the previous
+    ///   baseline file's bytes as an entry of the new one.
+    fn is_runtime_mutated_path(&self, path: &Path) -> bool {
+        let vault = PathBuf::from(&self.vault_root).join("VAULT");
+        let rel = match path.strip_prefix(&vault) {
+            Ok(rel) => rel,
+            Err(_) => return false,
+        };
+        let mut components = rel.components();
+        match components.next() {
+            Some(component) if component.as_os_str() == "locks" => true,
+            Some(component) if component.as_os_str() == "recordings" => true,
+            Some(component) if component.as_os_str() == "config" => components
+                .next()
+                .is_some_and(|name| name.as_os_str() == "manifest.json"),
+            _ => false,
+        }
+    }
+
     fn scan_directory(
         &self,
         dir: &PathBuf,
@@ -412,6 +439,9 @@ impl SecurityManager {
         if let Ok(reader) = std::fs::read_dir(dir) {
             for entry in reader.flatten() {
                 let path = entry.path();
+                if self.is_runtime_mutated_path(&path) {
+                    continue;
+                }
                 if path.is_dir() {
                     self.scan_directory(&path, entries)?;
                 } else {
@@ -522,4 +552,117 @@ pub fn recover_from_crash(vault_root: String) -> Result<CrashRecoveryResult, Str
 pub fn emergency_lock(vault_root: String) -> EmergencyLockResult {
     let manager = SecurityManager::new(&vault_root);
     manager.emergency_lock()
+}
+
+#[cfg(test)]
+mod baseline_tests {
+    use super::*;
+
+    fn temp_vault(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "unoone-security-baseline-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let vault = dir.join("VAULT");
+        std::fs::create_dir_all(vault.join("identity")).expect("identity dir");
+        std::fs::create_dir_all(vault.join("locks")).expect("locks dir");
+        std::fs::create_dir_all(vault.join("recordings")).expect("recordings dir");
+        std::fs::create_dir_all(vault.join("config")).expect("config dir");
+        std::fs::write(vault.join("identity").join("vault.id"), "test-vault-id\n")
+            .expect("vault id");
+        std::fs::write(vault.join("data.txt"), "static vault content").expect("data");
+        // Runtime-mutable state exactly as a live session produces it.
+        std::fs::write(
+            vault.join("locks").join(".vault-locked"),
+            "locked-at-runtime",
+        )
+        .expect("lock");
+        std::fs::write(
+            vault.join("recordings").join("tts_abc.wav"),
+            "RIFF-fake-wav-bytes",
+        )
+        .expect("recording");
+        std::fs::write(
+            vault.join("config").join("manifest.json"),
+            "{\"previous\":\"baseline\"}",
+        )
+        .expect("old manifest");
+        dir
+    }
+
+    /// The baseline must pin static vault content only: lock markers are
+    /// rewritten on every lock/unlock, TTS output lands in recordings/, and
+    /// a regenerated baseline must not hash the previous baseline file.
+    /// Live-caught 2026-09-12: a hashed lock marker failed the package
+    /// integrity gate and blocked Hindi TTS entirely.
+    #[test]
+    fn baseline_excludes_runtime_mutated_paths() {
+        let root = temp_vault("excludes");
+        let manager = SecurityManager::new(&root.to_string_lossy());
+        let manifest = manager.generate_manifest().expect("generate baseline");
+        let paths: Vec<String> = manifest
+            .entries
+            .iter()
+            .map(|e| {
+                let p = e.path.to_lowercase();
+                if p.contains('\\') {
+                    p.replace('\\', "/")
+                } else {
+                    p
+                }
+            })
+            .collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("data.txt")),
+            "static content must stay in the baseline: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("vault.id")),
+            "identity must stay in the baseline: {paths:?}"
+        );
+        for fragment in ["/locks/", "/recordings/", "manifest.json"] {
+            assert!(
+                paths
+                    .iter()
+                    .all(|p| !p.contains(fragment) || p.ends_with("manifest.key")),
+                "runtime-mutated path leaked into the baseline ({fragment}): {paths:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With runtime state excluded, verification survives a lock toggle and
+    /// a fresh recording — the exact live sequence that used to break the
+    /// InBharat Audio package integrity gate.
+    #[test]
+    fn verification_survives_lock_and_recording_writes() {
+        let root = temp_vault("survives");
+        let manager = SecurityManager::new(&root.to_string_lossy());
+        let manifest = manager.generate_manifest().expect("generate baseline");
+        // Simulate the runtime mutating exactly what runtime mutates.
+        std::fs::write(
+            root.join("VAULT").join("locks").join(".vault-locked"),
+            "totally different bytes now",
+        )
+        .expect("relock");
+        std::fs::write(
+            root.join("VAULT").join("recordings").join("tts_new.wav"),
+            "new RIFF bytes",
+        )
+        .expect("new recording");
+        let report = manager.verify_manifest(&manifest).expect("verify runs");
+        assert!(
+            report.entries_failed == 0 && report.manifest_valid,
+            "lock/recording writes must not fail the baseline: {report:?}"
+        );
+        // And real tampering with static content is still caught.
+        std::fs::write(root.join("VAULT").join("data.txt"), "tampered").expect("tamper");
+        let report = manager.verify_manifest(&manifest).expect("verify runs");
+        assert!(
+            report.entries_failed > 0,
+            "tampering with static vault content must still be detected"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

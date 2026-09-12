@@ -1446,11 +1446,7 @@ fn parse_tool_arguments(value: &str) -> HarnessResult<ToolArguments> {
     }
 }
 
-fn system_prompt_with_memory(
-    prefix: &str,
-    level: ExecutionLevel,
-    memory: Option<&str>,
-) -> String {
+fn system_prompt_with_memory(prefix: &str, level: ExecutionLevel, memory: Option<&str>) -> String {
     let mut system = String::new();
     if !prefix.is_empty() {
         system.push_str(prefix);

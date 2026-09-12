@@ -66,6 +66,67 @@ impl Default for ModelConfig {
     }
 }
 
+/// Total physical RAM in GiB, best-effort. None = unknown host (keep the
+/// safest baseline config).
+fn detected_ram_gib() -> Option<u32> {
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            dw_length: u32,
+            dw_memory_load: u32,
+            ull_total_phys: u64,
+            ull_avail_phys: u64,
+            ull_total_page_file: u64,
+            ull_avail_page_file: u64,
+            ull_total_virtual: u64,
+            ull_avail_virtual: u64,
+            ull_avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+        }
+        let mut status = MemoryStatusEx {
+            dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            dw_memory_load: 0,
+            ull_total_phys: 0,
+            ull_avail_phys: 0,
+            ull_total_page_file: 0,
+            ull_avail_page_file: 0,
+            ull_total_virtual: 0,
+            ull_avail_virtual: 0,
+            ull_avail_extended_virtual: 0,
+        };
+        // SAFETY: the struct is a plain C POD initialized with the correct
+        // byte length; the FFI fills exactly that struct.
+        if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 {
+            return u32::try_from(status.ull_total_phys / (1024 * 1024 * 1024)).ok();
+        }
+        None
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb: u64 = meminfo
+            .lines()
+            .find(|line| line.starts_with("MemTotal:"))
+            .and_then(|line| line.split_whitespace().nth(1).and_then(|v| v.parse().ok()))?;
+        u32::try_from(kb / (1024 * 1024)).ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("sysctl")
+            .arg("-n")
+            .arg("hw.memsize")
+            .output()
+            .ok()?;
+        let bytes: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        u32::try_from(bytes / (1024 * 1024 * 1024)).ok()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    None
+}
+
 /// Model-identity strictness for the running package.
 ///
 /// `Strict` requires the manifest to declare a SHA-256 for the model and
@@ -1376,6 +1437,40 @@ mod tests {
         assert!(port > 0);
     }
 
+    /// The adaptive boot config must match the step for whatever RAM this
+    /// host reports, so every host class (CI runners included) verifies the
+    /// mapping, not just large-memory dev machines.
+    #[test]
+    fn boot_config_matches_the_detected_memory_step() {
+        let config = get_model_config();
+        match detected_ram_gib() {
+            Some(ram) if ram >= 24 => {
+                assert_eq!(config.context_size, 32768);
+                assert_eq!(config.cache_type_k.as_deref(), Some("q8_0"));
+                assert_eq!(config.cache_type_v.as_deref(), Some("q8_0"));
+            }
+            Some(ram) if ram >= 12 => {
+                assert_eq!(config.context_size, 16384);
+                assert_eq!(config.cache_type_k.as_deref(), Some("q8_0"));
+                assert_eq!(config.cache_type_v.as_deref(), Some("q8_0"));
+            }
+            _ => {
+                assert_eq!(config.context_size, 4096);
+                assert_eq!(config.cache_type_k, None);
+                assert_eq!(config.cache_type_v, None);
+            }
+        }
+    }
+
+    /// The memory probe must return a plausible positive value on a real
+    /// machine (this runs on Windows/Linux/macOS CI hosts).
+    #[test]
+    fn detected_ram_is_plausible() {
+        if let Some(ram) = detected_ram_gib() {
+            assert!(ram >= 1, "nonsense RAM reading: {ram} GiB");
+        }
+    }
+
     #[test]
     fn sha256_file_matches_known_digest() {
         let tmp_path = std::env::temp_dir().join("unoone-sha256-test.txt");
@@ -1918,7 +2013,27 @@ pub fn detect_acceleration(
 
 #[tauri::command]
 pub fn get_model_config() -> ModelConfig {
-    ModelConfig::default()
+    // Host-adaptive boot defaults. Long agent sessions (multi-file coding
+    // with accumulated tool results) need a large context; the shipped
+    // 32K + q8_0 KV lane was verified live on the target laptop class
+    // (RTX 5050). Stepped by detected RAM so weak hosts still get a
+    // working server; the Model view lets the user override at any time.
+    let mut config = ModelConfig::default();
+    match detected_ram_gib() {
+        Some(ram) if ram >= 24 => {
+            config.context_size = 32768;
+            config.cache_type_k = Some("q8_0".to_owned());
+            config.cache_type_v = Some("q8_0".to_owned());
+        }
+        Some(ram) if ram >= 12 => {
+            config.context_size = 16384;
+            config.cache_type_k = Some("q8_0".to_owned());
+            config.cache_type_v = Some("q8_0".to_owned());
+        }
+        // Unknown host or < 12 GiB: keep the safe 4096 f16 baseline.
+        _ => {}
+    }
+    config
 }
 
 #[tauri::command]
