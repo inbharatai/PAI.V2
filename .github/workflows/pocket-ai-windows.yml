@@ -11,8 +11,10 @@ on:
       - 'apps/dock/**'
       - 'apps/starter/**'
       - 'packages/**'
+      - 'vendor/inbharat-harness/**'
       - 'scripts/build-pocket-ai-windows.ps1'
       - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/pocket-ai-windows.yml'
   workflow_dispatch:
 
