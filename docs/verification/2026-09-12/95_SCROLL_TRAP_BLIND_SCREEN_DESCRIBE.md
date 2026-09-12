@@ -59,13 +59,39 @@ the screen and we cant scrol down to the level".
 - `write_vision_artifact_persists_screen_png_and_rejects_empty` — screen
   captures land in the host-temp vision dir as `screen-*.png`, stay out
   of the vault, and empty payloads are rejected.
+- `png_encoder_accepts_rgba_and_round_trips` /
+  `png_encoder_rejects_rgb_sized_payload_for_rgba_declared_image` — the
+  capture pipeline's encode declares RGBA and round-trips; an RGB-sized
+  payload fails loudly instead of in the user's face.
 - `save_vision_snapshot` tests unchanged and green (now routed through
   the shared writer).
-- Full `unoone-power` 123/123 green, frontend build + `tsc --noEmit`
+- Full `unoone-power` 125/125 green, frontend build + `tsc --noEmit`
   clean, clippy clean.
 - No behavior change to the browser lane's Screenshot action
   (`capture_screenshot` now delegates to the shared helper; identical
   output paths and hashing).
+
+## 3a. Second live catch (retest of this very fix)
+
+The first retest of this fix on the re-staged drive caught two more
+failures in it — re-tested exactly the way a user would:
+
+1. **The scroll trap survived the one-line fix.** `.main-body` got
+   `min-height:0`, but every view's root is a plain unclassed `<div>`
+   between `.main-content` and `.main-body` — an unbounded child, so
+   `.main-body` still grew to content height (measured: clientHeight ==
+   scrollHeight == 1575 with the Keyboard section still below the
+   window). Fixed globally: `.main-content > *:last-child` is now a
+   bounded column flex (`flex:1; min-height:0`), which makes every
+   view's `.main-body` actually scrollable.
+2. **Every screenshot encode in the whole capture pipeline was broken**:
+   `PNG encode error: wrong data size, expected 1967760 got 7871040`.
+   `capture_area` returns RGBA (4 bytes/px) but `png::Encoder` defaults
+   to RGB (3 bytes/px). This latent bug predates defect #20 — the
+   browser lane's own Screenshot button (shipped earlier and never
+   live-verified) fails the same way. `encode_png_rgba` now declares
+   `ColorType::Rgba` / `BitDepth::Eight`, shared by both the browser
+   Screenshot action and `capture_screen_snapshot`.
 
 ## 4. Live verification checklist (post re-stage)
 

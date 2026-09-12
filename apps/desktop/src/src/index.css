@@ -403,6 +403,19 @@ html, body, #root {
   overflow: hidden;
 }
 
+/* Live-caught 2026-09-12 (defect #20): every view's root element must be a
+   BOUNDED flex child of .main-content. Most view roots are plain unclassed
+   <div>s — without this they grow to full content height inside the
+   overflow:hidden .main-content, the inner .main-body never becomes
+   taller than its content, and the scrollbar never engages: tall views
+   get clipped with everything below the fold unreachable. */
+.main-content > *:last-child {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 .main-header {
   display: flex;
   align-items: center;

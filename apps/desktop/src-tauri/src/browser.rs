@@ -538,6 +538,28 @@ fn poll_page_ready(
     }
 }
 
+/// Encode raw RGBA pixels as PNG bytes.
+/// Live-caught 2026-09-12 (defect #20): the png encoder defaults to RGB
+/// (3 bytes/px) but `capture_area` returns RGBA (4 bytes/px) — without
+/// declaring the color type, every screenshot encode failed with
+/// "wrong data size, expected WxHx3 got WxHx4".
+fn encode_png_rgba(width: u32, height: u32, raw: &[u8]) -> Result<Vec<u8>, String> {
+    let mut png_bytes: Vec<u8> = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut png_bytes);
+        let mut encoder = png::Encoder::new(&mut cursor, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("PNG header error: {}", e))?;
+        writer
+            .write_image_data(raw)
+            .map_err(|e| format!("PNG encode error: {}", e))?;
+    }
+    Ok(png_bytes)
+}
+
 /// Encode the on-screen region of a webview window as PNG bytes.
 /// Shared by the browser-lane Screenshot action and the blind-view
 /// "describe what's on the screen" assist (defect #20).
@@ -566,18 +588,7 @@ pub fn capture_window_png(
         .capture_area(rel_x, rel_y, size.width, size.height)
         .map_err(|e| format!("Screen capture failed: {}", e))?;
 
-    let mut png_bytes: Vec<u8> = Vec::new();
-    {
-        let mut cursor = std::io::Cursor::new(&mut png_bytes);
-        let encoder = png::Encoder::new(&mut cursor, image.width(), image.height());
-        let mut writer = encoder
-            .write_header()
-            .map_err(|e| format!("PNG header error: {}", e))?;
-        writer
-            .write_image_data(image.as_raw())
-            .map_err(|e| format!("PNG encode error: {}", e))?;
-    }
-    Ok(png_bytes)
+    encode_png_rgba(image.width(), image.height(), image.as_raw())
 }
 
 fn capture_screenshot(
@@ -1105,6 +1116,40 @@ pub async fn browser_eval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- PNG encoding (defect #20) -------------------------------------------
+    // Live-caught 2026-09-12: capture_area returns RGBA (4 bytes/px) but the
+    // png encoder defaults to RGB (3 bytes/px) — every screenshot encode
+    // failed with "wrong data size". The encoder must declare RGBA, and the
+    // size contract must be enforced so a future mismatch fails loudly here,
+    // not in a user's face.
+
+    #[test]
+    fn png_encoder_accepts_rgba_and_round_trips() {
+        // 2x2 RGBA (one pixel per corner color)
+        let raw: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, //
+            0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let png = encode_png_rgba(2, 2, &raw).expect("RGBA encode must succeed");
+        assert_eq!(&png[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+        let mut reader = decoder.read_info().expect("decode round-trip");
+        assert_eq!(reader.info().color_type, png::ColorType::Rgba);
+        assert_eq!(reader.info().width, 2);
+        assert_eq!(reader.info().height, 2);
+        let mut pixels = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).expect("decode frame");
+        assert_eq!(info.width, 2);
+        assert_eq!(&pixels[..raw.len()], &raw[..]);
+    }
+
+    #[test]
+    fn png_encoder_rejects_rgb_sized_payload_for_rgba_declared_image() {
+        // 2x2 at 3 bytes/px — the old default's size contract, must fail.
+        let rgb: Vec<u8> = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+        assert!(encode_png_rgba(2, 2, &rgb).is_err());
+    }
 
     // -- webview result encoding ---------------------------------------------
     // WebView2's ExecuteScript delivers the JSON encoding of the script's
