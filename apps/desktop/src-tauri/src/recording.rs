@@ -222,20 +222,37 @@ fn audio_capture_thread(
         }
     };
 
-    let supported_config = match device.supported_input_configs() {
-        Ok(mut iter) => match iter.next() {
-            Some(c) => c.with_max_sample_rate(),
-            None => {
-                let _ = config_tx.send(Err(
-                    "No supported audio input configuration found".to_string()
-                ));
+    // Prefer the device's default configuration — the OS-recommended format
+    // (on Windows shared-mode WASAPI this is virtually always F32). Live-caught
+    // 2026-09-12: blindly taking the FIRST enumerated config handed this
+    // thread a U8-format stream on a real laptop mic, and every chat/voice
+    // memo recording failed to start. Fall back to the first supported config
+    // whose sample format this thread can actually capture.
+    let supported_config = match device.default_input_config() {
+        Ok(c) => c,
+        Err(_) => match device.supported_input_configs() {
+            Ok(mut iter) => {
+                match iter.find(|c| {
+                    matches!(
+                        c.sample_format(),
+                        cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::U16
+                    )
+                }) {
+                    Some(c) => c.with_max_sample_rate(),
+                    None => {
+                        let _ = config_tx.send(Err(
+                            "No supported audio input configuration found (device offers no F32/I16/U16 format)"
+                                .to_string(),
+                        ));
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = config_tx.send(Err(format!("Audio config error: {}", e)));
                 return;
             }
         },
-        Err(e) => {
-            let _ = config_tx.send(Err(format!("Audio config error: {}", e)));
-            return;
-        }
     };
 
     let sample_format = supported_config.sample_format();
