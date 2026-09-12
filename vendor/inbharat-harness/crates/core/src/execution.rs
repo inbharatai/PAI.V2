@@ -384,6 +384,46 @@ impl ProcessSpec {
     }
 }
 
+/// Machine-level environment variables every spawned child needs to run at
+/// all. Real-world caught (2026-09-12 live acceptance): `node script.js` under
+/// a fully empty environment crashes at init with exit 134
+/// `Assertion failed: ncrypto::CSPRNG(nullptr, 0)` because Windows crypto
+/// initialization resolves through `SystemRoot`; `node --version` survives
+/// only because it takes a fast path. PowerShell, npm, and npx similarly
+/// need `SystemRoot`/`TEMP`/`PATHEXT`. This allowlist is system variables
+/// only — no user-profile, session, or secret-bearing values are forwarded.
+const SYSTEM_BASELINE_ENV_KEYS: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "OS",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "HOME",
+    "LANG",
+];
+
+/// Builds the scrubbed child-environment baseline from a host environment
+/// snapshot. `spec.environment` is layered on top by the caller so model-
+/// supplied values still override the baseline.
+fn baseline_env_from(host: impl Iterator<Item = (String, String)>) -> BTreeMap<String, String> {
+    let mut baseline = BTreeMap::new();
+    for (key, value) in host {
+        if SYSTEM_BASELINE_ENV_KEYS
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(&key))
+        {
+            baseline.insert(key, value);
+        }
+    }
+    baseline
+}
+
 /// Bounded canonical process result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessOutput {
@@ -490,12 +530,14 @@ impl ExecutionBroker for LocalExecutionBroker {
             ));
         }
         let started = Instant::now();
+        let mut environment = baseline_env_from(env::vars());
+        environment.extend(spec.environment.clone());
         let mut command = Command::new(program_path);
         command
             .args(&spec.args)
             .current_dir(self.filesystem.root())
             .env_clear()
-            .envs(&spec.environment)
+            .envs(&environment)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -688,6 +730,70 @@ fn io_failure(code: ErrorCode, operation: &str, message: &str, error: std::io::E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_env_baseline_keeps_system_keys_case_insensitively() {
+        let baseline = baseline_env_from(
+            [
+                ("PATH".to_owned(), "/usr/bin".to_owned()),
+                ("systemroot".to_owned(), "C:\\Windows".to_owned()),
+                ("TEMP".to_owned(), "C:\\Temp".to_owned()),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(baseline.len(), 3);
+        assert_eq!(baseline.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(
+            baseline.get("systemroot").map(String::as_str),
+            Some("C:\\Windows")
+        );
+    }
+
+    #[test]
+    fn child_env_baseline_drops_non_system_values() {
+        let baseline = baseline_env_from(
+            [
+                ("PATH".to_owned(), "/usr/bin".to_owned()),
+                ("USERPROFILE".to_owned(), "C:\\Users\\reetu".to_owned()),
+                ("OPENAI_API_KEY".to_owned(), "sk-secret".to_owned()),
+                ("DEV_UNLOCK_PW".to_owned(), "never-forwarded".to_owned()),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(baseline.len(), 1);
+        assert!(baseline.contains_key("PATH"));
+        assert!(!baseline.contains_key("USERPROFILE"));
+        assert!(!baseline.contains_key("OPENAI_API_KEY"));
+        assert!(!baseline.contains_key("DEV_UNLOCK_PW"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawned_children_receive_the_system_baseline() -> HarnessResult<()> {
+        // Regression for the live-caught node exit 134
+        // `ncrypto::CSPRNG(nullptr, 0)` crash: a child spawned with a fully
+        // empty environment cannot run at all on Windows. `cmd` expands an
+        // unset variable literally, so a present SystemRoot proves the
+        // baseline reached the child; the custom variable proves the model-
+        // supplied environment layers on top.
+        let fs = RootedFs::new(".")?;
+        let broker = LocalExecutionBroker::new(fs, vec!["cmd".to_owned()]);
+        let mut spec = ProcessSpec::new("cmd", vec!["/C".to_owned(), "echo %SystemRoot% %BASELINE_PROBE%".to_owned()]);
+        spec.environment
+            .insert("BASELINE_PROBE".to_owned(), "layered".to_owned());
+        let output = broker.run_process(&spec, &CancellationToken::new())?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        assert_eq!(output.status, Some(0));
+        assert!(
+            stdout.contains("windows"),
+            "SystemRoot did not reach the child: {stdout}"
+        );
+        assert!(
+            stdout.contains("layered"),
+            "spec.environment did not reach the child: {stdout}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn lexical_escape_is_denied() -> HarnessResult<()> {
