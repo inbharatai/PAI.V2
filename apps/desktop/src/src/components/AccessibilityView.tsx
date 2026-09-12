@@ -298,8 +298,11 @@ export function AccessibilityView() {
           if (el) {
             el.src = tauriApi.convertFileSrc(result.audio_path as string);
             el.play().catch(() => {
-              // Autoplay may be refused without a fresh gesture; the controls
-              // on the audio element remain the user's manual fallback.
+              // Autoplay is allowed app-wide (--autoplay-policy=
+              // no-user-gesture-required, defect #21) so the description is
+              // spoken even after the long describe+synthesize chain; this
+              // catch only covers unusual WebView refusals, where the audio
+              // element's controls remain the manual fallback.
             });
           }
         });
