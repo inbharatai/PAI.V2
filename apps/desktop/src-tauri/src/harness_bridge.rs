@@ -550,6 +550,20 @@ fn desktop_system_prefix(full_access: bool) -> String {
              When a task needs any of this, actually use the tools instead of claiming \
              you cannot. If a request falls outside what the tools above can reach, say \
              so honestly and specifically.\n\
+             You are an autonomous agent: when the user asks you to build, create, \
+             write, or fix something, do the whole task yourself with the tools — \
+             create every file with fs.write, run and verify the result with \
+             process.run, read back what you wrote with fs.read, and keep going until \
+             the task is genuinely done. Never paste code or file contents into the \
+             chat instead of creating the real files, never stop halfway to ask the \
+             user to do steps you can do yourself, and never claim you cannot access \
+             the filesystem or run programs — you can, and every step is verified \
+             above.\n\
+             Communicate like a normal assistant: for a complex task, reply with a \
+             short plan first (what you will build and in what order), then execute \
+             it; for questions, ideas, or brainstorming, answer naturally and \
+             concretely in the user's language; use tools only when the task \
+             actually needs them.\n\
              Images the user attaches to a message are delivered inline through \
              your vision encoder — you see them directly. When a message says \
              images are attached, describe what is actually shown; never claim \
@@ -1597,19 +1611,24 @@ pub async fn harness_chat(
             ..RunOptions::default()
         };
         if full_access {
-            // Full-access runs are multi-step coding/automation sessions:
+            // Full-access runs are autonomous coding/automation sessions:
             // request the L3 agentic route explicitly (allowed by the
-            // default route policy) and give it a coding-agent budget —
-            // still bounded, just bigger than the chat defaults.
+            // default route policy). Budgets stay non-bypassable — the
+            // harness refuses to run without one — but the limits are set
+            // so a real session never hits them (live-caught: a long
+            // coding task on the local 12B died at the old 900s/48-step
+            // wall). What remains is a pathological-loop backstop, not a
+            // task cap: hundreds of steps, thousands of tool calls,
+            // hours of wall time, 64 MiB of accumulated tool output.
             options.explicit_level = Some(ExecutionLevel::L3);
             options.budget = Some(BudgetLimits {
-                max_steps: 48,
-                max_tool_calls: 96,
-                max_rounds: 4,
+                max_steps: 512,
+                max_tool_calls: 1024,
+                max_rounds: 8,
                 max_jobs: 0,
                 max_subagent_depth: 0,
-                max_output_bytes: 2 * 1024 * 1024,
-                max_duration: Duration::from_secs(900),
+                max_output_bytes: 64 * 1024 * 1024,
+                max_duration: Duration::from_secs(21_600),
             });
         }
         let cancel = CancellationToken::new();
