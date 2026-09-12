@@ -589,6 +589,19 @@ fn unlock_vault(
                 .map_err(|e| format!("State lock error: {}", e))? = vault_root.clone();
             startup_state.set_phase(startup::StartupPhase::ScanningHost);
 
+            // Security-baseline bootstrap: verify_vault (and the Settings
+            // security check) verify against the stored baseline, but the
+            // drive shipped without one and no UI surface ever calls
+            // generate_manifest — the tool's "run generate_manifest first"
+            // was a dead end the user could not follow. The first successful
+            // unlock is the known-good state, so create the baseline then.
+            // Best-effort only: a baseline failure must never block unlocking.
+            let baseline_path =
+                PathBuf::from(&vault_root).join("VAULT").join("config").join("manifest.json");
+            if !baseline_path.exists() {
+                let _ = security::generate_manifest(vault_root.clone());
+            }
+
             Ok(VaultUnlockResult {
                 success: true,
                 vault_id: result.vault_id,
