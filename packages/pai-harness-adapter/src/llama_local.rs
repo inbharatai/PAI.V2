@@ -860,4 +860,143 @@ mod transcript_tests {
             ]
         );
     }
+
+    /// A one-shot llama-server stand-in: captures the exact HTTP body the
+    /// adapter posts and answers with a minimal valid completion. Used by
+    /// the wire-level tests below — what matters there is the request, not
+    /// the response.
+    fn capture_server() -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().expect("mock addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("mock accept");
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 4096];
+            // Read until the headers arrive, then exactly Content-Length bytes.
+            let header_end;
+            loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    header_end = buffer
+                        .windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .unwrap_or(0);
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = pos;
+                    break;
+                }
+            }
+            let headers = String::from_utf8_lossy(&buffer[..header_end]).to_owned();
+            let content_length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        value.trim().parse().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            while buffer.len() < header_end + 4 + content_length {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            let body = buffer[header_end + 4..].to_vec();
+            let _ = tx.send(String::from_utf8_lossy(&body).into_owned());
+            let payload = concat!(
+                "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},",
+                "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,",
+                "\"completion_tokens\":1,\"total_tokens\":2}}"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                payload.len(),
+                payload
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        (port, rx)
+    }
+
+    fn vision_request(
+        attachments: Vec<inbharat_harness_core::providers::AttachmentMetadata>,
+    ) -> inbharat_harness_core::providers::ModelRequest {
+        inbharat_harness_core::providers::ModelRequest {
+            request_id: "r-1-1-1".to_owned(),
+            provider: "pai-llama-local".to_owned(),
+            model: "test-model".to_owned(),
+            system: "system prefix".to_owned(),
+            messages: vec![message(ModelRole::User, "what is in this image?")],
+            tools: Vec::new(),
+            attachments,
+            max_output_bytes: 4096,
+        }
+    }
+
+    /// The attachment must reach the wire as an image_url multimodal part on
+    /// the last user message — live-caught regression class: the model
+    /// truthfully answers "I cannot see any images" when this is dropped.
+    #[test]
+    fn attachment_bytes_reach_the_wire_as_image_url_parts() {
+        let (port, rx) = capture_server();
+        let provider = PaiLlamaLocalProvider::new("test-model", port)
+            .expect("build provider")
+            .with_attachment("attach-1", "image/png", "aGVsbG8=");
+        let request = vision_request(vec![
+            inbharat_harness_core::providers::AttachmentMetadata {
+                id: "attach-1".to_owned(),
+                media_type: "image/png".to_owned(),
+                byte_len: 5,
+                digest: "deadbeef".to_owned(),
+                display_name: None,
+            },
+        ]);
+        let cancel = CancellationToken::new();
+        let response = provider
+            .stream(&request, &cancel, &mut |_chunk| Ok(()))
+            .expect("stream succeeds");
+        assert_eq!(response.text, "ok");
+        let body = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("captured");
+        let parsed: JsonValue = serde_json::from_str(&body).expect("posted body is JSON");
+        let user = &parsed["messages"][1];
+        assert_eq!(user["role"], "user", "{body}");
+        let parts = user["content"].as_array().expect("user content is multimodal parts");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "what is in this image?");
+        assert_eq!(parts[1]["type"], "image_url", "{body}");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,aGVsbG8=");
+    }
+
+    /// A metadata attachment without matching local bytes must fail closed —
+    /// never silently degrade to a text-only request.
+    #[test]
+    fn attachments_without_local_bytes_fail_closed() {
+        let (port, _rx) = capture_server();
+        let provider =
+            PaiLlamaLocalProvider::new("test-model", port).expect("build provider");
+        let request = vision_request(vec![
+            inbharat_harness_core::providers::AttachmentMetadata {
+                id: "attach-1".to_owned(),
+                media_type: "image/png".to_owned(),
+                byte_len: 5,
+                digest: "deadbeef".to_owned(),
+                display_name: None,
+            },
+        ]);
+        let cancel = CancellationToken::new();
+        let error = provider
+            .stream(&request, &cancel, &mut |_chunk| Ok(()))
+            .expect_err("missing local bytes must fail");
+        assert!(error.to_string().contains("missing"), "{error}");
+    }
 }
