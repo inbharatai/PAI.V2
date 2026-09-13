@@ -362,56 +362,60 @@ pub async fn capture_screen_snapshot(app: tauri::AppHandle) -> Result<String, St
     .map_err(|e| format!("Screen capture task failed: {e}"))?
 }
 
+/// Blocking camera-device enumeration via PowerShell Get-PnpDevice. Shared
+/// by the get_camera_info command and the capability profile's vision probe.
+pub(crate) fn enumerate_camera_devices() -> Result<Vec<CameraDevice>, String> {
+    let mut devices = Vec::new();
+    if cfg!(target_os = "windows") {
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('Camera','Image') } | Select-Object FriendlyName,InstanceId,Status | ConvertTo-Json -Compress",
+            ])
+            .output()
+            .map_err(|error| format!("Camera enumeration failed: {error}"))?;
+        if output.status.success() {
+            let value: serde_json::Value =
+                serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Array(vec![]));
+            let rows = match value {
+                serde_json::Value::Array(rows) => rows,
+                serde_json::Value::Object(_) => vec![value],
+                _ => Vec::new(),
+            };
+            for row in rows {
+                devices.push(CameraDevice {
+                    name: row
+                        .get("FriendlyName")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("Unnamed camera")
+                        .to_string(),
+                    device_id: row
+                        .get("InstanceId")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    status: row
+                        .get("Status")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string(),
+                });
+            }
+        }
+    }
+    Ok(devices)
+}
+
 /// Camera info — enumerates available video capture devices.
 /// Actual frame capture uses the frontend WebView + getUserMedia API.
 /// Async since it shells out to PowerShell (seconds-long on the main thread
 /// otherwise — defect #23 family: sync commands freeze the UI thread).
 #[tauri::command]
 pub async fn get_camera_info() -> Result<CameraInfo, String> {
-    let devices = tauri::async_runtime::spawn_blocking(|| {
-        let mut devices = Vec::new();
-        if cfg!(target_os = "windows") {
-            let output = std::process::Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    "Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('Camera','Image') } | Select-Object FriendlyName,InstanceId,Status | ConvertTo-Json -Compress",
-                ])
-                .output()
-                .map_err(|error| format!("Camera enumeration failed: {error}"))?;
-            if output.status.success() {
-                let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-                    .unwrap_or(serde_json::Value::Array(vec![]));
-                let rows = match value {
-                    serde_json::Value::Array(rows) => rows,
-                    serde_json::Value::Object(_) => vec![value],
-                    _ => Vec::new(),
-                };
-                for row in rows {
-                    devices.push(CameraDevice {
-                        name: row
-                            .get("FriendlyName")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("Unnamed camera")
-                            .to_string(),
-                        device_id: row
-                            .get("InstanceId")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        status: row
-                            .get("Status")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("Unknown")
-                            .to_string(),
-                    });
-                }
-            }
-        }
-        Ok::<_, String>(devices)
-    })
-    .await
-    .map_err(|e| format!("Camera enumeration task failed: {e}"))??;
+    let devices = tauri::async_runtime::spawn_blocking(crate::accessibility::enumerate_camera_devices)
+        .await
+        .map_err(|e| format!("Camera enumeration task failed: {e}"))??;
     Ok(CameraInfo {
         devices,
         capture_backend: "webview-getUserMedia".to_string(),
