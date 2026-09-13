@@ -46,11 +46,11 @@ A second failure mode appeared on re-test: with the app window **maximized**, th
 - [x] 128 backend tests green (3 new probe-point regression tests, incl. the exact maximized-window geometry)
 - [x] Frontend builds + lints clean
 - [x] PR #27 CI green (Rust Backend windows/ubuntu/macos, Frontend Build, all gates)
-- [ ] **Live re-verify after re-stage:** UI Describe Screen completes → description text + auto-speak (marker-based: fresh audio src or playhead movement, never stale audio)
-- [ ] **Live re-verify:** Describe Screen with the window MAXIMIZED (previously "Monitor is invalid")
-- [ ] **Live re-verify:** OCR on a captured frame through the UI
-- [ ] **Live re-verify:** camera snapshot → describe lane (cameraBlindAid + screenReaderDescription)
-- [ ] Doc 96 blind auto-speak checklist tick (blocked on this defect until now)
+- [x] **Live re-verify after re-stage** (2026-09-13, main @ 5662b36, 545/545 staged): UI Describe Screen completes → description text + auto-speak (`vision-accept.js describe-normal` PASS — result rendered ~2.5 min, audio mounted and playhead advanced)
+- [x] **Live re-verify** (same session): Describe Screen with the window MAXIMIZED — previously "Monitor is invalid", now full result + speech actively playing (`vision-accept.js describe-maximized` PASS)
+- [x] **Live re-verify** (same session): OCR on a captured frame through the UI — read the app's own UI text verbatim (`vision-accept.js ocr` PASS)
+- [x] **Live re-verify** (2026-09-13, same session): camera snapshot → describe lane (cameraBlindAid + screenReaderDescription) — `camera-accept.js` PASS: live preview, snapshot captured, camera-scene result rendered (~2.1 min), spoken excerpt played. (The first run had in fact already succeeded — 1058-char result + trimmed-notice + 16.44 s speech played to completion — but its watcher used the stale `What the model sees:` regex and false-FAILED; watcher fixed to detect the bare result div + real playhead movement, then re-run clean.)
+- [x] Doc 96 blind auto-speak checklist tick — `speech-verify.js` ALL PASS (7/7, exit 0) live 2026-09-13 on the staged build: Voice Lab plays, blind describe speaks automatically, chat Speak plays, asset.localhost refuses out-of-scope paths
 
 ## 5. Why the wedge was so hard to pin
 

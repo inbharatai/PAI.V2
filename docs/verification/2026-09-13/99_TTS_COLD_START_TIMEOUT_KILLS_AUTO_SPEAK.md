@@ -33,10 +33,10 @@ The 90s bound (added as defense-in-depth in PR #27) was tuned for warm-engine la
 ## 4. Verification
 
 - [x] Frontend builds + lints clean (pre-existing warnings only, none in edited regions)
-- [ ] CI green
-- [ ] **Live re-verify after re-stage:** cold-launch app → Describe Screen → description spoken end-to-end (audio mounts + playhead advances), first call, within 300s
-- [ ] **Live re-verify:** warm second call completes quickly
-- [ ] Defect #23 doc 98 §4 live checklist (describe-normal) — the describe half PASSED live 2026-09-13 (result rendered after 147.5s); auto-speak half is this defect's lane
+- [x] CI green (PR #28 merged; re-verified on the re-staged drive build main @ 5662b36)
+- [x] **Live re-verify after re-stage** (2026-09-13): cold-launch app → Describe Screen → description spoken end-to-end (audio mounts + playhead advances), first call, within 300s — `vision-accept.js describe-normal` PASS on drive D:\UNOONE
+- [x] **Live re-verify:** warm second call completes quickly — `vision-accept.js describe-maximized` PASS in the same session (describe + speech actively playing)
+- [x] Defect #23 doc 98 §4 live checklist (describe-normal) — the describe half PASSED live 2026-09-13 (result rendered after 147.5s); auto-speak half is this defect's lane
 
 ## 5. Note
 

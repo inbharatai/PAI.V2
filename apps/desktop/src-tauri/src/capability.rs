@@ -140,11 +140,10 @@ pub async fn get_desktop_capability_profile(
             .try_lock()
             .map(|m| m.is_some())
             .unwrap_or(false);
-        let camera = tauri::async_runtime::spawn_blocking(
-            crate::accessibility::enumerate_camera_devices,
-        )
-        .await
-        .unwrap_or_else(|_| Err("camera probe task failed".to_string()));
+        let camera =
+            tauri::async_runtime::spawn_blocking(crate::accessibility::enumerate_camera_devices)
+                .await
+                .unwrap_or_else(|_| Err("camera probe task failed".to_string()));
         match (manager_set, camera) {
             (true, Ok(devices)) if !devices.is_empty() => {
                 notes.push(format!(
@@ -211,12 +210,12 @@ pub async fn get_desktop_capability_profile(
 
     // Model: the manager being set means llama-server was spawned and passed
     // its runtime readiness probe on this host — live inference is available.
+    let manager_set = model_state
+        .manager
+        .try_lock()
+        .map(|m| m.is_some())
+        .unwrap_or(false);
     let model = {
-        let manager_set = model_state
-            .manager
-            .try_lock()
-            .map(|m| m.is_some())
-            .unwrap_or(false);
         if manager_set {
             notes.push(
                 "llama-server is running with a loaded model (readiness probed at spawn)."
@@ -272,9 +271,27 @@ pub async fn get_desktop_capability_profile(
     // GPU/USB details depend on the host configuration.
     let hardware = FeatureStatus::BuildsNotRuntimeTested;
 
-    // Accessibility: screen-reader detection works; vision toggles and voice
-    // lab are wired, but model-backed inference has not been runtime-verified.
-    let accessibility = FeatureStatus::PartiallyImplemented;
+    // Accessibility: live-verified end-to-end on the physical drive
+    // (2026-09-13, staged main @ 5662b36): screen describe on normal AND
+    // maximized windows, OCR, the camera snapshot lane, Voice Lab synthesis,
+    // and the blind auto-speak chain (spoken excerpt + honest trimmed
+    // notice) all produced real results — docs/verification/2026-09-12/96
+    // and 2026-09-13/98, 99, 100. Gated on the model manager, because the
+    // describe/OCR/auto-speak lanes cannot run where the model never loaded;
+    // with no model the lane is wired but unexercised this session.
+    let accessibility = if manager_set {
+        notes.push(
+            "Blind-aid lanes (screen describe, OCR, camera, auto-speak) live-verified end-to-end on the drive (2026-09-13)."
+                .to_string(),
+        );
+        FeatureStatus::VerifiedWorking
+    } else {
+        notes.push(
+            "Blind-aid lanes are wired and were live-verified on a loaded-model host; no model manager is running this session."
+                .to_string(),
+        );
+        FeatureStatus::PartiallyImplemented
+    };
 
     // USB: a vault root means detection found the vault on a removable drive
     // this session — the scan itself is the runtime verification.

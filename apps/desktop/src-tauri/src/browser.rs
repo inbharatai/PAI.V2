@@ -572,10 +572,7 @@ fn capture_probe_point(x: i32, y: i32, width: u32, height: u32) -> (i32, i32) {
 /// Encode the on-screen region of a webview window as PNG bytes.
 /// Shared by the browser-lane Screenshot action and the blind-view
 /// "describe what's on the screen" assist (defect #20).
-pub fn capture_window_png(
-    app: &tauri::AppHandle,
-    window_label: &str,
-) -> Result<Vec<u8>, String> {
+pub fn capture_window_png(app: &tauri::AppHandle, window_label: &str) -> Result<Vec<u8>, String> {
     let window = app
         .get_webview_window(window_label)
         .ok_or_else(|| format!("Webview window '{}' not found", window_label))?;
