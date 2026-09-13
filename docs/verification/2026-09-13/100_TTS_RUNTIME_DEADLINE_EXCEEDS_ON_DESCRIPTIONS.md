@@ -29,9 +29,9 @@ The chain has three unbounded/hidden layers: the describe prompt produces 1000�
 ## 4. Verification
 
 - [x] Frontend builds + lints clean
-- [ ] CI green
-- [ ] **Live re-verify after re-stage:** Describe Screen (language `en`, pinned) → description spoken within ~2 min; audio element mounts and playhead advances
-- [ ] **Live re-verify:** trimmed-notice appears for long descriptions
+- [x] CI green (PR #29 merged; re-verified on the re-staged drive build main @ 5662b36)
+- [x] **Live re-verify after re-stage** (2026-09-13, drive D:\UNOONE): Describe Screen (language `en`, pinned) → excerpt spoken; audio element mounts and playhead advances — `vision-accept.js describe-normal` PASS
+- [x] **Live re-verify:** trimmed-notice appears for long descriptions — live DOM dump shows `role="status"`: "Spoken the beginning of the description — the complete text is shown above." (describe + camera lanes)
 
 ## 5. Future work (recorded, not in scope)
 

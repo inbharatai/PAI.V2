@@ -56,9 +56,9 @@ has expired, and even a loadable source would not auto-play.
 
 ## 4. Live verification checklist (post re-stage)
 
-- [ ] Voice Lab: Synthesize Speech → audio element loads and plays
-- [ ] Blind View with Screen Reader Description on: capture snapshot →
-      description is spoken automatically (no manual play)
-- [ ] Chat: reply "🔊 Speak" button produces a playable audio element
-- [ ] `asset.localhost` still cannot serve paths outside the three
-      scoped temp dirs (e.g. a vault file path must be refused)
+All four lanes verified live 2026-09-13 on the physical drive D:\UNOONE (staged build main @ 5662b36, 545/545; `speech-verify.js` ALL PASS, exit 0):
+
+- [x] Voice Lab: Synthesize Speech → audio element loads and plays (readyState=4, playhead advances)
+- [x] Blind View with Screen Reader Description on: capture snapshot → description is spoken automatically (no manual play; audio advanced on its own — this also closes doc 98 §4's "Doc 96 blind auto-speak tick")
+- [x] Chat: reply "🔊 Speak" button produces a playable audio element (readyState=4, plays)
+- [x] `asset.localhost` still cannot serve paths outside the three scoped temp dirs (win.ini and a vault path both refused)

@@ -964,25 +964,25 @@ impl ModelManager {
             }
         }
         cmd.args([
-                "-m",
-                &config.model_path,
-                "--port",
-                &port.to_string(),
-                "-c",
-                &config.context_size.to_string(),
-                "-b",
-                &config.batch_size.to_string(),
-                "--temp",
-                &config.temperature.to_string(),
-                "--top-p",
-                &config.top_p.to_string(),
-                "--top-k",
-                &config.top_k.to_string(),
-                "--repeat-penalty",
-                &config.repeat_penalty.to_string(),
-                "-n",
-                &config.max_tokens.to_string(),
-            ]);
+            "-m",
+            &config.model_path,
+            "--port",
+            &port.to_string(),
+            "-c",
+            &config.context_size.to_string(),
+            "-b",
+            &config.batch_size.to_string(),
+            "--temp",
+            &config.temperature.to_string(),
+            "--top-p",
+            &config.top_p.to_string(),
+            "--top-k",
+            &config.top_k.to_string(),
+            "--repeat-penalty",
+            &config.repeat_penalty.to_string(),
+            "-n",
+            &config.max_tokens.to_string(),
+        ]);
 
         // GPU layers
         if config.gpu_layers != 0 {

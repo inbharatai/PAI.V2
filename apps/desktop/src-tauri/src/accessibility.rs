@@ -413,9 +413,10 @@ pub(crate) fn enumerate_camera_devices() -> Result<Vec<CameraDevice>, String> {
 /// otherwise — defect #23 family: sync commands freeze the UI thread).
 #[tauri::command]
 pub async fn get_camera_info() -> Result<CameraInfo, String> {
-    let devices = tauri::async_runtime::spawn_blocking(crate::accessibility::enumerate_camera_devices)
-        .await
-        .map_err(|e| format!("Camera enumeration task failed: {e}"))??;
+    let devices =
+        tauri::async_runtime::spawn_blocking(crate::accessibility::enumerate_camera_devices)
+            .await
+            .map_err(|e| format!("Camera enumeration task failed: {e}"))??;
     Ok(CameraInfo {
         devices,
         capture_backend: "webview-getUserMedia".to_string(),
@@ -482,9 +483,13 @@ mod tests {
 
     #[tokio::test]
     async fn save_vision_snapshot_rejects_non_image_and_garbage() {
-        assert!(save_vision_snapshot("not a data url".to_string()).await.is_err());
+        assert!(save_vision_snapshot("not a data url".to_string())
+            .await
+            .is_err());
         assert!(
-            save_vision_snapshot("data:image/png;base64,!!!not-base64!!!".to_string()).await.is_err()
+            save_vision_snapshot("data:image/png;base64,!!!not-base64!!!".to_string())
+                .await
+                .is_err()
         );
     }
 
