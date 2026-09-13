@@ -47,6 +47,10 @@ export function AccessibilityView() {
   const [imagePath, setImagePath] = useState('');
   const [visionResult, setVisionResult] = useState('');
   const [visionError, setVisionError] = useState('');
+  // Spoken-output status for the blind-aid describe flow (defect #24): shown
+  // next to the vision result so a blind user is told when speech failed —
+  // the text result alone is invisible to them.
+  const [speechNotice, setSpeechNotice] = useState('');
   const [isProcessingVision, setIsProcessingVision] = useState(false);
   const [snapshots, setSnapshots] = useState<string[]>([]);
 
@@ -324,10 +328,16 @@ export function AccessibilityView() {
    * player element so the description is audible immediately. */
   async function speakText(text: string) {
     if (!vaultRoot || !text.trim()) return;
+    setSpeechNotice('');
     try {
+      // Live-caught 2026-09-13 (defect #24): a ~1400-char description takes
+      // well over 90s to synthesize on CPU; the old 90s bound rejected
+      // mid-synthesis and the empty catch below swallowed it — the blind
+      // user got text but never heard it, with no error. The bound now
+      // matches the describe bound (the two stages take comparable time).
       const result = await withVisionTimeout(
         tauriApi.synthesizeSpeech(text.trim(), vaultRoot, ttsLanguage),
-        90_000,
+        300_000,
         'Speech synthesis'
       );
       if (result.audio_path) {
@@ -345,10 +355,15 @@ export function AccessibilityView() {
             });
           }
         });
+      } else {
+        setSpeechNotice('Speech synthesis returned no audio for this description.');
       }
-    } catch {
+    } catch (err) {
       // Speech is an enhancement for the description; the visible text
-      // result is the durable output, so a TTS failure is non-fatal.
+      // result is the durable output, so a TTS failure is non-fatal — but a
+      // blind user relying on spoken output must be TOLD it failed (defect
+      // #24: this used to be a silent swallow).
+      setSpeechNotice(`Spoken description unavailable: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -675,6 +690,22 @@ export function AccessibilityView() {
                           }}
                         >
                           {visionResult}
+                        </div>
+                      )}
+
+                      {speechNotice && (
+                        <div
+                          role="status"
+                          style={{
+                            marginTop: '8px',
+                            padding: '8px 12px',
+                            background: 'var(--bg-primary)',
+                            borderRadius: 'var(--radius-sm)',
+                            border: '1px solid var(--border)',
+                            fontSize: '13px',
+                          }}
+                        >
+                          {speechNotice}
                         </div>
                       )}
                     </div>
