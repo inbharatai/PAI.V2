@@ -324,11 +324,37 @@ export function AccessibilityView() {
     }
   }
 
+  /** Largest text spoken in the blind-aid auto-speak lane. The audio runtime
+   * has a hard 180s inference deadline (live-caught 2026-09-13, defect #25:
+   * a 1847-char Hindi description hit "local audio runtime exceeded 180
+   * seconds"; omnivoice runs ~0.3-0.4 s/char on CPU), so a full screen
+   * description cannot be synthesized in one call. ~280 chars finishes in
+   * roughly two minutes worst-case — the first sentences of a description
+   * are what a blind user needs immediately; the full text is right above. */
+  const SPOKEN_EXCERPT_LIMIT = 280;
+
+  /** Trim text to the spoken excerpt limit, ending on a sentence boundary
+   * when one exists in range. Returns the excerpt and whether it was cut. */
+  function spokenExcerpt(text: string): { excerpt: string; trimmed: boolean } {
+    const trimmedText = text.trim();
+    if (trimmedText.length <= SPOKEN_EXCERPT_LIMIT) return { excerpt: trimmedText, trimmed: false };
+    const head = trimmedText.slice(0, SPOKEN_EXCERPT_LIMIT);
+    const cut = Math.max(
+      head.lastIndexOf('. '),
+      head.lastIndexOf('! '),
+      head.lastIndexOf('? '),
+      head.lastIndexOf('\n')
+    );
+    const excerpt = cut > 40 ? head.slice(0, cut + 1) : head;
+    return { excerpt, trimmed: true };
+  }
+
   /** Speak text through the vault speech engine, reusing the voice-lab
    * player element so the description is audible immediately. */
   async function speakText(text: string) {
     if (!vaultRoot || !text.trim()) return;
     setSpeechNotice('');
+    const { excerpt, trimmed } = spokenExcerpt(text);
     try {
       // Live-caught 2026-09-13 (defect #24): a ~1400-char description takes
       // well over 90s to synthesize on CPU; the old 90s bound rejected
@@ -336,12 +362,15 @@ export function AccessibilityView() {
       // user got text but never heard it, with no error. The bound now
       // matches the describe bound (the two stages take comparable time).
       const result = await withVisionTimeout(
-        tauriApi.synthesizeSpeech(text.trim(), vaultRoot, ttsLanguage),
+        tauriApi.synthesizeSpeech(excerpt, vaultRoot, ttsLanguage),
         300_000,
         'Speech synthesis'
       );
       if (result.audio_path) {
         setTtsAudioPath(result.audio_path);
+        if (trimmed) {
+          setSpeechNotice('Spoken the beginning of the description — the complete text is shown above.');
+        }
         requestAnimationFrame(() => {
           const el = speechAudioRef.current;
           if (el) {
@@ -356,7 +385,11 @@ export function AccessibilityView() {
           }
         });
       } else {
-        setSpeechNotice('Speech synthesis returned no audio for this description.');
+        // Live-caught 2026-09-13 (defect #25): the backend reports the real
+        // cause here (e.g. "local audio runtime exceeded 180 seconds") —
+        // surface it instead of a generic "no audio" (the old wording hid
+        // the deadline from both the user and the acceptance tests).
+        setSpeechNotice(`Spoken description failed: ${result.error || 'synthesis returned no audio'}`);
       }
     } catch (err) {
       // Speech is an enhancement for the description; the visible text
