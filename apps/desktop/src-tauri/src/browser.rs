@@ -560,6 +560,15 @@ fn encode_png_rgba(width: u32, height: u32, raw: &[u8]) -> Result<Vec<u8>, Strin
     Ok(png_bytes)
 }
 
+/// Probe point for display lookup, guaranteed to be INSIDE the window (its
+/// center). A maximized window reports its outer top-left off-display (e.g.
+/// -7,-7 for the drop-shadow frame on Windows), and `Screen::from_point(top_left)`
+/// then fails with "Monitor is invalid" — Describe Screen broke for any
+/// maximized window (defect #23, live-caught 2026-09-13).
+fn capture_probe_point(x: i32, y: i32, width: u32, height: u32) -> (i32, i32) {
+    (x + (width as i32 / 2), y + (height as i32 / 2))
+}
+
 /// Encode the on-screen region of a webview window as PNG bytes.
 /// Shared by the browser-lane Screenshot action and the blind-view
 /// "describe what's on the screen" assist (defect #20).
@@ -578,8 +587,16 @@ pub fn capture_window_png(
         .outer_size()
         .map_err(|e| format!("Cannot read window size: {}", e))?;
 
-    let screen = screenshots::Screen::from_point(position.x, position.y)
-        .map_err(|e| format!("No display contains the browser window: {}", e))?;
+    // Probe with the window center, falling back to the primary display if
+    // even that misses (window fully off-screen).
+    let (probe_x, probe_y) = capture_probe_point(position.x, position.y, size.width, size.height);
+    let screen = match screenshots::Screen::from_point(probe_x, probe_y) {
+        Ok(screen) => screen,
+        Err(_) => *screenshots::Screen::all()
+            .map_err(|e| format!("No display is available for capture: {}", e))?
+            .first()
+            .ok_or("No display is available for capture: screen list empty")?,
+    };
     let display = screen.display_info;
     let rel_x = (position.x - display.x).max(0);
     let rel_y = (position.y - display.y).max(0);
@@ -1142,6 +1159,38 @@ mod tests {
         let info = reader.next_frame(&mut pixels).expect("decode frame");
         assert_eq!(info.width, 2);
         assert_eq!(&pixels[..raw.len()], &raw[..]);
+    }
+
+    // -- Display probe point (defect #23) ------------------------------------
+    // Live-caught 2026-09-13: a MAXIMIZED window reports outer_position
+    // (-7,-7) (the drop-shadow frame extends off-display) and probing the
+    // display with the top-left failed with "Monitor is invalid", breaking
+    // Describe Screen for every maximized window. The probe must be a point
+    // INSIDE the window.
+
+    #[test]
+    fn probe_point_is_inside_maximized_window_with_negative_origin() {
+        // Exact geometry from the live catch: maximized on a 1280x720 display.
+        let (x, y) = capture_probe_point(-7, -7, 1295, 687);
+        assert!(
+            x >= 0 && y >= 0 && x < 1280 && y < 720,
+            "probe ({x},{y}) must land on the 1280x720 display"
+        );
+    }
+
+    #[test]
+    fn probe_point_is_inside_normal_window() {
+        let (x, y) = capture_probe_point(20, 20, 1100, 650);
+        assert_eq!((x, y), (570, 345));
+    }
+
+    #[test]
+    fn probe_point_still_inside_for_oversized_window() {
+        // A window larger than the display still yields a center that is
+        // within the window itself (so from_point finds the display under
+        // the window's middle, or the primary-display fallback engages).
+        let (x, y) = capture_probe_point(0, 0, 1920, 1080);
+        assert_eq!((x, y), (960, 540));
     }
 
     #[test]

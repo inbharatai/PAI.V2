@@ -289,8 +289,10 @@ pub async fn describe_image(
 /// used to live only as DOM thumbnails — a blind user's snapshot could never
 /// reach `describe_image`/`perform_ocr`, which take a file path. Snapshots are
 /// written to the host temp area (never the read-mostly vault package).
+/// Async (defect #23 family): sync commands run on the main/UI thread and a
+/// blocked UI thread drops the immediately-following describe/OCR IPC request.
 #[tauri::command]
-pub fn save_vision_snapshot(data_url: String) -> Result<String, String> {
+pub async fn save_vision_snapshot(data_url: String) -> Result<String, String> {
     let (header, payload) = data_url
         .split_once(',')
         .ok_or_else(|| "Snapshot data URL is malformed (no comma separator)".to_string())?;
@@ -342,55 +344,74 @@ fn write_vision_artifact(
 /// could only describe camera snapshots — a blind user had no way to ask
 /// "what is on my screen right now?". This captures what the app is actually
 /// showing and feeds the same describe-and-speak path.
+///
+/// Live-caught 2026-09-13 (defect #23): this was a SYNC command, and Tauri v2
+/// runs non-async commands on the MAIN/UI thread — the GDI capture blocked
+/// the UI thread right before the immediately-following `describe_image` IPC
+/// request, which was then silently dropped (the describe promise never
+/// settled, the button wedged on "Running vision model…" forever; 4-for-4
+/// reproducible, while a direct invoke seconds later always worked). Async +
+/// spawn_blocking moves the capture fully off the UI thread.
 #[tauri::command]
-pub fn capture_screen_snapshot(app: tauri::AppHandle) -> Result<String, String> {
-    let png_bytes = crate::browser::capture_window_png(&app, "main")?;
-    write_vision_artifact("screen", "png", &png_bytes)
+pub async fn capture_screen_snapshot(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let png_bytes = crate::browser::capture_window_png(&app, "main")?;
+        write_vision_artifact("screen", "png", &png_bytes)
+    })
+    .await
+    .map_err(|e| format!("Screen capture task failed: {e}"))?
 }
 
 /// Camera info — enumerates available video capture devices.
 /// Actual frame capture uses the frontend WebView + getUserMedia API.
+/// Async since it shells out to PowerShell (seconds-long on the main thread
+/// otherwise — defect #23 family: sync commands freeze the UI thread).
 #[tauri::command]
-pub fn get_camera_info() -> Result<CameraInfo, String> {
-    let mut devices = Vec::new();
-    if cfg!(target_os = "windows") {
-        let output = std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('Camera','Image') } | Select-Object FriendlyName,InstanceId,Status | ConvertTo-Json -Compress",
-            ])
-            .output()
-            .map_err(|error| format!("Camera enumeration failed: {error}"))?;
-        if output.status.success() {
-            let value: serde_json::Value =
-                serde_json::from_slice(&output.stdout).unwrap_or(serde_json::Value::Array(vec![]));
-            let rows = match value {
-                serde_json::Value::Array(rows) => rows,
-                serde_json::Value::Object(_) => vec![value],
-                _ => Vec::new(),
-            };
-            for row in rows {
-                devices.push(CameraDevice {
-                    name: row
-                        .get("FriendlyName")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("Unnamed camera")
-                        .to_string(),
-                    device_id: row
-                        .get("InstanceId")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    status: row
-                        .get("Status")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("Unknown")
-                        .to_string(),
-                });
+pub async fn get_camera_info() -> Result<CameraInfo, String> {
+    let devices = tauri::async_runtime::spawn_blocking(|| {
+        let mut devices = Vec::new();
+        if cfg!(target_os = "windows") {
+            let output = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "Get-PnpDevice -PresentOnly | Where-Object { $_.Class -in @('Camera','Image') } | Select-Object FriendlyName,InstanceId,Status | ConvertTo-Json -Compress",
+                ])
+                .output()
+                .map_err(|error| format!("Camera enumeration failed: {error}"))?;
+            if output.status.success() {
+                let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+                    .unwrap_or(serde_json::Value::Array(vec![]));
+                let rows = match value {
+                    serde_json::Value::Array(rows) => rows,
+                    serde_json::Value::Object(_) => vec![value],
+                    _ => Vec::new(),
+                };
+                for row in rows {
+                    devices.push(CameraDevice {
+                        name: row
+                            .get("FriendlyName")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("Unnamed camera")
+                            .to_string(),
+                        device_id: row
+                            .get("InstanceId")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        status: row
+                            .get("Status")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("Unknown")
+                            .to_string(),
+                    });
+                }
             }
         }
-    }
+        Ok::<_, String>(devices)
+    })
+    .await
+    .map_err(|e| format!("Camera enumeration task failed: {e}"))??;
     Ok(CameraInfo {
         devices,
         capture_backend: "webview-getUserMedia".to_string(),
@@ -433,8 +454,8 @@ mod tests {
     /// Defect #19: a captured camera frame (data URL) must land on disk as a
     /// decodable image the vision pipeline can read, with an extension that
     /// matches its MIME type.
-    #[test]
-    fn save_vision_snapshot_persists_a_readable_jpeg() {
+    #[tokio::test]
+    async fn save_vision_snapshot_persists_a_readable_jpeg() {
         // 1x1 red JPEG (smallest valid baseline JPEG).
         let jpeg: &[u8] = &[
             0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
@@ -443,7 +464,7 @@ mod tests {
         let mut data_url = String::from("data:image/jpeg;base64,");
         data_url.push_str(&base64::engine::general_purpose::STANDARD.encode(jpeg));
 
-        let path = save_vision_snapshot(data_url).expect("snapshot save");
+        let path = save_vision_snapshot(data_url).await.expect("snapshot save");
         let saved = PathBuf::from(&path);
         assert!(saved.exists(), "snapshot file must exist at {path}");
         assert_eq!(saved.extension().and_then(|e| e.to_str()), Some("jpg"));
@@ -455,11 +476,11 @@ mod tests {
         std::fs::remove_file(&saved).ok();
     }
 
-    #[test]
-    fn save_vision_snapshot_rejects_non_image_and_garbage() {
-        assert!(save_vision_snapshot("not a data url".to_string()).is_err());
+    #[tokio::test]
+    async fn save_vision_snapshot_rejects_non_image_and_garbage() {
+        assert!(save_vision_snapshot("not a data url".to_string()).await.is_err());
         assert!(
-            save_vision_snapshot("data:image/png;base64,!!!not-base64!!!".to_string()).is_err()
+            save_vision_snapshot("data:image/png;base64,!!!not-base64!!!".to_string()).await.is_err()
         );
     }
 
