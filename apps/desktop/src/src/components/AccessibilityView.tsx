@@ -1,6 +1,25 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { tauriApi, type AccessibilityStatus, type AccessibilitySettingsInput } from '../lib/tauri';
 
+/** Live-caught 2026-09-13 (defect #23): a vision invoke whose IPC response was
+ * dropped never settled, wedging the UI on "Running vision model…" forever
+ * with no error and no way to recover without remounting the view. Every
+ * long-running vision invoke is bounded by this wrapper so the user always
+ * gets either a result or an honest timeout error, and the buttons re-enable.
+ * The backend may still complete the work; this only bounds how long the UI
+ * will wait silently. */
+function withVisionTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`${what} did not finish within ${Math.round(ms / 1000)}s. Try again — if this keeps happening, restart the app.`)),
+        ms
+      )
+    ),
+  ]);
+}
+
 export function AccessibilityView() {
   const [status, setStatus] = useState<AccessibilityStatus | null>(null);
   const [_isLoading, setIsLoading] = useState(true);
@@ -229,7 +248,11 @@ export function AccessibilityView() {
   async function describeScreen() {
     setVisionError('');
     try {
-      const screenPath = await tauriApi.captureScreenSnapshot();
+      const screenPath = await withVisionTimeout(
+        tauriApi.captureScreenSnapshot(),
+        30_000,
+        'Screen capture'
+      );
       setImagePath(screenPath);
       await runDescribeOn(screenPath);
     } catch (err) {
@@ -254,7 +277,11 @@ export function AccessibilityView() {
     setVisionError('');
     setVisionResult('');
     try {
-      const result = await tauriApi.performOcr(imagePath.trim());
+      const result = await withVisionTimeout(
+        tauriApi.performOcr(imagePath.trim()),
+        300_000,
+        'OCR'
+      );
       setVisionResult(result.text);
     } catch (err) {
       setVisionError(`OCR failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -275,7 +302,15 @@ export function AccessibilityView() {
     setVisionError('');
     setVisionResult('');
     try {
-      const result = await tauriApi.describeImage(path);
+      // Live-caught 2026-09-13 (defect #23): an invoke whose IPC response was
+      // dropped never settled — the button stayed wedged on "Running vision
+      // model…" forever with no error. Every vision invoke is now bounded so
+      // the user always gets either a result or an honest error.
+      const result = await withVisionTimeout(
+        tauriApi.describeImage(path),
+        300_000,
+        'Image description'
+      );
       setVisionResult(result.description);
       await speakText(result.description);
     } catch (err) {
@@ -290,7 +325,11 @@ export function AccessibilityView() {
   async function speakText(text: string) {
     if (!vaultRoot || !text.trim()) return;
     try {
-      const result = await tauriApi.synthesizeSpeech(text.trim(), vaultRoot, ttsLanguage);
+      const result = await withVisionTimeout(
+        tauriApi.synthesizeSpeech(text.trim(), vaultRoot, ttsLanguage),
+        90_000,
+        'Speech synthesis'
+      );
       if (result.audio_path) {
         setTtsAudioPath(result.audio_path);
         requestAnimationFrame(() => {

@@ -941,10 +941,29 @@ impl ModelManager {
             .to_path_buf();
 
         let mut cmd = Command::new(&llama_path);
-        cmd.current_dir(&backend_dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .args([
+        cmd.current_dir(&backend_dir);
+        // Defect #23 follow-up (live-caught 2026-09-13): the server's output
+        // was discarded entirely (Stdio::null), making live failures — like
+        // a request the server rejected instantly — undiagnosable from the
+        // drive. Log to a rotating pair of files in the host temp area so a
+        // debug session can see exactly what the server received and did.
+        let log_dir = std::env::temp_dir().join("unoone-logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join("llama-server.log");
+        // Rotate the previous run's log so each session starts fresh.
+        let _ = std::fs::rename(&log_path, log_dir.join("llama-server.prev.log"));
+        let log_file = std::fs::File::create(&log_path).ok();
+        match log_file.and_then(|f| f.try_clone().ok().map(|dup| (f, dup))) {
+            Some((file, dup)) => {
+                cmd.stdout(std::process::Stdio::from(file));
+                cmd.stderr(std::process::Stdio::from(dup));
+            }
+            None => {
+                cmd.stdout(std::process::Stdio::null());
+                cmd.stderr(std::process::Stdio::null());
+            }
+        }
+        cmd.args([
                 "-m",
                 &config.model_path,
                 "--port",
@@ -1252,7 +1271,15 @@ impl ModelManager {
                 .collect::<Vec<_>>());
         }
 
-        let client = reqwest::Client::new();
+        // Bounded client: a completion can legitimately take minutes (large
+        // prompts, vision payloads) but must never hang FOREVER — an
+        // unbounded default client wedged agent loops and the blind-view
+        // describe flow when the server stopped responding (defect #23).
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(600))
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
         let response = client
             .post(&url)
             .json(&body)
