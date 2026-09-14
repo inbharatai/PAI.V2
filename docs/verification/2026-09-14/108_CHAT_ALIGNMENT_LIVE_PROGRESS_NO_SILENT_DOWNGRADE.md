@@ -47,8 +47,10 @@ When the harness call fails and `fullAccess` is ON, the legacy fallback is no lo
 
 ## 5. Live acceptance (post-merge, on the re-staged drive)
 
-- [ ] A full-access build request visibly streams per-tool activity (Writing/Reading/Running lines + code previews) in the chat while it runs, and the run builds real files
-- [ ] With the model server down + full access on, a build request surfaces "Agent pipeline stopped: …" — no read-only refusal, no pasted code
+- [x] A full-access build request visibly streams per-tool activity (Writing/Reading/Running lines + code previews) in the chat while it runs, and the run builds real files
+  - **Proven 2026-09-14, run 4 (main `8b3644b`, re-staged drive):** the generating bubble streamed the full trail live — `→ Creating directory task-board ✓ Done: created directory task-board → Writing task-board/index.html ✓ Done: wrote 1137 bytes → … → Running node ✓ Done: status=Some(0) stdout: Server running at http://localhost:8199 PASS: … FAIL: …` — captured by the monitor's 2-minute snapshots through the run, and the run's real files verified on disk (4/4) with the suite passing.
+- [x] With the model server down + full access on, a build request surfaces "Agent pipeline stopped: …" — no read-only refusal, no pasted code
+  - **Proven 2026-09-14 (main `8b3644b`, re-staged drive):** server stopped via the Model tab, full access ON, build request sent → the chat surfaced verbatim: *"Agent pipeline stopped: Local model has not passed identity verification. The task was NOT run — no files were written and no commands were executed. Retry once the model is back (its state is in the Model Manager, or reload the app)."* Probe verdict: no "As an AI assistant…" refusal, no pasted `<!DOCTYPE html>`, no fallback pill.
 - [ ] Blind aid: "What's in front of me?" speaks a short scene summary of a real camera frame
 - [ ] "Narrate My Surroundings" speaks the scene, stays quiet when nothing changed, and stops honestly on repeated errors
 - [ ] OCR/vision result → "Ask in Chat" lands in the chat panel with the text/image attached and the view switched

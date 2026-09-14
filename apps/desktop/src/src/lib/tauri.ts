@@ -508,6 +508,7 @@ export const tauriApi = {
   saveVisionSnapshot: (dataUrl: string) =>
     invoke<string>('save_vision_snapshot', { data_url: dataUrl }),
   captureScreenSnapshot: () => invoke<string>('capture_screen_snapshot'),
+  getWorkspaceRoot: () => invoke<string>('get_workspace_root'),
   encodeImageForVision: (imagePath: string) => invoke<string>('encode_image_for_vision', { image_path: imagePath }),
 
   // Security

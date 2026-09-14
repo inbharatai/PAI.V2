@@ -212,6 +212,7 @@ fn main() {
             // adapter. The legacy agent loop remains registered as an explicit
             // rollback path until acceptance parity is proven on device.
             harness_bridge::harness_chat,
+            harness_bridge::get_workspace_root,
             bharat_audio::get_bharat_audio_status,
         ])
         .setup(|app| {

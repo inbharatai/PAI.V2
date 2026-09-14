@@ -11,6 +11,10 @@ interface AgentProgressEvent {
   tool: string;
   detail: string;
   code_preview: string | null;
+  /** Local wall-clock "HH:MM:SS" stamped by the backend at emit time
+   * (defect #37, live-caught 2026-09-14: the user could not tell when each
+   * step happened — other agent tools like Codex/GLM timestamp activity). */
+  at: string;
 }
 
 /** Report agent-run activity so App.tsx can defer the window-blur auto-lock
@@ -49,6 +53,8 @@ interface AgentStep {
   text?: string;
   confidence?: number | null;
   approved?: boolean;
+  /** Local wall-clock "HH:MM:SS" from the backend event (defect #37). */
+  at?: string;
 }
 
 /** Extensions parsed by the backend's audited document extractors. */
@@ -323,6 +329,20 @@ export function ChatView() {
     return () => { cancelled = true; };
   }, []);
 
+  // The real expanded agent workspace root for the full-access label (defect
+  // #36, live-caught 2026-09-14: the label showed a literal
+  // "%USERPROFILE%\UnoOneAgent" and the agent's answers said only "in your
+  // workspace" — the user could not find the files the tool built). Falls
+  // back to the literal pattern so the label degrades, never blanks.
+  const [workspaceRoot, setWorkspaceRoot] = useState('%USERPROFILE%\\UnoOneAgent');
+  useEffect(() => {
+    let cancelled = false;
+    void tauriApi.getWorkspaceRoot()
+      .then(root => { if (!cancelled && root) setWorkspaceRoot(root); })
+      .catch(() => { /* label keeps the literal pattern */ });
+    return () => { cancelled = true; };
+  }, []);
+
   // Never leak the recording timer.
   useEffect(() => () => {
     if (recordTimerRef.current !== undefined) window.clearInterval(recordTimerRef.current);
@@ -522,8 +542,8 @@ export function ChatView() {
             : null;
         const progressSteps: AgentStep[] = liveProgressRef.current.map(ev =>
           ev.phase === 'call'
-            ? { type: 'ToolCall', tool: ev.tool, text: ev.detail }
-            : { type: 'ToolResult', tool: ev.tool, result: ev.detail }
+            ? { type: 'ToolCall', tool: ev.tool, text: ev.detail, at: ev.at }
+            : { type: 'ToolResult', tool: ev.tool, result: ev.detail, at: ev.at }
         );
         if (telemetry) {
           progressSteps.unshift({ type: 'Thinking', text: telemetry });
@@ -630,6 +650,11 @@ export function ChatView() {
             return (
               <div key={i} style={{ color: 'var(--info, #60a5fa)', padding: '2px 0' }}>
                 <strong>→ {step.tool}</strong>
+                {step.at && (
+                  <span style={{ color: 'var(--text-muted, #666)', marginLeft: '6px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px' }}>
+                    {step.at}
+                  </span>
+                )}
                 {step.args && Object.keys(step.args).length > 0 && (
                   <span style={{ color: 'var(--text-secondary, #888)', marginLeft: '6px' }}>
                     {JSON.stringify(step.args).slice(0, 100)}
@@ -641,6 +666,11 @@ export function ChatView() {
             return (
               <div key={i} style={{ color: 'var(--success, #4ade80)', padding: '2px 0' }}>
                 <strong>✓ {step.tool}</strong>
+                {step.at && (
+                  <span style={{ color: 'var(--text-muted, #666)', marginLeft: '6px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px' }}>
+                    {step.at}
+                  </span>
+                )}
                 <span style={{ color: 'var(--text-secondary, #888)', marginLeft: '6px' }}>
                   {step.result?.slice(0, 120)}{step.result && step.result.length > 120 ? '…' : ''}
                 </span>
@@ -790,6 +820,11 @@ export function ChatView() {
                   </div>
                   {liveProgress.slice(-8).map((ev, i) => (
                     <div key={i} style={{ fontSize: '12px', color: 'var(--text-secondary, #888)' }}>
+                      {ev.at && (
+                        <span style={{ color: 'var(--text-muted, #666)', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '11px', marginRight: '6px' }}>
+                          {ev.at}
+                        </span>
+                      )}
                       {ev.phase === 'call' ? (
                         <span>
                           <span style={{ color: 'var(--text-muted, #666)' }}>→ </span>
@@ -857,7 +892,7 @@ export function ChatView() {
             <span>
               Full access — read/write files, run commands, drive the browser
               <span style={{ color: 'var(--text-muted, #666)' }}>
-                {' '}(workspace: %USERPROFILE%\UnoOneAgent · audited + budgeted)
+                {' '}(workspace: {workspaceRoot} · audited + budgeted)
               </span>
             </span>
           </label>
