@@ -8,7 +8,7 @@
 use inbharat_harness_core::providers::FinishReason;
 use inbharat_harness_core::{
     CancellationToken, ErrorCode, Failure, FailureClass, HarnessResult, ModelChunk, ModelProvider,
-    ModelRequest, ModelResponse,
+    ModelRequest, ModelResponse, Value,
 };
 use serde_json::{json, Value as JsonValue};
 use std::io::{Read, Write};
@@ -94,6 +94,64 @@ fn parse_tool_transcript(content: &str) -> Option<(String, String, String)> {
     Some((tool_id.to_owned(), call_id.to_owned(), result.to_owned()))
 }
 
+/// One parsed tool exchange from the Harness model transcript.
+struct ToolExchange {
+    tool_id: String,
+    call_id: String,
+    arguments: String,
+    result: String,
+}
+
+/// Parses a tool exchange from the Harness transcript. New runs encode the
+/// exchange as a compact JSON object (the runtime's `encode_tool_transcript`)
+/// which is parsed FIRST so the reconstructed assistant tool_calls echo the
+/// arguments the model actually used — defect #30 (live-caught 2026-09-14):
+/// with empty `"arguments": "{}"` the model could not see what it had
+/// written and rewrote the same file every step. Legacy prefix-format
+/// transcripts still parse, with empty arguments as before.
+fn parse_tool_exchange(content: &str) -> Option<ToolExchange> {
+    if let Ok(value) = Value::parse_json(content) {
+        if let Some(exchange) = exchange_from_json(&value, content) {
+            return Some(exchange);
+        }
+    }
+    let (tool_id, call_id, result) = parse_tool_transcript(content)?;
+    Some(ToolExchange {
+        tool_id,
+        call_id,
+        arguments: "{}".to_owned(),
+        result,
+    })
+}
+
+fn exchange_from_json(value: &Value, raw: &str) -> Option<ToolExchange> {
+    let object = value.as_object()?;
+    let tool_id = object.get("tool").and_then(Value::as_str)?;
+    let call_id = object.get("call").and_then(Value::as_str)?;
+    if tool_id.is_empty() || call_id.is_empty() {
+        return None;
+    }
+    let arguments = match object.get("args").and_then(Value::as_str) {
+        Some(arguments) if !arguments.is_empty() => arguments.to_owned(),
+        _ => "{}".to_owned(),
+    };
+    let result = match object.get("result") {
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_canonical_json(),
+        None => match object.get("error") {
+            Some(Value::String(text)) => format!("error: {text}"),
+            Some(other) => format!("error: {}", other.to_canonical_json()),
+            None => raw.to_owned(),
+        },
+    };
+    Some(ToolExchange {
+        tool_id: tool_id.to_owned(),
+        call_id: call_id.to_owned(),
+        arguments,
+        result,
+    })
+}
+
 fn role_name(role: inbharat_harness_core::providers::ModelRole) -> &'static str {
     match role {
         inbharat_harness_core::providers::ModelRole::System => "system",
@@ -129,8 +187,11 @@ fn build_openai_messages(
     // issued the call, re-issues it every step and the run dies on the
     // step budget (live-observed: 48/48 steps, budget_exceeded, then a
     // silent legacy fallback). Reconstruct the canonical pair: one
-    // assistant message carrying the grouped tool_calls, followed by each
-    // tool result with its matching tool_call_id.
+    // assistant message carrying the grouped tool_calls — with the REAL
+    // arguments when the transcript carries them (defect #30, live-caught
+    // 2026-09-14: empty arguments hid what the model had written, so it
+    // rewrote the same first file every step) — followed by each tool
+    // result with its matching tool_call_id.
     let mut index = 0;
     while index < history.len() {
         let message = &history[index];
@@ -141,19 +202,19 @@ fn build_openai_messages(
                 && history[index].role == inbharat_harness_core::providers::ModelRole::Tool
             {
                 let transcript = &history[index].content;
-                if let Some((tool_id, call_id, result)) = parse_tool_transcript(transcript) {
+                if let Some(exchange) = parse_tool_exchange(transcript) {
                     calls.push(json!({
-                        "id": call_id,
+                        "id": exchange.call_id,
                         "type": "function",
                         "function": {
-                            "name": tool_id,
-                            "arguments": "{}",
+                            "name": exchange.tool_id,
+                            "arguments": exchange.arguments,
                         },
                     }));
                     results.push(json!({
                         "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": result,
+                        "tool_call_id": exchange.call_id,
+                        "content": exchange.result,
                     }));
                 } else {
                     // Not the harness transcript format (defensive): pass
@@ -802,6 +863,100 @@ mod transcript_tests {
         assert!(parse_tool_transcript("").is_none());
         assert!(parse_tool_transcript("the model wrote something").is_none());
         assert!(parse_tool_transcript("tool=fs.write missing-call-marker result=x").is_none());
+    }
+
+    #[test]
+    fn json_tool_exchange_carries_real_arguments() {
+        // Defect #30: the JSON transcript shape the runtime emits since the
+        // fix — arguments must survive parsing, not collapse to "{}".
+        let transcript = r#"{"args":"{\"contents\":\"hello\",\"path\":\"task-board/app.js\"}","call":"r-1-1-2","result":"wrote 5 bytes to task-board/app.js","tool":"fs.write"}"#;
+        let exchange = parse_tool_exchange(transcript).expect("json transcript parses");
+        assert_eq!(exchange.tool_id, "fs.write");
+        assert_eq!(exchange.call_id, "r-1-1-2");
+        assert_eq!(
+            exchange.arguments,
+            r#"{"contents":"hello","path":"task-board/app.js"}"#
+        );
+        assert_eq!(exchange.result, "wrote 5 bytes to task-board/app.js");
+    }
+
+    #[test]
+    fn json_tool_exchange_survives_legacy_markers_inside_arguments() {
+        // File contents legitimately contain " tool=" / " call=" /
+        // " result=" — the ambiguity that forced the move to JSON. The
+        // legacy prefix parser would have split on the first marker.
+        let arguments = Value::Object(std::collections::BTreeMap::from([
+            (
+                "contents".to_owned(),
+                Value::String("tool=x call=y result=z".to_owned()),
+            ),
+            ("path".to_owned(), Value::String("a.txt".to_owned())),
+        ]));
+        // The runtime stores "args" as the canonical-JSON STRING of the
+        // object, itself JSON-quoted inside the transcript.
+        let args_quoted = Value::String(arguments.to_canonical_json()).to_canonical_json();
+        let transcript = format!(
+            r#"{{"args":{args_quoted},"call":"r-1-1-1","result":"wrote 26 bytes","tool":"fs.write"}}"#
+        );
+        let exchange = parse_tool_exchange(&transcript).expect("json transcript parses");
+        let arguments = Value::parse_json(&exchange.arguments).expect("args stay valid JSON");
+        let contents = arguments
+            .as_object()
+            .and_then(|object| object.get("contents"))
+            .and_then(Value::as_str)
+            .expect("contents survive");
+        assert_eq!(contents, "tool=x call=y result=z");
+    }
+
+    #[test]
+    fn json_tool_exchange_error_variant() {
+        let transcript =
+            r#"{"args":"{}","call":"r-1-1-1","error":"fs.write: denied","tool":"fs.write"}"#;
+        let exchange = parse_tool_exchange(transcript).expect("json transcript parses");
+        assert_eq!(exchange.result, "error: fs.write: denied");
+    }
+
+    #[test]
+    fn json_tool_exchange_canonicalizes_structured_results() {
+        // derive_model_history embeds the session's structured output Value
+        // (not the model-facing string) — canonicalize it onto the wire.
+        let transcript = r#"{"args":"{\"path\":\".\"}","call":"r-1-1-1","result":{"entries":["a.txt","b.txt"]},"tool":"fs.list"}"#;
+        let exchange = parse_tool_exchange(transcript).expect("json transcript parses");
+        assert_eq!(exchange.result, r#"{"entries":["a.txt","b.txt"]}"#);
+    }
+
+    #[test]
+    fn legacy_transcript_still_parses_with_empty_arguments() {
+        let exchange = parse_tool_exchange("tool=fs.write call=r-1-2-1 result=Wrote 12 bytes")
+            .expect("legacy format keeps parsing");
+        assert_eq!(exchange.tool_id, "fs.write");
+        assert_eq!(exchange.arguments, "{}");
+        assert_eq!(exchange.result, "Wrote 12 bytes");
+    }
+
+    #[test]
+    fn json_tool_exchange_echoes_arguments_on_the_wire() {
+        let history = vec![
+            message(ModelRole::User, "build the task board"),
+            message(
+                ModelRole::Tool,
+                r#"{"args":"{\"contents\":\"<h1>ok</h1>\",\"path\":\"task-board/index.html\"}","call":"r-1-1-2","result":"wrote 14 bytes to task-board/index.html","tool":"fs.write"}"#,
+            ),
+            message(ModelRole::User, "continue"),
+        ];
+        let messages =
+            build_openai_messages("", &history, &[], &Default::default()).expect("build succeeds");
+        let calls = messages[1]["tool_calls"].as_array().expect("grouped calls");
+        assert_eq!(calls[0]["function"]["name"], "fs.write");
+        assert_eq!(
+            calls[0]["function"]["arguments"],
+            r#"{"contents":"<h1>ok</h1>","path":"task-board/index.html"}"#
+        );
+        assert_eq!(messages[2]["tool_call_id"], "r-1-1-2");
+        assert_eq!(
+            messages[2]["content"],
+            "wrote 14 bytes to task-board/index.html"
+        );
     }
 
     #[test]
