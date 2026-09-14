@@ -30,6 +30,9 @@ connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost
 
 ## 5. Live acceptance (post-merge, on the re-staged drive)
 
-- [ ] Chat 🖥 button captures the app window and attaches the screenshot to the pending-image row with the "What is on my screen?" prefill — no error toast
-- [ ] Sending it returns a real description of the app UI through the chat panel (vision lane end-to-end)
-- [ ] TTS playback (🔊 Speak) still works after the CSP change (regression guard for the media-src path)
+- [x] Chat 🖥 button captures the app window and attaches the screenshot to the pending-image row with the "What is on my screen?" prefill — no error toast
+  - **Proven 2026-09-14 (main `8b3644b`, re-staged drive):** click → screenshot attached as a data-URL image within seconds, prefill *"What is on my screen? Describe the content briefly and read out any visible text."*, zero error toasts (the "Failed to fetch" is gone).
+- [x] Sending it returns a real description of the app UI through the chat panel (vision lane end-to-end)
+  - **Proven same session:** the 1131-char answer described the actual live screen — "a terminal window… running a process related to 'Resuming PALV2'… an agentic workflow where the system is performing…" — i.e. it correctly read the visible Claude Code session on the monitor. Ground truth verified by the human driving the screen.
+- [x] TTS playback (🔊 Speak) still works after the CSP change (regression guard for the media-src path)
+  - **Proven same session:** the answer's 🔊 Speak produced a "synthesizing…" state and then a live `<audio>` element sourced through the asset protocol (`http://asset.localhost/D%3A%5CUNOONE%5C…tts_…`) — both the media-src path and playback wiring survived the connect-src addition.

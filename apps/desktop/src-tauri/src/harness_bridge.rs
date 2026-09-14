@@ -61,6 +61,17 @@ pub struct AgentProgressEvent {
     /// Short head of the code being written (fs.write contents) so the user
     /// can literally watch the file appear, Codex-style. Bounded tightly.
     pub code_preview: Option<String>,
+    /// Local wall-clock "HH:MM:SS" of the event — Codex/GLM timestamp every
+    /// action and the user asked for the same (defect #37, live-caught
+    /// 2026-09-14: "why can't we see when it was built like we can in other
+    /// AI"). Bounded by the event, not the run: each line carries its own
+    /// time so a long run reads like a timeline.
+    pub at: String,
+}
+
+/// Local wall-clock "HH:MM:SS" for a progress event.
+fn progress_timestamp() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
 /// Short, human phrasing of what a tool call is about to do.
@@ -191,6 +202,7 @@ impl Tool for ProgressTool {
                 tool: tool.clone(),
                 detail: detail.clone(),
                 code_preview: preview,
+                at: progress_timestamp(),
             },
         );
         match self.inner.execute(arguments, context) {
@@ -207,6 +219,7 @@ impl Tool for ProgressTool {
                         tool: tool.clone(),
                         detail: format!("Done: {summary}"),
                         code_preview: None,
+                        at: progress_timestamp(),
                     },
                 );
                 Ok(output)
@@ -219,6 +232,7 @@ impl Tool for ProgressTool {
                         tool: tool.clone(),
                         detail: format!("Failed: {failure}"),
                         code_preview: None,
+                        at: progress_timestamp(),
                     },
                 );
                 Err(failure)
@@ -747,7 +761,11 @@ fn desktop_system_prefix(full_access: bool) -> String {
              established why it cannot. Never report the task complete or claim \
              code is 'functional' while its own output shows a failure, and never \
              explain a failure away with environment speculation when the output \
-             points at a defect in the files you wrote. Never paste code or file \
+             points at a defect in the files you wrote. When a task creates or \
+             changes files, end your answer by listing the exact ABSOLUTE path \
+             of every file you created or changed (the workspace root is \
+             {workspace}), so the user can find and open them — never say only \
+             'in your workspace' or a bare filename. Never paste code or file \
              contents into the \
              chat instead of creating the real files, never stop halfway to ask the \
              user to do steps you can do yourself, and never claim you cannot access \
@@ -1599,6 +1617,15 @@ fn desktop_workspace_tools(
 
 /// Unified text orchestration entry point. The legacy agent remains compiled only
 /// as an explicit rollback path while the frontend production text path uses Harness.
+/// The agent workspace's real absolute path for UI display (defect #36,
+/// live-caught 2026-09-14: the chat's full-access label showed a literal
+/// unexpanded "%USERPROFILE%\UnoOneAgent" and the agent's answers said only
+/// "in your workspace" — the user could not find the files the tool built).
+#[tauri::command]
+pub async fn get_workspace_root() -> Result<String, String> {
+    workspace_root().map(|path| path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri injects the trailing state params
 pub async fn harness_chat(
@@ -2065,6 +2092,57 @@ mod workspace_tool_tests {
         assert!(
             !desktop_system_prefix(false).contains("A failing test"),
             "read-only mode must not claim agent tools it does not hold"
+        );
+    }
+
+    /// Defect #36 (live-caught 2026-09-14): the agent's answers said only
+    /// "in your workspace" and the user could not find the files the tool
+    /// built. The briefing must force absolute paths, and the command that
+    /// feeds the chat label must return the real expanded root. Defect #37:
+    /// every progress event must carry a local HH:MM:SS timestamp.
+    #[test]
+    fn briefing_requires_absolute_paths_and_timestamped_progress() {
+        let prompt = desktop_system_prefix(true);
+        assert!(
+            prompt.contains("listing the exact ABSOLUTE path of every file you created or changed"),
+            "the briefing must force absolute file paths in answers"
+        );
+        assert!(
+            prompt.contains("never say only 'in your workspace' or a bare filename"),
+            "the briefing must forbid vague file locations"
+        );
+        assert!(
+            prompt.contains("the workspace root is"),
+            "the briefing must tell the agent the workspace root"
+        );
+
+        // Defect #36 label: the command's backing resolver must return the
+        // real expanded root, never the literal %USERPROFILE% pattern.
+        let root =
+            workspace_root().unwrap_or_else(|failure| panic!("workspace_root failed: {failure}"));
+        assert!(
+            root.is_absolute(),
+            "the workspace root must be absolute, got {}",
+            root.display()
+        );
+
+        // Defect #37: HH:MM:SS local wall-clock shape on every event.
+        let stamp = progress_timestamp();
+        assert_eq!(
+            stamp.len(),
+            8,
+            "progress timestamps must be HH:MM:SS, got {stamp}"
+        );
+        assert_eq!(stamp.as_bytes()[2], b':', "expected HH:MM:SS, got {stamp}");
+        assert_eq!(stamp.as_bytes()[5], b':', "expected HH:MM:SS, got {stamp}");
+        let parts: Vec<u32> = stamp
+            .split(':')
+            .map(|piece| piece.parse().unwrap_or(u32::MAX))
+            .collect();
+        assert_eq!(parts.len(), 3, "expected HH:MM:SS, got {stamp}");
+        assert!(
+            parts[0] < 24 && parts[1] < 60 && parts[2] < 60,
+            "invalid time {stamp}"
         );
     }
 

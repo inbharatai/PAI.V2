@@ -26,6 +26,8 @@ Timeline correlation: the user had switched to the Accessibility tab (window blu
 
 ## 5. Live acceptance (post-merge, on the re-staged drive)
 
-- [ ] A long-coding acceptance run completes while the window stays blurred past the 5-minute auto-lock — all 4 task-board files on disk, no aborted llama-server request, watcher verdict PASS
-- [ ] After the run lands, the deferred auto-lock still fires (the vault locks once the agent is no longer active) — auto-lock is deferred, not disabled
+- [x] A long-coding acceptance run completes while the window stays blurred past the 5-minute auto-lock — all 4 task-board files on disk, no aborted llama-server request, watcher verdict PASS
+  - **Proven twice.** Run 1 (staged `65f9adb`, window blurred at t+2min via CDP blur event): the run survived past the 5-minute mark (monitor: `locked=false` at t+5+min, `abortedRequests=0` throughout, 4/4 files written), and the deferred lock fired only after the run landed — the vault re-unlock then destroyed the answer DOM, which the first watcher misread as a product FAIL. Run 4 (staged `8b3644b`, window never focused the entire run): `locked=false` at t+2/4/6/8/10/12min with `abortedRequests=0` through the full run, and the formal verdict TRUE PASS — with the deferred lock firing only after the run settled.
+- [x] After the run lands, the deferred auto-lock still fires (the vault locks once the agent is no longer active) — auto-lock is deferred, not disabled
+  - **Proven twice** (runs 1 and 4): the monitor shows the vault locking at the first check-in after the answer landed (run 4: answer visible t+8–12min, `locked=true` at t+12min, ~2 min after settle — the 30-second re-check loop honoring the run's completion).
 - [ ] Manual Lock mid-run still stops everything immediately
