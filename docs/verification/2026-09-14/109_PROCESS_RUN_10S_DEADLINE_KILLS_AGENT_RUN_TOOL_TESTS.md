@@ -38,6 +38,7 @@ Single source of truth: the tool manifest now owns the deadline, and the spec de
 
 ## 5. Live acceptance (post-merge, on the re-staged drive)
 
-- [ ] A long-coding acceptance run in which the agent runs its own Playwright suite (`node task-board/test-app.js`) completes **without** `subprocess deadline exceeded` — the process.run call lasts past the 10-second mark and returns real output
+- [x] A long-coding acceptance run in which the agent runs its own Playwright suite (`node task-board/test-app.js`) completes **without** `subprocess deadline exceeded` — the process.run call lasts past the 10-second mark and returns real output
+  - **Proven 2026-09-14, run 3 on main `08360e2` (re-staged drive):** the `node task-board/test-app.js` call ran ~35 s (through the Playwright `page.fill` 30 s timeout *inside* the script), returned full stdout/stderr ("Server started on port 8199 / Server closed. / Test Error: page.fill: Timeout 30000ms exceeded"), and the agent quoted the exact output in its answer. Zero `subprocess deadline exceeded`.
 - [ ] The agent reports the test suite's own PASS output in its answer (≥3 PASS lines, 0 FAIL, no fallback, no denial) and the watcher verdict is TRUE PASS
 - [ ] A quick process.run probe (e.g. `node -e`) still completes in seconds — the 180 s deadline is a cap, not a floor; short commands are not slowed
