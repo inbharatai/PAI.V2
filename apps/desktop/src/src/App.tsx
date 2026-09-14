@@ -202,17 +202,56 @@ function App() {
     };
   }, [handleLock]);
 
+  // Defect #31 (live-caught 2026-09-14): the blur auto-lock calls
+  // handleLock → stop_model_server, which killed an in-flight agent task —
+  // a long-coding acceptance run died at 3/4 files the moment the window
+  // lost focus for 5 minutes, and the panel then honestly reported the
+  // model manager as torn down. An active run is not idle: while one is in
+  // flight (ChatView reports activity via 'unoone:agent-activity'), the
+  // auto-lock defers and locks once the run lands (or the window
+  // refocuses). Manual lock — the Lock button, Ctrl+L, or pen-drive
+  // removal — is explicit user intent and still acts immediately.
+  const agentActiveRef = useRef(false);
+  useEffect(() => {
+    const onActivity = (e: Event) => {
+      agentActiveRef.current = (e as CustomEvent<{ active: boolean }>).detail.active;
+    };
+    window.addEventListener('unoone:agent-activity', onActivity);
+    return () => window.removeEventListener('unoone:agent-activity', onActivity);
+  }, []);
+
+  // Cross-panel bridge (2026-09-14 OCR/blind-aid alignment): any lane that
+  // hands a question or a frame to the chat panel (e.g. AccessibilityView's
+  // "Ask in Chat") also brings the user to that panel, so the answer lands
+  // in front of them instead of in a hidden tab.
+  useEffect(() => {
+    const onAsk = () => setCurrentView('chat');
+    window.addEventListener('unoone:ask-in-chat', onAsk);
+    return () => window.removeEventListener('unoone:ask-in-chat', onAsk);
+  }, []);
+
   // Auto-lock on window blur (timer from settings)
   useEffect(() => {
     if (screen !== 'main') return;
     let timer: number | null = null;
+    let recheck: number | null = null;
+    const lockIfIdle = () => {
+      if (agentActiveRef.current) {
+        // An agent run is in flight — never lock mid-task; re-check until
+        // it ends or the window refocuses.
+        recheck = window.setTimeout(lockIfIdle, 30_000);
+        return;
+      }
+      handleLock();
+    };
     const handleBlur = () => {
-      timer = window.setTimeout(() => {
-        handleLock();
-      }, autoLockMs);
+      timer = window.setTimeout(lockIfIdle, autoLockMs);
     };
     const handleFocus = () => {
       if (timer) window.clearTimeout(timer);
+      if (recheck) window.clearTimeout(recheck);
+      timer = null;
+      recheck = null;
     };
     window.addEventListener('blur', handleBlur);
     window.addEventListener('focus', handleFocus);
@@ -220,6 +259,7 @@ function App() {
       window.removeEventListener('blur', handleBlur);
       window.removeEventListener('focus', handleFocus);
       if (timer) window.clearTimeout(timer);
+      if (recheck) window.clearTimeout(recheck);
     };
   }, [screen, handleLock, autoLockMs]);
 

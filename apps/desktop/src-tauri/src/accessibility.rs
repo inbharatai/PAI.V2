@@ -215,11 +215,49 @@ pub async fn perform_ocr(
     })
 }
 
+/// The request shape for one blind-view describe mode. Kept as a plain struct
+/// so the prompt/parameter selection is unit-testable without a model server.
+pub struct DescribePrompt {
+    pub system_prompt: String,
+    pub user_prompt: String,
+    pub max_tokens: u32,
+    pub temperature: f32,
+}
+
+/// Prompt/parameters for a describe mode:
+/// - `scene_summary` (2026-09-14, blind-aid phone parity): a short spoken
+///   scene summary for the live what's-in-front narration loop — it must fit
+///   the ~280-char spoken excerpt budget and read naturally when spoken
+///   aloud, so it favours objects, positions and visible text over detail.
+/// - anything else (the original `detailed` default): the full description
+///   used by the Vision Lab's Describe Image button.
+pub fn describe_prompt_for(mode: &str) -> DescribePrompt {
+    if mode == "scene_summary" {
+        DescribePrompt {
+            system_prompt: "You are a blind navigation assistant. Describe what the camera shows in 2 to 4 short sentences: the main objects in front of the user and where they are (left, centre, right, near, far), any text visible, and anything the user might need to avoid or attend to. Write plain spoken sentences with no headings, no lists, and never mention that you are an AI or that this is an image or camera feed. Keep the whole reply under 60 words.".to_string(),
+            user_prompt: "What is in front of me right now?".to_string(),
+            max_tokens: 320,
+            temperature: 0.3,
+        }
+    } else {
+        DescribePrompt {
+            system_prompt: "You are a visual accessibility assistant for blind and low-vision users. Describe images in detail, focusing on:\n1. Main subject and scene\n2. Text visible in the image\n3. Colors and spatial layout\n4. People, objects, and their positions\n5. Any important details a blind person would want to know\nBe concise but thorough. Avoid phrases like 'I can see' or 'the image shows'.".to_string(),
+            user_prompt: "Describe this image in detail for a visually impaired person.".to_string(),
+            max_tokens: 2048,
+            temperature: 0.7,
+        }
+    }
+}
+
 /// Describe an image for a visually impaired user by sending it to llama-server.
 /// Uses the Gemma multimodal model with a detailed description prompt.
+/// `mode` selects the prompt shape: "scene_summary" for the live blind-aid
+/// narration loop (short, spoken-friendly), any other value (or None) for
+/// the original detailed description.
 #[tauri::command]
 pub async fn describe_image(
     image_path: String,
+    mode: Option<String>,
     model_state: tauri::State<'_, ModelManagerState>,
 ) -> Result<BlindViewResult, String> {
     // Read and base64-encode the image
@@ -242,22 +280,22 @@ pub async fn describe_image(
 
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
 
-    // Send to llama-server with a blind-view description prompt
+    // Send to llama-server with the mode's prompt. "scene_summary" is the
+    // phone-parity blind-aid voice: short, spoken-friendly scene narration for
+    // the live loop. Any other mode (or None) keeps the original detailed
+    // description.
+    let prompt = describe_prompt_for(mode.as_deref().unwrap_or("detailed"));
     let request = InferenceRequest {
         prompt: String::new(),
-        system_prompt: Some("You are a visual accessibility assistant for blind and low-vision users. Describe images in detail, focusing on:\n1. Main subject and scene\n2. Text visible in the image\n3. Colors and spatial layout\n4. People, objects, and their positions\n5. Any important details a blind person would want to know\nBe concise but thorough. Avoid phrases like 'I can see' or 'the image shows'.".to_string()),
+        system_prompt: Some(prompt.system_prompt.clone()),
         conversation_history: vec![ConversationTurn {
             role: "user".to_string(),
-            content: Content::with_image(
-                "Describe this image in detail for a visually impaired person.",
-                &image_base64,
-                mime_type,
-            ),
+            content: Content::with_image(&prompt.user_prompt, &image_base64, mime_type),
             tool_calls: None,
             tool_call_id: None,
         }],
-        max_tokens: Some(2048),
-        temperature: Some(0.7),
+        max_tokens: Some(prompt.max_tokens),
+        temperature: Some(prompt.temperature),
         stop_sequences: None,
         tools: None,
     };
@@ -521,5 +559,37 @@ mod tests {
         std::fs::remove_file(&saved).ok();
 
         assert!(write_vision_artifact("screen", "png", &[]).is_err());
+    }
+
+    /// 2026-09-14 phone-parity blind aid: the scene_summary mode must be a
+    /// short spoken-style prompt (small token budget so it fits the ~280-char
+    /// spoken excerpt), while the default stays the original detailed
+    /// description.
+    #[test]
+    fn describe_prompt_for_scene_summary_is_short_and_spoken_style() {
+        let scene = describe_prompt_for("scene_summary");
+        assert_eq!(scene.user_prompt, "What is in front of me right now?");
+        assert!(scene.max_tokens <= 320, "scene summary must stay speakable");
+        assert!(
+            scene.temperature < 0.7,
+            "narration should be consistent, not creative"
+        );
+        assert!(
+            !scene.system_prompt.contains("AI") || scene.system_prompt.contains("never mention"),
+            "the narration voice must not introduce itself as an AI"
+        );
+
+        // Any other mode — including explicit "detailed" and typos — keeps the
+        // long detailed prompt.
+        for mode in ["detailed", "", "unknown"] {
+            let detailed = describe_prompt_for(mode);
+            assert_eq!(
+                detailed.user_prompt,
+                "Describe this image in detail for a visually impaired person."
+            );
+            assert!(detailed.max_tokens >= 2048);
+            assert!(detailed.temperature > 0.5);
+            assert_ne!(detailed.system_prompt, scene.system_prompt);
+        }
     }
 }

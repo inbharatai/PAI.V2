@@ -1,6 +1,26 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { tauriApi } from '../lib/tauri';
 import type { ConversationTurn as TauriConversationTurn, Content } from '../lib/tauri';
+
+/** Live agent activity streamed from the backend while a run is in flight
+ * (2026-09-14: the panel previously showed a bare spinner for minutes while
+ * the model wrote whole files — a real run looked frozen). */
+interface AgentProgressEvent {
+  phase: 'call' | 'result';
+  tool: string;
+  detail: string;
+  code_preview: string | null;
+}
+
+/** Report agent-run activity so App.tsx can defer the window-blur auto-lock
+ * while a task is in flight (defect #31, live-caught 2026-09-14: the 5-min
+ * blur lock stopped the model server and killed a long coding run at 3/4
+ * files). Dispatched as a window event; App listens and never locks
+ * mid-run. */
+const setAgentActivity = (active: boolean) => {
+  window.dispatchEvent(new CustomEvent('unoone:agent-activity', { detail: { active } }));
+};
 
 interface ChatMessage {
   id: string;
@@ -100,6 +120,125 @@ export function ChatView() {
       localStorage.setItem('unoone.fullAccess', enabled ? 'on' : 'off');
     } catch {
       // Storage unavailable — the toggle still applies for this session.
+    }
+  };
+
+  // Live agent activity (2026-09-14): the backend emits one event per tool
+  // call/result while the run is in flight. Rendered live in the generating
+  // bubble, then folded into the message's step pill when the run lands.
+  const [liveProgress, setLiveProgress] = useState<AgentProgressEvent[]>([]);
+  // Mirror of liveProgress for read-after-await: a state read inside handleSend
+  // after the harness call resolves would see the empty snapshot captured at
+  // render time, because the events land during the awaited call. The ref is
+  // the source of truth for folding; the state drives the live rendering.
+  const liveProgressRef = useRef<AgentProgressEvent[]>([]);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<AgentProgressEvent>('agent-progress', event => {
+      setLiveProgress(prev => [...prev.slice(-49), event.payload]);
+      liveProgressRef.current = [...liveProgressRef.current.slice(-49), event.payload];
+    }).then(fn => {
+      unlisten = fn;
+    }).catch(() => {
+      // Without the event stream the run still works; only the live feed is missing.
+    });
+    return () => unlisten?.();
+  }, []);
+
+  // Cross-panel bridge (2026-09-14 OCR/blind-aid alignment): the
+  // Accessibility lane hands its frame and follow-up question to this, the
+  // one panel, so every capability ends in a single conversation.
+  useEffect(() => {
+    const onAsk = (e: Event) => {
+      const detail = (e as CustomEvent<{ text?: string; imageDataUrl?: string }>).detail || {};
+      if (detail.imageDataUrl && detail.imageDataUrl.startsWith('data:image/')) {
+        setPendingImages(prev =>
+          prev.includes(detail.imageDataUrl!) ? prev : [...prev, detail.imageDataUrl!].slice(0, 4)
+        );
+      }
+      if (detail.text) {
+        setInput(prev => (prev.trim() ? prev : detail.text!));
+      }
+    };
+    window.addEventListener('unoone:ask-in-chat', onAsk);
+    return () => window.removeEventListener('unoone:ask-in-chat', onAsk);
+  }, []);
+
+  /** One-press camera frame → pending image (goes through the audited
+   * vision-attachment lane), with a blind-aid style question prefilled. */
+  const [isCapturingCamera, setIsCapturingCamera] = useState(false);
+  const captureFromCamera = async () => {
+    if (isCapturingCamera) return;
+    setIsCapturingCamera(true);
+    setAttachError('');
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      await video.play();
+      // Give the sensor a moment to settle exposure before grabbing the frame.
+      const deadline = Date.now() + 3000;
+      while (video.videoWidth === 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      if (canvas.width === 0 || canvas.height === 0) {
+        throw new Error('the camera did not produce a frame in time. Try again.');
+      }
+      canvas.getContext('2d')?.drawImage(video, 0, 0);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      if (!dataUrl.startsWith('data:image/')) {
+        throw new Error('camera capture produced no usable frame. Try again.');
+      }
+      setPendingImages(prev => [...prev, dataUrl].slice(0, 4));
+      setInput(prev =>
+        prev.trim()
+          ? prev
+          : 'What is in front of me? Describe the scene briefly and read out any visible text.'
+      );
+    } catch (err) {
+      setAttachError(`Camera access failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      stream?.getTracks().forEach(track => track.stop());
+      setIsCapturingCamera(false);
+    }
+  };
+
+  /** Capture the app window and attach it — the screen-reader "what is on my
+   * screen" flow in the chat panel. The snapshot is read back through the
+   * asset protocol so it rides the same audited image lane. */
+  const [isCapturingScreen, setIsCapturingScreen] = useState(false);
+  const captureScreenToChat = async () => {
+    if (isCapturingScreen) return;
+    setIsCapturingScreen(true);
+    setAttachError('');
+    try {
+      const path = await tauriApi.captureScreenSnapshot();
+      const res = await fetch(tauriApi.convertFileSrc(path));
+      if (!res.ok) throw new Error(`could not read the screenshot (${res.status})`);
+      const blob = await res.blob();
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+        reader.onerror = () => reject(new Error('could not decode the screenshot'));
+        reader.readAsDataURL(blob);
+      });
+      if (!dataUrl.startsWith('data:image/')) throw new Error('screenshot came back empty');
+      setPendingImages(prev => [...prev, dataUrl].slice(0, 4));
+      setInput(prev =>
+        prev.trim()
+          ? prev
+          : 'What is on my screen? Describe the content briefly and read out any visible text.'
+      );
+    } catch (err) {
+      setAttachError(`Screen capture failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsCapturingScreen(false);
     }
   };
 
@@ -350,6 +489,9 @@ export function ChatView() {
     setPendingImages([]);
     setPendingFiles([]);
     setIsGenerating(true);
+    setAgentActivity(true);
+    setLiveProgress([]);
+    liveProgressRef.current = [];
     setServerError('');
 
     try {
@@ -370,27 +512,50 @@ export function ChatView() {
           fullAccess,
           images,
         );
-        // Harness returns counts, not structured per-tool steps. Surface the
-        // real route + counts as an honest telemetry line (no fabricated tool
-        // names).
+        // Harness returns counts, not structured per-tool steps — but the
+        // live-progress stream recorded the real tool activity. Fold it into
+        // the message's step pill (expandable), with the route + counts as
+        // an honest telemetry line.
         const telemetry =
           harness.tool_calls > 0 || harness.steps > 1
             ? `Harness ${harness.route} · ${harness.steps} step(s) · ${harness.tool_calls} tool call(s) · ${harness.elapsed_ms}ms`
             : null;
+        const progressSteps: AgentStep[] = liveProgressRef.current.map(ev =>
+          ev.phase === 'call'
+            ? { type: 'ToolCall', tool: ev.tool, text: ev.detail }
+            : { type: 'ToolResult', tool: ev.tool, result: ev.detail }
+        );
+        if (telemetry) {
+          progressSteps.unshift({ type: 'Thinking', text: telemetry });
+        }
         assistantMessage = {
           id: crypto.randomUUID(),
           role: 'assistant',
           content: harness.output,
           timestamp: Date.now(),
-          steps: telemetry ? [{ type: 'Thinking', text: telemetry }] : undefined,
+          steps: progressSteps.length > 0 ? progressSteps : undefined,
         };
       } catch (harnessErr) {
-        // Rollback to the legacy ReAct agent. This lane change must never be
-        // silent: the legacy agent has a smaller, vault-read-only toolset, so
-        // an answer produced here can truthfully describe fewer abilities than
-        // the enabled full-access session. Surface the fallback and its
-        // reason as a step the user can read.
         const harnessMsg = harnessErr instanceof Error ? harnessErr.message : String(harnessErr);
+        if (fullAccess) {
+          // Defect #32 (live-caught 2026-09-14): with full access on, the
+          // silent fallback to the read-only legacy agent made the model
+          // TRUTHFULLY refuse the task ("As an AI assistant, I do not have
+          // direct access to your local file system…") and paste code
+          // instead of building it — the user watched a build request turn
+          // into a tutorial. The downgrade is never silent now: surface the
+          // real pipeline failure and let the user retry. (The legacy
+          // fallback stays available for the read-only lane, where the two
+          // paths are capability-equivalent.)
+          throw new Error(
+            `Agent pipeline stopped: ${harnessMsg}. The task was NOT run — no files were written and no commands were executed. Retry once the model is back (its state is in the Model Manager, or reload the app).`
+          );
+        }
+        // Rollback to the legacy ReAct agent — read-only lane only. This
+        // lane change must never be silent: the legacy agent has a smaller,
+        // vault-read-only toolset, so an answer produced here can truthfully
+        // describe fewer abilities than the enabled session. Surface the
+        // fallback and its reason as a step the user can read.
         console.warn('Harness bridge fell back to legacy agent:', harnessMsg);
         const result = await tauriApi.agentChat(composedPrompt, conversationHistory);
         const fallbackStep = {
@@ -417,6 +582,8 @@ export function ChatView() {
       }
     } finally {
       setIsGenerating(false);
+      setAgentActivity(false);
+      liveProgressRef.current = [];
     }
   };
 
@@ -609,8 +776,50 @@ export function ChatView() {
         {isGenerating && (
           <div className="chat-message assistant">
             <div className="chat-avatar">G</div>
-            <div className="chat-bubble">
-              <span className="spinner" />
+            <div className="chat-bubble" style={{ minWidth: '200px' }}>
+              {liveProgress.length === 0 ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span className="spinner" />
+                  <span style={{ fontSize: '13px', color: 'var(--text-muted, #666)' }}>Thinking…</span>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                    <span className="spinner" />
+                    <span style={{ fontSize: '13px', color: 'var(--text-secondary, #888)' }}>Working…</span>
+                  </div>
+                  {liveProgress.slice(-8).map((ev, i) => (
+                    <div key={i} style={{ fontSize: '12px', color: 'var(--text-secondary, #888)' }}>
+                      {ev.phase === 'call' ? (
+                        <span>
+                          <span style={{ color: 'var(--text-muted, #666)' }}>→ </span>
+                          {ev.detail || ev.tool}
+                        </span>
+                      ) : (
+                        <span>
+                          <span style={{ color: 'var(--accent, #4ade80)' }}>✓ </span>
+                          {ev.detail || ev.tool}
+                        </span>
+                      )}
+                      {ev.code_preview && (
+                        <pre style={{
+                          margin: '4px 0 2px 14px',
+                          padding: '6px 8px',
+                          background: 'var(--surface-secondary, #1a1a1a)',
+                          borderRadius: '6px',
+                          fontSize: '11px',
+                          overflowX: 'auto',
+                          maxHeight: '140px',
+                          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                          whiteSpace: 'pre-wrap',
+                        }}>
+                          {ev.code_preview}
+                        </pre>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -773,6 +982,37 @@ export function ChatView() {
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+          <button
+            className="btn"
+            onClick={() => void captureFromCamera()}
+            disabled={isGenerating || modelStatus === 'not_loaded' || isCapturingCamera}
+            title="Capture one frame from the camera and ask the vision model about it"
+            style={{
+              padding: '8px',
+              ...(isCapturingCamera ? { background: 'rgba(74,222,128,0.15)', borderColor: 'var(--accent, #4ade80)' } : {}),
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+              <circle cx="12" cy="13" r="4" />
+            </svg>
+          </button>
+          <button
+            className="btn"
+            onClick={() => void captureScreenToChat()}
+            disabled={isGenerating || modelStatus === 'not_loaded' || isCapturingScreen}
+            title="Capture the screen and ask the vision model about it"
+            style={{
+              padding: '8px',
+              ...(isCapturingScreen ? { background: 'rgba(74,222,128,0.15)', borderColor: 'var(--accent, #4ade80)' } : {}),
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+              <line x1="8" y1="21" x2="16" y2="21" />
+              <line x1="12" y1="17" x2="12" y2="21" />
             </svg>
           </button>
           <button

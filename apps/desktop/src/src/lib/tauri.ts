@@ -502,7 +502,8 @@ export const tauriApi = {
   // Accessibility (vision/OCR via local model)
   getAccessibilityStatus: () => invoke<AccessibilityStatus>('get_accessibility_status'),
   performOcr: (imagePath: string) => invoke<OcrResult>('perform_ocr', { image_path: imagePath }),
-  describeImage: (imagePath: string) => invoke<BlindViewResult>('describe_image', { image_path: imagePath }),
+  describeImage: (imagePath: string, mode?: string) =>
+    invoke<BlindViewResult>('describe_image', { image_path: imagePath, mode: mode ?? null }),
   getCameraInfo: () => invoke<CameraInfo>('get_camera_info'),
   saveVisionSnapshot: (dataUrl: string) =>
     invoke<string>('save_vision_snapshot', { data_url: dataUrl }),
