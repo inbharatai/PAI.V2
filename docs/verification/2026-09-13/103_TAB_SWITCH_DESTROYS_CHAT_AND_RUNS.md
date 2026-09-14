@@ -25,4 +25,11 @@ Worse: `handleSend`'s `await tauriApi.harnessChat(...)` keeps running in the bac
 
 - [x] `cargo`-side unaffected; frontend `tsc -b && vite build` clean
 - [ ] **Live re-verify after re-stage:** send a task, switch to Capabilities and back mid-run — conversation intact, run continues, answer appears
+      — VERIFIED 2026-09-14 live on the re-staged drive (build `3a73998`, `tabswitch-verify.js`):
+      a question was sent and the app was immediately navigated to Capabilities, then Recordings,
+      while the reply was still generating. On both other tabs the chat DOM stayed alive
+      (`visible=false` — mounted and hidden, exactly the fix's contract), the in-flight reply
+      LANDED while the app was on another tab (bubbles 2 → 4, user question + assistant answer
+      "12 is bigger"), and returning to Chat showed the full conversation intact.
 - [ ] Long-coding acceptance re-run passes with the watcher attached while the chat stays open
+      — *(result recorded in doc 101 §4 / doc 104 §4 after the run)*
