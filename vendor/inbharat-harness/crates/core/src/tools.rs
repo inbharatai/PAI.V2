@@ -663,16 +663,23 @@ pub struct RunProcessTool {
 
 impl Default for RunProcessTool {
     fn default() -> Self {
-        Self {
-            manifest: manifest(
-                "process.run",
-                "Run one allowlisted program with direct argv in the configured root",
-                CapabilitySet::from_slice(&[Capability::ProcessSpawn]),
-                vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
-                SideEffect::Process,
-                ConfirmationMode::Always,
-            ),
-        }
+        let mut built = manifest(
+            "process.run",
+            "Run one allowlisted program with direct argv in the configured root",
+            CapabilitySet::from_slice(&[Capability::ProcessSpawn]),
+            vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
+            SideEffect::Process,
+            ConfirmationMode::Always,
+        );
+        // Defect #33 (live-caught 2026-09-14): the agent ran the Playwright
+        // suite it had just written (`node task-board/test-app.js`) and the
+        // subprocess was killed mid browser launch — a real tool test needs
+        // 30-120s, and the shared 10s manifest default is sized for quick
+        // shell probes. The run budget still bounds total agent wall-clock;
+        // this is the single tool-call deadline only. ProcessTool::execute
+        // derives the ProcessSpec deadline from this field.
+        built.default_timeout = Duration::from_secs(180);
+        Self { manifest: built }
     }
 }
 
@@ -715,12 +722,15 @@ impl Tool for RunProcessTool {
                 .collect(),
             _ => Vec::new(),
         };
-        // Plumb the manifest's output cap into the process spec so the pipe
-        // reader cap and the post-hoc output check (in ToolDispatch) enforce
-        // the same limit — instead of relying on two independent constants
-        // agreeing.
-        let spec =
-            ProcessSpec::new(program, args).with_max_output_bytes(self.manifest.max_output_bytes);
+        // Plumb the manifest's output cap AND deadline into the process spec
+        // so the pipe reader cap, the post-hoc output check (in ToolDispatch)
+        // and the subprocess kill-timer all enforce the SAME limits — instead
+        // of relying on independent constants agreeing (defect #33: the spec's
+        // 10s default deadline used to kill long agent-run tool tests that the
+        // manifest never intended to bound that tightly).
+        let spec = ProcessSpec::new(program, args)
+            .with_max_output_bytes(self.manifest.max_output_bytes)
+            .with_timeout(self.manifest.default_timeout);
         let output = context.execution.run_process(&spec, context.cancel)?;
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1171,6 +1181,62 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn process_run_deadline_is_derived_from_the_manifest() -> HarnessResult<()> {
+        // Defect #33 (live-caught 2026-09-14): the agent ran the Playwright
+        // suite it had just written and the child was killed mid browser
+        // launch at the ProcessSpec's hardcoded 10s default — ProcessTool::
+        // execute never plumbed the manifest timeout into the spec. The
+        // manifest is now the single source of truth for the deadline.
+        assert_eq!(
+            RunProcessTool::default().manifest().default_timeout,
+            Duration::from_secs(180),
+            "process.run must carry a deadline sized for real tool tests"
+        );
+
+        // Prove the derivation end of the contract: a manifest timeout the
+        // child outlives kills the child AT that deadline — the spec default
+        // (10s) no longer has a say.
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd",
+            vec!["/C".to_owned(), "ping -n 30 -w 1000 127.0.0.1".to_owned()],
+        );
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_owned(), "sleep 30".to_owned()]);
+        let mut tool = RunProcessTool::default();
+        tool.manifest.default_timeout = Duration::from_secs(2);
+        let root_fs = crate::execution::RootedFs::new(".")?;
+        let broker = crate::execution::LocalExecutionBroker::new(root_fs, vec![program.to_owned()]);
+        let cancel = CancellationToken::new();
+        let arguments: ToolArguments = [
+            ("program", Value::String(program.to_owned())),
+            (
+                "args",
+                Value::Array(args.into_iter().map(Value::String).collect()),
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect();
+        let context = ToolContext {
+            actor: "actor",
+            level: ExecutionLevel::L3,
+            execution: &broker,
+            cancel: &cancel,
+        };
+        let result = tool.execute(&arguments, &context);
+        let message = result
+            .err()
+            .map(|failure| failure.to_string())
+            .unwrap_or_else(|| "child completed before the deadline".to_owned());
+        assert!(
+            message.contains("subprocess deadline exceeded"),
+            "the deadline must come from the manifest, got: {message}"
+        );
         Ok(())
     }
 }

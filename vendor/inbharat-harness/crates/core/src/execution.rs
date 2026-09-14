@@ -471,6 +471,18 @@ impl ProcessSpec {
         self.max_output_bytes = max_output_bytes;
         self
     }
+
+    /// Override the subprocess deadline. The tool layer must set this from
+    /// the tool manifest's `default_timeout` — the 10-second struct default
+    /// exists only so a bare ProcessSpec cannot hang forever; real tool runs
+    /// derive their deadline from their manifest (defect #33, live-caught
+    /// 2026-09-14: an agent-run Playwright suite was killed mid browser
+    /// launch because ProcessTool::execute never overrode the default).
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
 }
 
 /// Machine-level environment variables every spawned child needs to run at
@@ -900,6 +912,48 @@ mod tests {
         let fs = RootedFs::new(".")?;
         let result = fs.read_text("../outside");
         assert!(result.is_err());
+        Ok(())
+    }
+
+    /// Defect #33 (live-caught 2026-09-14): the spec's 10s default deadline
+    /// used to be the ONLY deadline a tool run could get — ProcessTool never
+    /// overrode it, so an agent-run Playwright suite was killed mid browser
+    /// launch. The builder must let the tool layer derive the deadline from
+    /// the manifest, and the kill-timer must honor the override.
+    #[test]
+    fn process_spec_timeout_is_overridable_and_enforced() -> HarnessResult<()> {
+        // Builder contract: struct default is 10s; with_timeout replaces it.
+        let default_spec = ProcessSpec::new("noop", vec![]);
+        assert_eq!(default_spec.timeout, Duration::from_secs(10));
+        let overridden = default_spec.clone().with_timeout(Duration::from_secs(180));
+        assert_eq!(overridden.timeout, Duration::from_secs(180));
+        assert_eq!(
+            default_spec.timeout,
+            Duration::from_secs(10),
+            "with_timeout must not mutate the original"
+        );
+
+        // End-to-end: a child that would outlive a short override is killed
+        // with the honest deadline failure, not allowed to run to completion.
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd",
+            vec!["/C".to_owned(), "ping -n 30 -w 1000 127.0.0.1".to_owned()],
+        );
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_owned(), "sleep 30".to_owned()]);
+        let fs = RootedFs::new(".")?;
+        let broker = LocalExecutionBroker::new(fs, vec![program.to_owned()]);
+        let spec = ProcessSpec::new(program, args).with_timeout(Duration::from_secs(2));
+        let result = broker.run_process(&spec, &CancellationToken::new());
+        let message = result
+            .err()
+            .map(|failure| failure.to_string())
+            .unwrap_or_else(|| "child completed before the deadline".to_owned());
+        assert!(
+            message.contains("subprocess deadline exceeded"),
+            "expected the deadline kill, got: {message}"
+        );
         Ok(())
     }
 
