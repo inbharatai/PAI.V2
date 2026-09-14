@@ -231,10 +231,17 @@ function App() {
     );
   }
 
+  // Defect #27 (live-caught 2026-09-13): ChatView held the whole conversation
+  // in component state, so navigating to any other tab unmounted it — the
+  // conversation was destroyed, and an agent run still in flight had its
+  // result silently discarded when it landed (setMessages on an unmounted
+  // component is a no-op). ChatView therefore stays mounted for the session
+  // and is only hidden while another view is active, so the conversation and
+  // any running task survive tab switches like every chat panel users know.
   const renderView = () => {
     switch (currentView) {
       case 'chat':
-        return <ChatView />;
+        return null; // ChatView is always mounted below.
       case 'recordings':
         return <RecordingView />;
       case 'memory':
@@ -256,7 +263,7 @@ function App() {
       case 'settings':
         return <SettingsView vaultRoot={vaultRoot} />;
       default:
-        return <ChatView />;
+        return null; // ChatView is always mounted below.
     }
   };
 
@@ -275,6 +282,12 @@ function App() {
               ⚠️ {bootError}
             </div>
           )}
+          <div
+            style={currentView === 'chat' ? undefined : { display: 'none' }}
+            aria-hidden={currentView !== 'chat'}
+          >
+            <ChatView />
+          </div>
           {renderView()}
         </div>
       </div>
