@@ -603,6 +603,59 @@ impl Tool for WriteFileTool {
     }
 }
 
+/// In-root directory creation tool. Defect #29 (live-caught 2026-09-14):
+/// the fs family exposed read/list/write but no way to create a directory,
+/// while `fs.write` demanded an existing parent — a "create a folder with
+/// files in it" task was impossible and the local 12B looped on the failing
+/// fs.write forever. The fenced walk already existed on `RootedFs`; this
+/// tool surfaces it to the model. `fs.write` additionally auto-creates
+/// missing parents, so a model that skips this tool still succeeds.
+pub struct MakeDirTool {
+    manifest: ToolManifest,
+}
+
+impl Default for MakeDirTool {
+    fn default() -> Self {
+        Self {
+            manifest: manifest(
+                "fs.mkdir",
+                "Create one directory path inside the configured root (parents included)",
+                CapabilitySet::from_slice(&[Capability::FileWrite]),
+                vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
+                SideEffect::Write,
+                ConfirmationMode::OnSideEffect,
+            ),
+        }
+    }
+}
+
+impl Tool for MakeDirTool {
+    fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        require_exact_string(arguments, &["path"])
+    }
+
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        let path = argument_string(arguments, "path")?;
+        context.execution.create_dir_all(Path::new(path))?;
+        Ok(ToolOutput {
+            model_content: format!("created directory {path}"),
+            value: Value::Object(BTreeMap::from([(
+                "path".to_owned(),
+                Value::String(path.to_owned()),
+            )])),
+            presentation: BTreeMap::from([("kind".to_owned(), "dir-create".to_owned())]),
+        })
+    }
+}
+
 /// Allowlisted direct-argv subprocess tool. Never invokes a shell.
 pub struct RunProcessTool {
     manifest: ToolManifest,
@@ -698,6 +751,7 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) -> HarnessResult<()> 
     registry.register(Arc::new(ReadFileTool::default()))?;
     registry.register(Arc::new(ListFilesTool::default()))?;
     registry.register(Arc::new(WriteFileTool::default()))?;
+    registry.register(Arc::new(MakeDirTool::default()))?;
     registry.register(Arc::new(RunProcessTool::default()))?;
     Ok(())
 }
@@ -747,6 +801,10 @@ fn schemas(id: &str) -> (&'static str, &'static str) {
         "fs.write" => (
             r#"{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}"#,
             r#"{"type":"object","properties":{"path":{"type":"string"},"bytes":{"type":"integer"}},"required":["path","bytes"],"additionalProperties":false}"#,
+        ),
+        "fs.mkdir" => (
+            r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
+            r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
         ),
         "process.run" => (
             r#"{"type":"object","properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["program","args"],"additionalProperties":false}"#,
@@ -992,6 +1050,127 @@ mod tests {
             asked, 2,
             "two Ask capabilities must produce two approval prompts, not one"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fs_mkdir_and_write_create_nested_paths_end_to_end() -> HarnessResult<()> {
+        // Defect #29 (live-caught 2026-09-14): the model-facing tool set had
+        // read/list/write but no directory creation, while fs.write demanded
+        // an existing parent — so "create a folder with files in it" was
+        // impossible and the local 12B retried the failing fs.write forever.
+        // fs.mkdir must create nested directories through the full dispatch
+        // path, and fs.write must auto-create missing parents when the
+        // model never calls fs.mkdir.
+        let dir = std::env::temp_dir().join(format!(
+            "inbharat-tools-mkdir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            Failure::invalid("test.setup", format!("temp dir creation failed: {error}"))
+        })?;
+        let root_fs = crate::execution::RootedFs::new(&dir)?;
+
+        let mut registry = ToolRegistry::new();
+        register_builtin_tools(&mut registry)?;
+
+        let permission = AskAllPermission;
+        let confirmation = CountingConfirmation {
+            asked: Mutex::new(0),
+        };
+        let verifier = crate::providers::CanonicalVerificationProvider;
+        let execution = crate::execution::LocalExecutionBroker::new(root_fs, Vec::new());
+        let sandbox = GrantAllSandbox {
+            world_id: execution.world_id().to_owned(),
+        };
+        let dispatch = ToolDispatch {
+            registry: &registry,
+            permission: &permission,
+            confirmation: &confirmation,
+            verifier: &verifier,
+            sandbox: &sandbox,
+            execution: &execution,
+        };
+        let capabilities = CapabilitySet::from_slice(&[Capability::FileWrite]);
+        let mut budget =
+            crate::budget::Budget::new(crate::budget::BudgetLimits::for_level(ExecutionLevel::L3));
+        let cancel = crate::cancel::CancellationToken::new();
+        let mut audit = |_event: ToolAuditEvent| -> HarnessResult<()> { Ok(()) };
+
+        let args = |pairs: &[(&str, &str)]| -> ToolArguments {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), Value::String((*value).to_owned())))
+                .collect()
+        };
+        let read_back = |path: &std::path::Path| -> HarnessResult<String> {
+            std::fs::read_to_string(path).map_err(|error| {
+                Failure::invalid("test.assert", format!("read back failed: {error}"))
+            })
+        };
+
+        // 1. fs.mkdir creates a nested directory path through the registry.
+        dispatch.execute(
+            "fs.mkdir",
+            "inv-mkdir-1",
+            &args(&[("path", "task-board/src")]),
+            "actor",
+            ExecutionLevel::L3,
+            &capabilities,
+            &mut budget,
+            &cancel,
+            &mut audit,
+        )?;
+        assert!(dir.join("task-board").join("src").is_dir());
+
+        // 2. fs.write into the (now existing) directory works.
+        dispatch.execute(
+            "fs.write",
+            "inv-write-1",
+            &args(&[("path", "task-board/src/app.js"), ("content", "ok()")]),
+            "actor",
+            ExecutionLevel::L3,
+            &capabilities,
+            &mut budget,
+            &cancel,
+            &mut audit,
+        )?;
+        assert_eq!(
+            read_back(&dir.join("task-board").join("src").join("app.js"))?,
+            "ok()"
+        );
+
+        // 3. fs.write into a NEVER-CREATED deep parent auto-creates it —
+        //    the live loop happened because this returned an error instead.
+        dispatch.execute(
+            "fs.write",
+            "inv-write-2",
+            &args(&[
+                ("path", "task-board/docs/deep/notes.md"),
+                ("content", "auto"),
+            ]),
+            "actor",
+            ExecutionLevel::L3,
+            &capabilities,
+            &mut budget,
+            &cancel,
+            &mut audit,
+        )?;
+        assert_eq!(
+            read_back(
+                &dir.join("task-board")
+                    .join("docs")
+                    .join("deep")
+                    .join("notes.md")
+            )?,
+            "auto"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

@@ -292,6 +292,19 @@ impl RootedFs {
         let parent = joined
             .parent()
             .ok_or_else(|| Failure::invalid("fs.write", "target must have an in-root parent"))?;
+        // Defect #29 (live-caught 2026-09-14, long-coding acceptance): the
+        // tool set had no directory-creation capability at all, and this
+        // write path required the parent to already exist — so the very
+        // first step of any "create a folder with files in it" task failed
+        // with "target parent does not exist" forever (the local 12B
+        // retried the identical fs.write every ~96 s, zero files, no
+        // progress, until killed). Real coding agents create missing parent
+        // directories on write; do the same through the fenced component
+        // walk (ensure_no_escape + per-component canonicalize +
+        // ensure_inside), so the fence is preserved exactly.
+        if !parent.exists() {
+            self.create_dir_all(parent)?;
+        }
         let canonical_parent = fs::canonicalize(parent).map_err(|error| {
             io_failure(
                 ErrorCode::FilesystemDenied,
@@ -516,6 +529,7 @@ pub trait ExecutionBroker: Send + Sync {
     fn read_text(&self, relative: &Path) -> HarnessResult<String>;
     fn list(&self, relative: &Path) -> HarnessResult<Vec<String>>;
     fn write_text_atomic(&self, relative: &Path, contents: &str) -> HarnessResult<()>;
+    fn create_dir_all(&self, relative: &Path) -> HarnessResult<()>;
     fn run_process(
         &self,
         spec: &ProcessSpec,
@@ -571,6 +585,10 @@ impl ExecutionBroker for LocalExecutionBroker {
 
     fn write_text_atomic(&self, relative: &Path, contents: &str) -> HarnessResult<()> {
         self.filesystem.write_text_atomic(relative, contents)
+    }
+
+    fn create_dir_all(&self, relative: &Path) -> HarnessResult<()> {
+        self.filesystem.create_dir_all(relative)
     }
 
     fn run_process(
@@ -1079,10 +1097,8 @@ mod tests {
     // them, while still denying every genuinely-outside path.
 
     fn abs_fs(label: &str) -> HarnessResult<(PathBuf, Cleanup, RootedFs)> {
-        let base = std::env::temp_dir().join(format!(
-            "inbharat-abs-{label}-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("inbharat-abs-{label}-{}", std::process::id()));
         let cleanup = scopeguard_remove(&base.clone());
         fs::create_dir_all(&base).map_err(|e| {
             Failure::new(
@@ -1115,7 +1131,10 @@ mod tests {
         // create_dir_all, write_text_atomic, read_text, and list — spelled
         // the way a user or model writes them, without the verbatim prefix.
         fs.create_dir_all(user.join("nested").join("deeper"))?;
-        fs.write_text_atomic(user.join("nested").join("deeper").join("file.txt"), "absolute ok")?;
+        fs.write_text_atomic(
+            user.join("nested").join("deeper").join("file.txt"),
+            "absolute ok",
+        )?;
         assert_eq!(
             fs.read_text(user.join("nested").join("deeper").join("file.txt"))?,
             "absolute ok"
@@ -1127,6 +1146,52 @@ mod tests {
         // The canonical (verbatim) spelling works too — exact strip-prefix.
         fs.write_text_atomic(root.join("verbatim.txt"), "canonical form")?;
         assert_eq!(fs.read_text("verbatim.txt")?, "canonical form");
+        Ok(())
+    }
+
+    #[test]
+    fn write_creates_missing_parent_directories() -> HarnessResult<()> {
+        // Defect #29 (live-caught 2026-09-14): fs.write used to demand an
+        // existing parent and no tool could create one, so the first step of
+        // any "create a folder with files" task failed forever. A write into
+        // a deep missing parent must now succeed and be readable back.
+        let (root, _cleanup, fs) = abs_fs("autoparent")?;
+        let target = root
+            .join("task-board")
+            .join("src")
+            .join("ui")
+            .join("index.html");
+        fs.write_text_atomic(&target, "<h1>auto-created parents</h1>")?;
+        assert_eq!(
+            fs.read_text("task-board/src/ui/index.html")?,
+            "<h1>auto-created parents</h1>"
+        );
+        assert!(root.join("task-board").join("src").join("ui").is_dir());
+        // A relative spelling with missing parents works the same way.
+        fs.write_text_atomic("rel/deep/file.txt", "relative ok")?;
+        assert_eq!(fs.read_text("rel/deep/file.txt")?, "relative ok");
+        Ok(())
+    }
+
+    #[test]
+    fn write_escape_through_missing_parent_is_denied() -> HarnessResult<()> {
+        // The auto-parent walk must not open an escape hatch: parent-dir
+        // components are rejected by the same fence as before, and nothing
+        // is created on disk when they are.
+        let (root, _cleanup, fs) = abs_fs("parentescape")?;
+        let Some(parent) = root.parent() else {
+            return Err(Failure::invalid("test.setup", "root has no parent"));
+        };
+        assert!(
+            fs.write_text_atomic("new/../escape-probe.txt", "no")
+                .is_err()
+        );
+        assert!(
+            fs.write_text_atomic("deep/../../escape-probe.txt", "no")
+                .is_err()
+        );
+        assert!(!parent.join("escape-probe.txt").exists());
+        assert!(!root.join("new").exists());
         Ok(())
     }
 
@@ -1146,7 +1211,7 @@ mod tests {
                 return Err(Failure::invalid(
                     "test.assert",
                     "outside-root absolute read must be denied",
-                ))
+                ));
             }
         };
         assert_eq!(err.code, ErrorCode::FilesystemDenied, "got: {err}");
@@ -1154,10 +1219,7 @@ mod tests {
 
         // A write whose absolute target sits beside the root must be denied,
         // not silently redirected inside.
-        let result = fs.write_text_atomic(
-            user.join("..").join("inbharat-abs-beside.txt"),
-            "x",
-        );
+        let result = fs.write_text_atomic(user.join("..").join("inbharat-abs-beside.txt"), "x");
         assert!(result.is_err(), "beside-root absolute write must be denied");
         Ok(())
     }
@@ -1174,7 +1236,7 @@ mod tests {
                 return Err(Failure::invalid(
                     "test.assert",
                     "dotdot after root prefix must be denied",
-                ))
+                ));
             }
         };
         assert!(err.message.contains("escapes"), "got: {err}");
@@ -1217,7 +1279,7 @@ mod tests {
                 return Err(Failure::invalid(
                     "test.assert",
                     "prefix-sibling path must be denied",
-                ))
+                ));
             }
         };
         assert!(err.message.contains("escapes"), "got: {err}");

@@ -470,8 +470,9 @@ fn l3_absolute_in_root_write_succeeds_and_escape_fails_one_call_only() -> Harnes
 
     // Fix A end-to-end: the absolute in-root path was rebased and written.
     assert_eq!(
-        fs::read_to_string(temp.path().join("nested").join("abs.txt"))
-            .map_err(|error| inbharat_harness_core::Failure::invalid("test.read", error.to_string()))?,
+        fs::read_to_string(temp.path().join("nested").join("abs.txt")).map_err(|error| {
+            inbharat_harness_core::Failure::invalid("test.read", error.to_string())
+        })?,
         "absolute path rebased"
     );
 
@@ -479,8 +480,9 @@ fn l3_absolute_in_root_write_succeeds_and_escape_fails_one_call_only() -> Harnes
     // root, and the run went on to write the corrected file.
     assert!(!absolute_escape.exists());
     assert_eq!(
-        fs::read_to_string(temp.path().join("fixed.txt"))
-            .map_err(|error| inbharat_harness_core::Failure::invalid("test.read", error.to_string()))?,
+        fs::read_to_string(temp.path().join("fixed.txt")).map_err(|error| {
+            inbharat_harness_core::Failure::invalid("test.read", error.to_string())
+        })?,
         "recovered"
     );
 
