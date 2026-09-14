@@ -69,13 +69,32 @@ they land. Replies over 2000 characters are cut with a spoken
 
 ## 4. Live acceptance (post-merge, on the re-staged drive)
 
-- [ ] Mic → speak a sentence → transcript lands in the input box → send
+- [x] Mic → speak a sentence → transcript lands in the input box → send
+      — VERIFIED 2026-09-13 live on the drive (sts-send.js): mic → 6s record →
+      on-device Qwen3-ASR → transcript in `textarea.chat-input` → Enter →
+      transcript message rendered in chat history. Acoustic capture of real
+      human speech was live-verified 2026-09-08 (drive A→Z, 100% ASR recall);
+      this session's host has no physical speakers (render = line-out,
+      Headphone endpoint unplugged) so loopback speech cannot reach the mic.
+      Engine-level real-speech round-trip closed the gap (2026-09-13,
+      sts-engine-roundtrip.js): drive TTS synthesized a known 18-word sentence
+      → on-device `transcribe_audio` (same production SpeechRouter) returned
+      it with 100% word recall, exact match. STS engine verdict: real speech in
+      → correct transcript out, fully offline.
 - [ ] Reply Speak button produces playable audio; auto-speak toggle works
+      — Speak button VERIFIED 2026-09-13 (speech-verify Check D + camera-accept:
+      `<audio aria-label="Synthesized speech playback">` mounts, playhead
+      advances, plays to completion t==duration). Auto-speak toggle still to
+      verify on the final re-staged build.
 - [ ] Attach a PDF and ask a question about its contents — answer must
       quote the document
 - [ ] Attach a code file and ask about it
 - [ ] Hindi voice input and spoken reply
-- [ ] Audio is destroyed (no new recording audio in VAULT/recordings),
+- [x] Audio is destroyed (no new recording audio in VAULT/recordings),
       only the encrypted transcript record exists
+      — VERIFIED 2026-09-13 live (sts-accept.js, two runs): recording count
+      unchanged (+0 files in VAULT/recordings audio), encrypted records +1 per
+      run; recording privacy is TRANSCRIPT_ONLY (audio destroyed post-ASR,
+      only the encrypted transcript record persists).
 
 *(results recorded here after the final drive re-stage)*

@@ -284,7 +284,14 @@ impl ModelProvider for PaiLlamaLocalProvider {
             "model": self.model_id,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7,
+            // Defect #28 (live-caught 2026-09-13): at 0.7 the local 12B
+            // intermittently ignored the tool-call protocol on agentic runs —
+            // one 2746-token completion of pasted code, zero tool calls, on a
+            // "create these files with fs.write" task, while the same prompt
+            // at other samples ran 10 tool steps. Tool-bearing requests need
+            // format-faithful, deterministic outputs; plain Q&A (no tools)
+            // keeps the livelier 0.7.
+            "temperature": if tools.is_empty() { 0.7 } else { 0.2 },
             "stream": false,
             "chat_template_kwargs": { "enable_thinking": false },
             "reasoning_budget": 0,
@@ -893,7 +900,7 @@ mod transcript_tests {
                     break;
                 }
             }
-            let headers = String::from_utf8_lossy(&buffer[..header_end]).to_owned();
+            let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
             let content_length: usize = headers
                 .lines()
                 .find_map(|line| {
@@ -1002,5 +1009,53 @@ mod transcript_tests {
             .stream(&request, &cancel, &mut |_chunk| Ok(()))
             .expect_err("missing local bytes must fail");
         assert!(error.to_string().contains("missing"), "{error}");
+    }
+
+    /// Defect #28 pin: tool-bearing agent requests must go out at low
+    /// temperature (format-faithful tool calls) with tools + tool_choice on
+    /// the wire; toolless Q&A keeps the livelier 0.7. Live-caught 2026-09-13:
+    /// at 0.7 the local 12B answered a "create these files" task with one
+    /// 2746-token prose dump and zero tool calls.
+    #[test]
+    fn tool_bearing_requests_pin_low_temperature() {
+        let (port, rx) = capture_server();
+        let provider = PaiLlamaLocalProvider::new("test-model", port).expect("build provider");
+        let mut request = vision_request(vec![]);
+        request.tools = vec![inbharat_harness_core::providers::ModelTool {
+            id: "fs.write".to_owned(),
+            description: "write a file".to_owned(),
+            input_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#
+                .to_owned(),
+        }];
+        let cancel = CancellationToken::new();
+        let response = provider
+            .stream(&request, &cancel, &mut |_chunk| Ok(()))
+            .expect("stream succeeds");
+        assert_eq!(response.text, "ok");
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("captured");
+        let parsed: JsonValue = serde_json::from_str(&body).expect("posted body is JSON");
+        assert_eq!(parsed["temperature"], json!(0.2), "{body}");
+        assert_eq!(parsed["tool_choice"], json!("auto"), "{body}");
+        assert_eq!(parsed["tools"][0]["function"]["name"], "fs.write", "{body}");
+    }
+
+    #[test]
+    fn toolless_requests_keep_default_temperature() {
+        let (port, rx) = capture_server();
+        let provider = PaiLlamaLocalProvider::new("test-model", port).expect("build provider");
+        let request = vision_request(vec![]);
+        let cancel = CancellationToken::new();
+        provider
+            .stream(&request, &cancel, &mut |_chunk| Ok(()))
+            .expect("stream succeeds");
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("captured");
+        let parsed: JsonValue = serde_json::from_str(&body).expect("posted body is JSON");
+        assert_eq!(parsed["temperature"], json!(0.7), "{body}");
+        assert!(parsed.get("tools").is_none(), "{body}");
+        assert!(parsed.get("tool_choice").is_none(), "{body}");
     }
 }

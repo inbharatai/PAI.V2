@@ -35,6 +35,6 @@ Not changed (recorded, deliberately): the harness's per-round division semantics
 ## 4. Verification
 
 - [x] Backend 128/128 green, `cargo clippy -D warnings` clean, `cargo fmt --check` clean
-- [ ] CI green
+- [x] CI green — PR #30 all 11 checks pass, squash-merged to main `5b8f06d` (2026-09-13), drive re-staged (545/545 asset checks green)
 - [ ] **Live re-verify after re-stage:** long-coding acceptance — harness_chat L3 runs the whole task to real artifacts (4 files on disk, node server, Playwright self-test with reported output), no fallback pill (watcher now reads collapsed pills via `textContent`), no denial
 - [ ] Capability panel `agent` lane flips to VERIFIED_WORKING citing this doc + the live run
