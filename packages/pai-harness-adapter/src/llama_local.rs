@@ -1024,8 +1024,7 @@ mod transcript_tests {
         request.tools = vec![inbharat_harness_core::providers::ModelTool {
             id: "fs.write".to_owned(),
             description: "write a file".to_owned(),
-            input_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#
-                .to_owned(),
+            input_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.to_owned(),
         }];
         let cancel = CancellationToken::new();
         let response = provider

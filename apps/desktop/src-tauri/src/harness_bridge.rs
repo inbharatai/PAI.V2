@@ -14,7 +14,7 @@ use crate::{
 };
 use inbharat_harness_core::providers::{EnforcementQuality, SandboxGrant, SandboxRequest};
 use inbharat_harness_core::{
-    tools::{ListFilesTool, ReadFileTool, RunProcessTool, WriteFileTool},
+    tools::{ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool},
     AttachmentMetadata, BudgetLimits, CancellationToken, Capability, CapabilitySet,
     ConfirmationMode, ConfirmationOutcome, Determinism, ErrorCode, ExecutionLevel, Failure,
     FailureClass, HarnessBuilder, HarnessResult, LocalExecutionBroker, MemoryOptions,
@@ -553,8 +553,10 @@ fn desktop_system_prefix(full_access: bool) -> String {
              so honestly and specifically.\n\
              You are an autonomous agent: when the user asks you to build, create, \
              write, or fix something, do the whole task yourself with the tools — \
-             create every file with fs.write, run and verify the result with \
-             process.run, read back what you wrote with fs.read, and keep going until \
+             create every file with fs.write (missing parent folders are created \
+             automatically, so you can write a nested file in one call), run and \
+             verify the result with process.run, read back what you wrote with \
+             fs.read, and keep going until \
              the task is genuinely done. Never paste code or file contents into the \
              chat instead of creating the real files, never stop halfway to ask the \
              user to do steps you can do yourself, and never claim you cannot access \
@@ -1396,6 +1398,7 @@ fn desktop_workspace_tools(
         Arc::new(ReadFileTool::default()) as Arc<dyn Tool>,
         Arc::new(ListFilesTool::default()),
         Arc::new(WriteFileTool::default()),
+        Arc::new(MakeDirTool::default()),
         Arc::new(RunProcessTool::default()),
         Arc::new(DesktopSearchTool::new(filesystem.clone())),
         Arc::new(DesktopPatchTool::new(filesystem.clone())),
