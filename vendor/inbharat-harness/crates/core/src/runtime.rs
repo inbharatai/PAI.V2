@@ -870,9 +870,12 @@ impl Harness {
                                         }
                                         messages.push(ModelMessage {
                                             role: ModelRole::Tool,
-                                            content: format!(
-                                                "tool={} call={} result={}",
-                                                tool_id, call_id, output.model_content
+                                            content: encode_tool_transcript(
+                                                &tool_id,
+                                                &call_id,
+                                                Some(&Value::Object(arguments.clone())),
+                                                Some(&Value::String(output.model_content.clone())),
+                                                None,
                                             ),
                                         });
                                     }
@@ -931,9 +934,12 @@ impl Harness {
                                         }
                                         messages.push(ModelMessage {
                                             role: ModelRole::Tool,
-                                            content: format!(
-                                                "tool={} call={} error={}",
-                                                tool_id, call_id, failure
+                                            content: encode_tool_transcript(
+                                                &tool_id,
+                                                &call_id,
+                                                Some(&Value::Object(arguments.clone())),
+                                                None,
+                                                Some(&failure.to_string()),
                                             ),
                                         });
                                     }
@@ -1354,6 +1360,18 @@ fn derive_model_history(
     max_messages: usize,
     max_bytes: usize,
 ) -> Vec<ModelMessage> {
+    // Arguments live on the ToolCall events, not the ToolResult events —
+    // collect them first so prior-turn exchanges echo what the model
+    // actually did (defect #30), not just that a call happened.
+    let mut call_arguments: BTreeMap<String, Value> = BTreeMap::new();
+    for event in session.events() {
+        if let EventData::ToolCall {
+            call_id, arguments, ..
+        } = &event.data
+        {
+            call_arguments.insert(call_id.clone(), arguments.clone());
+        }
+    }
     let mut reversed = Vec::new();
     let mut retained_bytes = 0_usize;
     for event in session.events().iter().rev() {
@@ -1373,9 +1391,12 @@ fn derive_model_history(
                 ..
             } => Some(ModelMessage {
                 role: ModelRole::Tool,
-                content: format!(
-                    "tool={tool_id} call={call_id} result={}",
-                    output.to_canonical_json()
+                content: encode_tool_transcript(
+                    tool_id,
+                    call_id,
+                    call_arguments.get(call_id),
+                    Some(output),
+                    None,
                 ),
             }),
             _ => None,
@@ -1528,6 +1549,52 @@ fn system_prompt(level: ExecutionLevel) -> String {
     }
 }
 
+/// Cap on how much of a tool call's arguments are echoed back into the model
+/// transcript. The echo is what lets the model see its own prior work
+/// (defect #30); without a cap one huge fs.write would re-enter every
+/// subsequent request and could exhaust the 32K context on a long run.
+const TOOL_ARGS_ECHO_LIMIT_BYTES: usize = 16 * 1024;
+
+/// Encodes one tool exchange for the model-facing transcript as a compact
+/// JSON object. Defect #30 (live-caught 2026-09-14, long-coding acceptance):
+/// the legacy `tool=… call=… result=…` prefix format carried no arguments,
+/// so the provider adapter reconstructed the assistant's tool_calls with
+/// empty arguments — the model could not see WHAT it had written, and
+/// rewrote the same first file forever (three index.html rewrites, the
+/// later files never reached; prompt tokens frozen while tool results kept
+/// saying "already wrote"). JSON is unambiguous even when file contents
+/// contain the legacy markers; the adapter parses this shape first and
+/// falls back to the legacy prefix format for older transcripts.
+fn encode_tool_transcript(
+    tool_id: &str,
+    call_id: &str,
+    arguments: Option<&Value>,
+    result: Option<&Value>,
+    error: Option<&str>,
+) -> String {
+    let mut object = BTreeMap::new();
+    object.insert("tool".to_owned(), Value::String(tool_id.to_owned()));
+    object.insert("call".to_owned(), Value::String(call_id.to_owned()));
+    if let Some(arguments) = arguments {
+        let mut canonical = arguments.to_canonical_json();
+        if canonical.len() > TOOL_ARGS_ECHO_LIMIT_BYTES {
+            truncate_utf8(&mut canonical, TOOL_ARGS_ECHO_LIMIT_BYTES);
+            object.insert(
+                "args_truncated".to_owned(),
+                Value::String("arguments exceeded the echo limit".to_owned()),
+            );
+        }
+        object.insert("args".to_owned(), Value::String(canonical));
+    }
+    if let Some(result) = result {
+        object.insert("result".to_owned(), result.clone());
+    }
+    if let Some(error) = error {
+        object.insert("error".to_owned(), Value::String(error.to_owned()));
+    }
+    Value::Object(object).to_canonical_json()
+}
+
 fn truncate_utf8(value: &mut String, max: usize) {
     if value.len() <= max {
         return;
@@ -1609,7 +1676,7 @@ fn finish_name(reason: FinishReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::InMemoryMemoryProvider;
+    use crate::providers::{InMemoryMemoryProvider, ModelResponse};
 
     /// Live-caught 2026-09-12: the desktop full-access lane (L3 autonomous
     /// coding sessions) now runs at the VALIDATOR CEILING in every dimension
@@ -1827,6 +1894,319 @@ mod tests {
         )?;
         assert_eq!(outcome.output, "product-result");
         assert_eq!(outcome.tool_calls, 1);
+        Ok(())
+    }
+
+    /// Defect #30 (live-caught 2026-09-14, long-coding acceptance): the
+    /// model-facing tool transcript carried no arguments, so the provider
+    /// adapter reconstructed the assistant's tool_calls with empty
+    /// arguments — the model could not see WHAT it had written and rewrote
+    /// the same first file forever. The transcript must echo the arguments.
+    #[test]
+    fn tool_transcript_echoes_arguments() -> HarnessResult<()> {
+        let arguments = Value::Object(BTreeMap::from([
+            (
+                "path".to_owned(),
+                Value::String("task-board/app.js".to_owned()),
+            ),
+            (
+                "contents".to_owned(),
+                Value::String("addTask();".to_owned()),
+            ),
+        ]));
+        let transcript = encode_tool_transcript(
+            "fs.write",
+            "r-1-1-2",
+            Some(&arguments),
+            Some(&Value::String(
+                "wrote 10 bytes to task-board/app.js".to_owned(),
+            )),
+            None,
+        );
+        let object = parse_transcript_object(&transcript)?;
+        assert_eq!(string_field(&object, "tool")?, "fs.write");
+        assert_eq!(string_field(&object, "call")?, "r-1-1-2");
+        assert_eq!(
+            string_field(&object, "args")?,
+            r#"{"contents":"addTask();","path":"task-board/app.js"}"#
+        );
+        assert_eq!(
+            string_field(&object, "result")?,
+            "wrote 10 bytes to task-board/app.js"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tool_transcript_truncates_huge_arguments() -> HarnessResult<()> {
+        let big = "x".repeat(TOOL_ARGS_ECHO_LIMIT_BYTES + 4096);
+        let arguments = Value::Object(BTreeMap::from([(
+            "contents".to_owned(),
+            Value::String(big),
+        )]));
+        let transcript =
+            encode_tool_transcript("fs.write", "r-1-1-3", Some(&arguments), None, None);
+        let object = parse_transcript_object(&transcript)?;
+        assert_eq!(
+            string_field(&object, "args_truncated")?,
+            "arguments exceeded the echo limit"
+        );
+        let echoed = string_field(&object, "args")?;
+        assert!(echoed.len() <= TOOL_ARGS_ECHO_LIMIT_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn prior_turn_history_echoes_arguments_from_the_session_events() -> HarnessResult<()> {
+        let mut session = Session::in_memory()?;
+        session.append(EventData::TurnStart { turn: 1 })?;
+        session.append(EventData::StepStart {
+            turn: 1,
+            step: 1,
+            attempt: 1,
+        })?;
+        session.append(EventData::ToolCall {
+            call_id: "r-1-2-1".to_owned(),
+            tool_id: "fs.write".to_owned(),
+            arguments: Value::Object(BTreeMap::from([(
+                "path".to_owned(),
+                Value::String("notes.txt".to_owned()),
+            )])),
+        })?;
+        session.append(EventData::ToolResult {
+            call_id: "r-1-2-1".to_owned(),
+            tool_id: "fs.write".to_owned(),
+            output: Value::Object(BTreeMap::from([("ok".to_owned(), Value::Bool(true))])),
+            synthesized: false,
+        })?;
+        let history = derive_model_history(&session, 16, 1024 * 1024);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, ModelRole::Tool);
+        let object = parse_transcript_object(&history[0].content)?;
+        assert_eq!(string_field(&object, "args")?, r#"{"path":"notes.txt"}"#);
+        assert_eq!(
+            object
+                .get("result")
+                .map(Value::to_canonical_json)
+                .unwrap_or_default(),
+            r#"{"ok":true}"#
+        );
+        Ok(())
+    }
+
+    /// Parses a JSON tool transcript into its object map for assertions.
+    fn parse_transcript_object(content: &str) -> HarnessResult<BTreeMap<String, Value>> {
+        match Value::parse_json(content) {
+            Ok(Value::Object(object)) => Ok(object),
+            Ok(_) | Err(_) => Err(Failure::invalid(
+                "test.assert",
+                "tool transcript is not a JSON object",
+            )),
+        }
+    }
+
+    /// Reads one string field out of a parsed tool transcript.
+    fn string_field<'a>(object: &'a BTreeMap<String, Value>, key: &str) -> HarnessResult<&'a str> {
+        object.get(key).and_then(Value::as_str).ok_or_else(|| {
+            Failure::invalid(
+                "test.assert",
+                format!("tool transcript field {key} missing or not a string"),
+            )
+        })
+    }
+
+    /// End-to-end defect #30 regression: after the model issues a tool call
+    /// and the tool answers, the FOLLOW-UP request must carry the exchange
+    /// WITH the original arguments — not a bare "a call happened" line. The
+    /// live failure mode: the adapter echoed `"arguments": "{}"`, the model
+    /// could not see what it had written, and it rewrote the same file every
+    /// step for the whole budget.
+    struct ArgsEchoTool {
+        manifest: crate::tools::ToolManifest,
+    }
+
+    impl ArgsEchoTool {
+        fn new() -> Self {
+            Self {
+                manifest: crate::tools::ToolManifest {
+                    id: "args.echo".to_owned(),
+                    version: "1".to_owned(),
+                    description: "Echo a write-style call for tests".to_owned(),
+                    input_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"contents":{"type":"string"}}}"#.to_owned(),
+                    output_schema: r#"{"type":"string"}"#.to_owned(),
+                    required_capabilities: CapabilitySet::from_slice(&[Capability::FileRead]),
+                    supported_levels: vec![
+                        ExecutionLevel::L1,
+                        ExecutionLevel::L2,
+                        ExecutionLevel::L3,
+                    ],
+                    determinism: crate::tools::Determinism::Deterministic,
+                    side_effect: crate::tools::SideEffect::Read,
+                    confirmation: crate::tools::ConfirmationMode::Never,
+                    concurrency_safe: true,
+                    default_timeout: Duration::from_secs(1),
+                    max_output_bytes: 1024,
+                    verification: "test".to_owned(),
+                    compensation: "none".to_owned(),
+                },
+            }
+        }
+    }
+
+    impl Tool for ArgsEchoTool {
+        fn manifest(&self) -> &crate::tools::ToolManifest {
+            &self.manifest
+        }
+        fn validate_arguments(&self, _arguments: &ToolArguments) -> HarnessResult<()> {
+            Ok(())
+        }
+        fn execute(
+            &self,
+            _arguments: &ToolArguments,
+            _context: &crate::tools::ToolContext<'_>,
+        ) -> HarnessResult<crate::tools::ToolOutput> {
+            Ok(crate::tools::ToolOutput {
+                value: Value::Bool(true),
+                model_content: "echoed".to_owned(),
+                presentation: BTreeMap::new(),
+            })
+        }
+    }
+
+    /// Two-step scripted provider that records the messages of every
+    /// request it receives: step 1 emits a tool call with real arguments,
+    /// step 2 ends the run with text.
+    struct TwoStepCapturingProvider {
+        requests: std::sync::Mutex<Vec<Vec<ModelMessage>>>,
+    }
+
+    impl TwoStepCapturingProvider {
+        fn new() -> Self {
+            Self {
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn requests(&self) -> Vec<Vec<ModelMessage>> {
+            self.requests
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl ModelProvider for TwoStepCapturingProvider {
+        fn id(&self) -> &str {
+            "capture"
+        }
+        fn models(&self) -> Vec<String> {
+            vec!["capture-v1".to_owned()]
+        }
+        fn stream(
+            &self,
+            request: &ModelRequest,
+            _cancel: &CancellationToken,
+            sink: &mut dyn FnMut(ModelChunk) -> HarnessResult<()>,
+        ) -> HarnessResult<ModelResponse> {
+            self.requests
+                .lock()
+                .map_err(|_| {
+                    Failure::new(
+                        ErrorCode::Internal,
+                        FailureClass::Internal,
+                        "model.capture",
+                        "capture lock poisoned",
+                    )
+                })?
+                .push(request.messages.clone());
+            let calls = self.requests.lock().map_err(|_| {
+                Failure::new(
+                    ErrorCode::Internal,
+                    FailureClass::Internal,
+                    "model.capture",
+                    "capture lock poisoned",
+                )
+            })?;
+            if calls.len() == 1 {
+                sink(ModelChunk::ToolCall {
+                    block: 0,
+                    call_id: "call-1".to_owned(),
+                    tool_id: "args.echo".to_owned(),
+                    arguments: r#"{"contents":"addTask();","path":"app.js"}"#.to_owned(),
+                })?;
+                sink(ModelChunk::Finish {
+                    reason: FinishReason::ToolCalls,
+                })?;
+                Ok(ModelResponse {
+                    text: String::new(),
+                    finish: FinishReason::ToolCalls,
+                    input_units: 0,
+                    output_units: 0,
+                    provider_request_id: Some("capture-1".to_owned()),
+                })
+            } else {
+                Ok(ModelResponse {
+                    text: "done".to_owned(),
+                    finish: FinishReason::Stop,
+                    input_units: 0,
+                    output_units: 1,
+                    provider_request_id: Some("capture-2".to_owned()),
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn followup_request_carries_the_tool_arguments() -> HarnessResult<()> {
+        struct ConfirmYes;
+        impl ConfirmationProvider for ConfirmYes {
+            fn confirm(
+                &self,
+                _request: &ConfirmationRequest,
+            ) -> HarnessResult<ConfirmationOutcome> {
+                Ok(ConfirmationOutcome::AllowedOnce)
+            }
+        }
+        let model = Arc::new(TwoStepCapturingProvider::new());
+        let harness = HarnessBuilder::local_embedded(".")?
+            .register_model(model.clone())?
+            .register_tool(Arc::new(ArgsEchoTool::new()))?
+            .confirmation_provider(Arc::new(ConfirmYes))
+            .build();
+        let options = RunOptions {
+            explicit_level: Some(ExecutionLevel::L3),
+            capabilities: CapabilitySet::from_slice(&[
+                Capability::Model,
+                Capability::Workspace,
+                Capability::FileRead,
+            ]),
+            provider: "capture".to_owned(),
+            model: "capture-v1".to_owned(),
+            ..RunOptions::default()
+        };
+        let (outcome, _session) = harness.run(
+            "write app.js with a real task function",
+            &options,
+            &CancellationToken::new(),
+        )?;
+        assert_eq!(outcome.output, "done");
+        assert_eq!(outcome.tool_calls, 1);
+        let requests = model.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "tool continuation must re-call the model"
+        );
+        let followup = &requests[1];
+        assert_eq!(followup.len(), 2, "task + tool exchange: {followup:?}");
+        assert_eq!(followup[0].role, ModelRole::User);
+        assert_eq!(followup[1].role, ModelRole::Tool);
+        let object = parse_transcript_object(&followup[1].content)?;
+        assert_eq!(
+            string_field(&object, "args")?,
+            r#"{"contents":"addTask();","path":"app.js"}"#,
+            "the follow-up request must echo the ORIGINAL arguments"
+        );
+        assert_eq!(string_field(&object, "result")?, "echoed");
         Ok(())
     }
 }
