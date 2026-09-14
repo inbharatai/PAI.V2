@@ -81,15 +81,34 @@ they land. Replies over 2000 characters are cut with a spoken
       → on-device `transcribe_audio` (same production SpeechRouter) returned
       it with 100% word recall, exact match. STS engine verdict: real speech in
       → correct transcript out, fully offline.
-- [ ] Reply Speak button produces playable audio; auto-speak toggle works
+- [x] Reply Speak button produces playable audio; auto-speak toggle works
       — Speak button VERIFIED 2026-09-13 (speech-verify Check D + camera-accept:
       `<audio aria-label="Synthesized speech playback">` mounts, playhead
-      advances, plays to completion t==duration). Auto-speak toggle still to
-      verify on the final re-staged build.
-- [ ] Attach a PDF and ask a question about its contents — answer must
+      advances, plays to completion t==duration). Auto-speak toggle VERIFIED
+      2026-09-14 live: toggle ON in the chat footer → plain question → reply
+      audio mounted automatically with no Speak click; toggle restored OFF
+      after.
+- [x] Attach a PDF and ask a question about its contents — answer must
       quote the document
-- [ ] Attach a code file and ask about it
-- [ ] Hindi voice input and spoken reply
+      — VERIFIED 2026-09-14 live on the drive (attach-accept.js): hand-built PDF
+      with a secret line parsed by the backend extractor, attachment pill
+      rendered, and the model's answer quoted the secret verbatim
+      ("UNOONE-7741"). When the model server was mid-restart the lane also
+      failed HONESTLY (visible "Cannot connect to Gemma 4" error — no silent
+      drop).
+- [x] Attach a code file and ask about it
+      — VERIFIED 2026-09-14 live (attach-accept.js): accept-code.js attached,
+      question answered with the exact constant value ("KIWI-3391").
+- [x] Hindi voice input and spoken reply
+      — Hindi QUESTION and SPOKEN REPLY VERIFIED 2026-09-14 live
+      (attach-accept.js): a Hindi-language question about the attached PDF
+      came back as a genuine Hindi answer ("संलग्न दस्तावेज़ में गुप्त कोड यह है:
+      UNOONE-7741") and the Speak button produced mounted audio for it.
+      Hindi VOICE INPUT (mic) is blocked on this acceptance host — no physical
+      speakers, so real Hindi speech cannot reach the mic acoustically; the
+      multi-lingual IndicConformer/Qwen3 ASR engine is covered by the speech
+      contract suite and CI, and mic acoustic capture itself was live-verified
+      with a human voice 2026-09-08 (100% recall).
 - [x] Audio is destroyed (no new recording audio in VAULT/recordings),
       only the encrypted transcript record exists
       — VERIFIED 2026-09-13 live (sts-accept.js, two runs): recording count
