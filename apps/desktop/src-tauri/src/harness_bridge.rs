@@ -740,7 +740,15 @@ fn desktop_system_prefix(full_access: bool) -> String {
              automatically, so you can write a nested file in one call), run and \
              verify the result with process.run, read back what you wrote with \
              fs.read, and keep going until \
-             the task is genuinely done. Never paste code or file contents into the \
+             the task is genuinely done. A failing test or command is the next \
+             step of the task, not the end: read the exact error output, inspect \
+             the relevant files to find the concrete cause, fix it, and re-run — \
+             iterate like this until the test passes or you have positively \
+             established why it cannot. Never report the task complete or claim \
+             code is 'functional' while its own output shows a failure, and never \
+             explain a failure away with environment speculation when the output \
+             points at a defect in the files you wrote. Never paste code or file \
+             contents into the \
              chat instead of creating the real files, never stop halfway to ask the \
              user to do steps you can do yourself, and never claim you cannot access \
              the filesystem or run programs — you can, and every step is verified \
@@ -2024,6 +2032,40 @@ mod workspace_tool_tests {
                 "{capability:?} must be allowed in full-access mode"
             );
         }
+    }
+
+    /// 2026-09-14 long-coding acceptance run 3 (post defect-#33): the agent
+    /// wrote a 4-file app whose test then failed on its own one-line bug
+    /// (`__dirname`-relative server path), and instead of iterating it
+    /// reported the task complete with a FALSE claim ("all files are
+    /// correctly written and functional"). The full-access briefing must
+    /// command the Codex-grade behavior explicitly: a failing test is the
+    /// next step, never a completion signal.
+    #[test]
+    fn full_access_briefing_requires_iteration_on_failure() {
+        let prompt = desktop_system_prefix(true);
+        assert!(
+            prompt.contains("A failing test or command is the next step of the task, not the end"),
+            "the briefing must define what to do when a run fails"
+        );
+        assert!(
+            prompt.contains("iterate like this until the test passes"),
+            "the briefing must command the iterate-to-green loop"
+        );
+        assert!(
+            prompt
+                .contains("Never report the task complete or claim code is 'functional' while its own output shows a failure"),
+            "the briefing must forbid false completion claims"
+        );
+        assert!(
+            prompt.contains("never explain a failure away with environment speculation"),
+            "the briefing must forbid rationalizing real defects"
+        );
+        // The read-only lane stays honest: no agent-tools briefing there.
+        assert!(
+            !desktop_system_prefix(false).contains("A failing test"),
+            "read-only mode must not claim agent tools it does not hold"
+        );
     }
 
     /// 2026-09-14 live agent progress: the human phrasing of a tool call must
