@@ -42,6 +42,11 @@ export function AccessibilityView() {
   const streamRef = useRef<MediaStream | null>(null);
   // Shared speech player (voice lab + spoken blind-aid descriptions).
   const speechAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Phone-parity live narration state (2026-09-14) — declared up here because
+  // the camera cleanup effect below stops narration when the blind aid is
+  // toggled off.
+  const [narrationOn, setNarrationOn] = useState(false);
+  const [narrationStatus, setNarrationStatus] = useState('');
 
   // Vision lab state
   const [imagePath, setImagePath] = useState('');
@@ -236,7 +241,9 @@ export function AccessibilityView() {
       const savedPath = await tauriApi.saveVisionSnapshot(dataUrl);
       setImagePath(savedPath);
       if (screenReaderDescription) {
-        await runDescribeOn(savedPath);
+        // Blind-aid flow: short spoken-style summary, not the long detailed
+        // description — this is what gets voiced.
+        await runDescribeOn(savedPath, 'scene_summary');
       }
     } catch (err) {
       setCameraError(`Snapshot save failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -266,6 +273,7 @@ export function AccessibilityView() {
 
   useEffect(() => {
     if (!cameraBlindAid) {
+      setNarrationOn(false);
       stopCamera();
     }
     return () => {
@@ -296,12 +304,16 @@ export function AccessibilityView() {
 
   async function runDescribe() {
     if (!imagePath.trim()) return;
+    // Manual describe keeps the long detailed description; the blind-aid
+    // flows (capture auto-describe, live narration, what's-in-front) use the
+    // short spoken-style scene_summary mode.
     await runDescribeOn(imagePath.trim());
   }
 
   /** Describe a saved image; in the blind-aid flow the result is SPOKEN, not
-   * just printed — a blind user cannot read the text box. */
-  async function runDescribeOn(path: string) {
+   * just printed — a blind user cannot read the text box. Pass
+   * mode='scene_summary' for the short phone-parity narration voice. */
+  async function runDescribeOn(path: string, mode?: string) {
     setIsProcessingVision(true);
     setVisionError('');
     setVisionResult('');
@@ -311,7 +323,7 @@ export function AccessibilityView() {
       // model…" forever with no error. Every vision invoke is now bounded so
       // the user always gets either a result or an honest error.
       const result = await withVisionTimeout(
-        tauriApi.describeImage(path),
+        tauriApi.describeImage(path, mode),
         300_000,
         'Image description'
       );
@@ -319,6 +331,150 @@ export function AccessibilityView() {
       await speakText(result.description);
     } catch (err) {
       setVisionError(`Describe failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsProcessingVision(false);
+    }
+  }
+
+  /** Hand a question and/or a captured frame to the chat panel (2026-09-14,
+   * OCR/blind-aid alignment): every capability ends in the one conversation,
+   * where the full agent — not just the vision describe — can act on it. */
+  function askInChat(detail: { text?: string; imageDataUrl?: string }) {
+    window.dispatchEvent(new CustomEvent('unoone:ask-in-chat', { detail }));
+  }
+
+  // ---- Phone-parity live blind aid (2026-09-14, task #55) ----
+  // The phone's BlindAidManager continuously analyzes frames, throttles
+  // spoken scene summaries, and resets all state per session. The desktop
+  // now mirrors that: while narration is on, capture a frame roughly every
+  // 25s, describe it in the short spoken-style "scene_summary" mode, and
+  // speak it only when the scene meaningfully changed from the last spoken
+  // summary. Three consecutive errors stop the loop with an honest message
+  // instead of a silent wedge (same posture as defect #23); all loop state
+  // is session-only.
+  const lastSpokenRef = useRef('');
+  const narrationBusyRef = useRef(false);
+  const narrationErrorsRef = useRef(0);
+  const speakRef = useRef<((text: string) => Promise<void>) | null>(null);
+  useEffect(() => {
+    speakRef.current = speakText;
+  });
+
+  /** Word-overlap similarity between two normalized scene summaries, 0..1. */
+  function sceneSimilarity(a: string, b: string): number {
+    const wa = new Set(a.toLowerCase().split(/\s+/).filter(Boolean));
+    const wb = new Set(b.toLowerCase().split(/\s+/).filter(Boolean));
+    if (wa.size === 0 || wb.size === 0) return 1;
+    let shared = 0;
+    for (const w of wa) if (wb.has(w)) shared += 1;
+    return shared / Math.max(wa.size, wb.size);
+  }
+
+  /** Capture one live frame, describe it in the spoken-style mode, and speak
+   * it when the scene changed. Throws on any failure so the loop's error
+   * backstop can count it. */
+  async function narrateOnce(): Promise<void> {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0 || !hasLiveCamera()) {
+      throw new Error('Camera is not live.');
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('The browser did not provide a 2D canvas.');
+    ctx.drawImage(video, 0, 0);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+    const savedPath = await tauriApi.saveVisionSnapshot(dataUrl);
+    const result = await withVisionTimeout(
+      tauriApi.describeImage(savedPath, 'scene_summary'),
+      120_000,
+      'Scene narration'
+    );
+    const scene = result.description.trim();
+    if (!scene) throw new Error('The vision model returned an empty description.');
+    if (lastSpokenRef.current && sceneSimilarity(scene, lastSpokenRef.current) > 0.8) {
+      // Same scene as the last spoken summary — the phone's narrator
+      // throttles repeats the same way; the blind user is not re-told what
+      // they just heard.
+      return;
+    }
+    lastSpokenRef.current = scene;
+    setVisionResult(scene);
+    await speakRef.current?.(scene);
+  }
+
+  useEffect(() => {
+    if (!narrationOn) return;
+    let cancelled = false;
+    const PERIOD = 25_000;
+    const tick = async () => {
+      if (cancelled || narrationBusyRef.current) return;
+      narrationBusyRef.current = true;
+      try {
+        await narrateOnce();
+        narrationErrorsRef.current = 0;
+        setNarrationStatus('Narrating — I will speak when what is in front of you changes.');
+      } catch (err) {
+        narrationErrorsRef.current += 1;
+        const msg = err instanceof Error ? err.message : String(err);
+        setNarrationStatus(`Scene narration problem: ${msg}`);
+        if (narrationErrorsRef.current >= 3) {
+          setNarrationOn(false);
+          setNarrationStatus('Live narration stopped after repeated problems. Fix the issue above, then press Narrate My Surroundings again.');
+        }
+      } finally {
+        narrationBusyRef.current = false;
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => void tick(), PERIOD);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      // Session-only state: a stopped loop forgets the last spoken scene.
+      lastSpokenRef.current = '';
+      narrationErrorsRef.current = 0;
+    };
+  }, [narrationOn]);
+
+  /** One-press "what's in front of me": capture, describe in the short
+   * spoken-style mode, and speak — regardless of the assist toggles. */
+  async function whatsInFront() {
+    if (isProcessingVision || narrationBusyRef.current) return;
+    setIsProcessingVision(true);
+    setVisionError('');
+    try {
+      if (!hasLiveCamera()) {
+        await startCamera();
+        const video = videoRef.current;
+        for (let i = 0; i < 30 && (!video || video.videoWidth === 0); i++) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
+      const video = videoRef.current;
+      if (!video || video.videoWidth === 0 || !hasLiveCamera()) {
+        throw new Error('Camera could not start. Check the camera connection and try again.');
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('The browser did not provide a 2D canvas.');
+      ctx.drawImage(video, 0, 0);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+      setSnapshots(prev => [dataUrl, ...prev].slice(0, 8));
+      const savedPath = await tauriApi.saveVisionSnapshot(dataUrl);
+      setImagePath(savedPath);
+      const result = await withVisionTimeout(
+        tauriApi.describeImage(savedPath, 'scene_summary'),
+        120_000,
+        'Scene description'
+      );
+      setVisionResult(result.description);
+      await speakText(result.description);
+    } catch (err) {
+      setVisionError(`What's-in-front failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsProcessingVision(false);
     }
@@ -540,6 +696,19 @@ export function AccessibilityView() {
 
                   {cameraBlindAid && (
                     <div style={{ marginBottom: '20px' }}>
+                      {/* Phone-parity one-press scene query (2026-09-14): the
+                          user's phone blind aid answers "what is in front of
+                          me" from one big button; the desktop now does the
+                          same, in the short spoken-style voice. */}
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => void whatsInFront()}
+                        disabled={isProcessingVision || narrationOn}
+                        title="Capture what the camera sees right now, describe it in spoken style, and speak it aloud"
+                        style={{ width: '100%', padding: '14px 16px', fontSize: '15px', marginBottom: '12px' }}
+                      >
+                        👁️ What's in front of me?
+                      </button>
                       <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
                         <button
                           className="btn btn-primary btn-sm"
@@ -562,7 +731,41 @@ export function AccessibilityView() {
                         >
                           Capture Snapshot
                         </button>
+                        {/* Phone-parity live narration (2026-09-14): the
+                            phone's BlindAidManager keeps watching and speaks
+                            scene changes; the desktop loop does the same,
+                            with change-detection so it does not repeat
+                            itself. */}
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => {
+                            setNarrationStatus('');
+                            setNarrationOn(on => !on);
+                          }}
+                          disabled={!cameraActive && !narrationOn}
+                          style={narrationOn ? { borderColor: 'var(--success)', color: 'var(--success)' } : undefined}
+                          title="Continuously watch the camera and speak what changes in front of you"
+                        >
+                          {narrationOn ? 'Stop Narrating' : 'Narrate My Surroundings'}
+                        </button>
                       </div>
+
+                      {narrationStatus && (
+                        <div
+                          role="status"
+                          style={{
+                            marginBottom: '12px',
+                            padding: '8px 12px',
+                            background: 'var(--bg-primary)',
+                            color: 'var(--text-secondary)',
+                            borderRadius: 'var(--radius-sm)',
+                            border: '1px solid var(--border)',
+                            fontSize: '13px',
+                          }}
+                        >
+                          {narrationStatus}
+                        </div>
+                      )}
 
                       {cameraError && (
                         <div
@@ -629,6 +832,23 @@ export function AccessibilityView() {
                               />
                             ))}
                           </div>
+                          {/* Chat alignment (2026-09-14): the newest frame can
+                              continue in the chat panel, where the full agent
+                              can act on it, not just describe it. */}
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            style={{ marginTop: '8px' }}
+                            onClick={() =>
+                              askInChat({
+                                imageDataUrl: snapshots[0],
+                                text: 'What is in front of me? Describe the scene briefly and read out any visible text.',
+                              })
+                            }
+                            disabled={!snapshots[0]}
+                            title="Send the newest snapshot to the chat panel with a scene question"
+                          >
+                            Ask in Chat
+                          </button>
                         </div>
                       )}
                     </div>
@@ -724,6 +944,25 @@ export function AccessibilityView() {
                         >
                           {visionResult}
                         </div>
+                      )}
+
+                      {/* Chat alignment (2026-09-14): OCR text and vision
+                          results do not dead-end in this panel — hand them to
+                          the chat panel where the full agent (reading,
+                          reasoning, tools) can act on them. */}
+                      {visionResult && (
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          style={{ marginTop: '8px' }}
+                          onClick={() =>
+                            askInChat({
+                              text: `I extracted this with the vision lane (OCR/describe) on this device:\n\n${visionResult.slice(0, 4000)}\n\nWhat is it? Answer in plain language.`,
+                            })
+                          }
+                          title="Continue with this text in the chat panel"
+                        >
+                          Ask in Chat
+                        </button>
                       )}
 
                       {speechNotice && (

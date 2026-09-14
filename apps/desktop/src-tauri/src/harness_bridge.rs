@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::Emitter;
 use unoone_vault_core::Vault;
 
 #[derive(Debug, serde::Serialize)]
@@ -42,6 +43,188 @@ pub struct HarnessChatResult {
     pub elapsed_ms: u64,
     pub model_id: String,
     pub memory_namespace: String,
+}
+
+/// One live-activity line streamed to the chat panel while the agent runs.
+/// Live-caught 2026-09-14 (user directive: "the chat panel should show what
+/// it is doing, what codes it's writing — like Codex/GLM"): a multi-file
+/// build previously showed a bare spinner for minutes while the model wrote
+/// whole files, so a real run looked frozen. `ProgressTool` emits these as
+/// Tauri `agent-progress` events around every tool execution.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct AgentProgressEvent {
+    /// "call" before the tool runs, "result" after it returns.
+    pub phase: &'static str,
+    pub tool: String,
+    /// Human summary, e.g. "Writing task-board/index.html (1,874 bytes)".
+    pub detail: String,
+    /// Short head of the code being written (fs.write contents) so the user
+    /// can literally watch the file appear, Codex-style. Bounded tightly.
+    pub code_preview: Option<String>,
+}
+
+/// Short, human phrasing of what a tool call is about to do.
+fn progress_detail(tool: &str, arguments: &ToolArguments) -> String {
+    let arg = |key: &str| {
+        arguments
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    match tool {
+        "fs.write" => {
+            let path = arg("path");
+            let bytes = arguments
+                .get("contents")
+                .and_then(Value::as_str)
+                .map(str::len);
+            match (path.is_empty(), bytes) {
+                (false, Some(len)) => format!("Writing {path} ({len} bytes)"),
+                (false, None) => format!("Writing {path}"),
+                _ => "Writing file".to_owned(),
+            }
+        }
+        "fs.read" => {
+            let path = arg("path");
+            if path.is_empty() {
+                "Reading file".to_owned()
+            } else {
+                format!("Reading {path}")
+            }
+        }
+        "fs.list" => {
+            let path = arg("path");
+            if path.is_empty() {
+                "Listing directory".to_owned()
+            } else {
+                format!("Listing {path}")
+            }
+        }
+        "fs.mkdir" => {
+            let path = arg("path");
+            if path.is_empty() {
+                "Creating directory".to_owned()
+            } else {
+                format!("Creating directory {path}")
+            }
+        }
+        "process.run" => {
+            let program = arg("program");
+            if program.is_empty() {
+                "Running command".to_owned()
+            } else {
+                format!("Running {program}")
+            }
+        }
+        "browser.act" => {
+            let action = arg("action");
+            let url = arg("url");
+            match (action.is_empty(), url.is_empty()) {
+                (false, false) => format!("Browser: {action} {url}"),
+                (false, true) => format!("Browser: {action}"),
+                _ => "Driving the browser".to_owned(),
+            }
+        }
+        "workspace.search" => "Searching the workspace".to_owned(),
+        "workspace.patch" => "Patching a workspace file".to_owned(),
+        _ => {
+            let canonical = Value::Object(
+                arguments
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                    .collect(),
+            )
+            .to_canonical_json();
+            if canonical.len() > 160 {
+                format!("{tool} {canonical:.160}…")
+            } else {
+                format!("{tool} {canonical}")
+            }
+        }
+    }
+}
+
+/// Head of the contents an fs.write is about to create, for the
+/// watch-it-write activity feed. Bounded so a huge write cannot flood the
+/// IPC channel; newlines are kept for the frontend's pre-formatted render.
+fn progress_code_preview(tool: &str, arguments: &ToolArguments) -> Option<String> {
+    if tool != "fs.write" {
+        return None;
+    }
+    let contents = arguments.get("contents")?.as_str()?;
+    if contents.is_empty() {
+        return None;
+    }
+    Some(contents.chars().take(240).collect())
+}
+
+/// Wraps every registered tool so the chat panel can show live agent
+/// activity (2026-09-14). Transparent to the harness — manifest and
+/// validation delegate unchanged; execution emits a `call` event, runs the
+/// inner tool, then emits a `result` event. Emission is best-effort: a UI
+/// without listeners or an emit failure must never break a real tool run.
+struct ProgressTool {
+    inner: Arc<dyn Tool>,
+    app: tauri::AppHandle,
+}
+
+impl Tool for ProgressTool {
+    fn manifest(&self) -> &ToolManifest {
+        self.inner.manifest()
+    }
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        self.inner.validate_arguments(arguments)
+    }
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        let tool = self.inner.manifest().id.clone();
+        let detail = progress_detail(&tool, arguments);
+        let preview = progress_code_preview(&tool, arguments);
+        let _ = self.app.emit(
+            "agent-progress",
+            AgentProgressEvent {
+                phase: "call",
+                tool: tool.clone(),
+                detail: detail.clone(),
+                code_preview: preview,
+            },
+        );
+        match self.inner.execute(arguments, context) {
+            Ok(output) => {
+                let mut summary = output.model_content.clone();
+                if summary.len() > 160 {
+                    summary.truncate(160);
+                    summary.push('…');
+                }
+                let _ = self.app.emit(
+                    "agent-progress",
+                    AgentProgressEvent {
+                        phase: "result",
+                        tool: tool.clone(),
+                        detail: format!("Done: {summary}"),
+                        code_preview: None,
+                    },
+                );
+                Ok(output)
+            }
+            Err(failure) => {
+                let _ = self.app.emit(
+                    "agent-progress",
+                    AgentProgressEvent {
+                        phase: "result",
+                        tool: tool.clone(),
+                        detail: format!("Failed: {failure}"),
+                        code_preview: None,
+                    },
+                );
+                Err(failure)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1615,8 +1798,13 @@ pub async fn harness_chat(
                 },
             }));
         for tool in desktop_read_tools(&vault_root, Arc::clone(&vault), Arc::clone(&safety)) {
+            // Live activity: every tool is wrapped so the chat panel shows
+            // what the agent is doing while it works (2026-09-14).
             builder = builder
-                .register_tool(tool)
+                .register_tool(Arc::new(ProgressTool {
+                    inner: tool,
+                    app: app.clone(),
+                }))
                 .map_err(|error| error.to_string())?;
         }
         if let Some(filesystem) = workspace_fs {
@@ -1627,7 +1815,10 @@ pub async fn harness_chat(
                 Arc::clone(&safety),
             ) {
                 builder = builder
-                    .register_tool(tool)
+                    .register_tool(Arc::new(ProgressTool {
+                        inner: tool,
+                        app: app.clone(),
+                    }))
                     .map_err(|error| error.to_string())?;
             }
         }
@@ -1833,6 +2024,107 @@ mod workspace_tool_tests {
                 "{capability:?} must be allowed in full-access mode"
             );
         }
+    }
+
+    /// 2026-09-14 live agent progress: the human phrasing of a tool call must
+    /// carry the concrete file/command (the user watches "Writing
+    /// app/index.html (1024 bytes)", not a generic "calling tool"), while a
+    /// missing argument degrades to a generic line instead of an empty one.
+    #[test]
+    fn progress_detail_phrases_each_tool_concretely() {
+        assert_eq!(
+            progress_detail(
+                "fs.write",
+                &string_args(&[
+                    ("path", "app/index.html"),
+                    ("contents", "x".repeat(1024).as_str())
+                ])
+            ),
+            "Writing app/index.html (1024 bytes)"
+        );
+        assert_eq!(
+            progress_detail("fs.write", &string_args(&[("path", "a.txt")])),
+            "Writing a.txt"
+        );
+        assert_eq!(progress_detail("fs.write", &args(&[])), "Writing file");
+        assert_eq!(
+            progress_detail(
+                "fs.read",
+                &string_args(&[("path", "C:\\Users\\me\\notes.md")])
+            ),
+            "Reading C:\\Users\\me\\notes.md"
+        );
+        assert_eq!(
+            progress_detail("fs.list", &string_args(&[("path", "app")])),
+            "Listing app"
+        );
+        assert_eq!(
+            progress_detail("fs.mkdir", &string_args(&[("path", "dist")])),
+            "Creating directory dist"
+        );
+        assert_eq!(
+            progress_detail("process.run", &string_args(&[("program", "node")])),
+            "Running node"
+        );
+        assert_eq!(
+            progress_detail(
+                "browser.act",
+                &string_args(&[("action", "navigate"), ("url", "https://example.com")])
+            ),
+            "Browser: navigate https://example.com"
+        );
+        assert_eq!(
+            progress_detail("browser.act", &string_args(&[("action", "click")])),
+            "Browser: click"
+        );
+        assert_eq!(
+            progress_detail("workspace.search", &args(&[])),
+            "Searching the workspace"
+        );
+        assert_eq!(
+            progress_detail("workspace.patch", &args(&[])),
+            "Patching a workspace file"
+        );
+        // Unknown tools fall back to their canonical JSON, truncated.
+        assert_eq!(
+            progress_detail("custom.tool", &string_args(&[("k", "v")])),
+            "custom.tool {\"k\":\"v\"}"
+        );
+        let long_value = "v".repeat(400);
+        let big = string_args(&[("k", long_value.as_str())]);
+        let line = progress_detail("custom.tool", &big);
+        assert!(line.ends_with('…'));
+        assert!(line.chars().count() <= "custom.tool ".chars().count() + 160 + 1);
+    }
+
+    /// 2026-09-14 live agent progress: only fs.write previews its contents,
+    /// bounded at 240 chars so a huge write cannot flood the IPC channel.
+    #[test]
+    fn progress_code_preview_shows_only_bounded_fs_write_heads() {
+        assert_eq!(
+            progress_code_preview("fs.write", &string_args(&[("contents", "let x = 1;\n")])),
+            Some("let x = 1;\n".to_owned())
+        );
+        let exact_240 = "h".repeat(240);
+        assert_eq!(
+            progress_code_preview(
+                "fs.write",
+                &string_args(&[("contents", exact_240.as_str())])
+            ),
+            Some("h".repeat(240))
+        );
+        let huge = "h".repeat(1000);
+        assert_eq!(
+            progress_code_preview("fs.write", &string_args(&[("contents", huge.as_str())])),
+            Some("h".repeat(240)),
+            "preview must be bounded at 240 chars"
+        );
+        assert_eq!(
+            progress_code_preview("fs.write", &string_args(&[("contents", "")])).as_deref(),
+            None
+        );
+        assert_eq!(progress_code_preview("fs.write", &args(&[])), None);
+        assert!(progress_code_preview("fs.read", &string_args(&[("path", "x.txt")])).is_none());
     }
 
     #[test]
