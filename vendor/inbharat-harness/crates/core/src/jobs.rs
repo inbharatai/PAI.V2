@@ -423,4 +423,120 @@ mod tests {
         assert!(jobs.list("alice")?.is_empty());
         Ok(())
     }
+
+    /// Fixed-output subagent stub so the scoping gate can be exercised
+    /// without a model.
+    struct StubSubagent {
+        output: &'static str,
+    }
+
+    impl SubagentProvider for StubSubagent {
+        fn run(
+            &self,
+            _request: &SubagentRequest,
+            _cancel: &CancellationToken,
+        ) -> HarnessResult<SubagentResult> {
+            // Far longer than any test's output ceiling so the truncation
+            // gate is actually exercised.
+            Ok(SubagentResult {
+                child_id: "sub-stub".to_owned(),
+                output: format!("{}{}", self.output, "x".repeat(64)),
+                failure: None,
+            })
+        }
+    }
+
+    fn scoped_request(depth: u8, max_depth: u8, max_output_bytes: usize) -> SubagentRequest {
+        SubagentRequest {
+            prompt: "do the thing".to_owned(),
+            parent_id: "local-user".to_owned(),
+            depth,
+            max_depth,
+            capabilities: CapabilitySet::all_local(),
+            max_output_bytes,
+        }
+    }
+
+    /// The subagent gate passes a valid request and bounds the child's
+    /// output to the requested byte ceiling.
+    #[test]
+    fn run_scoped_subagent_accepts_valid_request_and_truncates_output() -> HarnessResult<()> {
+        let provider = StubSubagent { output: "done" };
+        let request = scoped_request(1, 2, 8);
+        let cancel = CancellationToken::new();
+        let result =
+            run_scoped_subagent(&provider, &request, &CapabilitySet::all_local(), &cancel)?;
+        assert_eq!(result.child_id, "sub-stub");
+        assert!(result.failure.is_none());
+        // The stub's output is far longer than 8 bytes: the gate must have
+        // truncated it to exactly the requested ceiling.
+        assert_eq!(result.output.len(), 8);
+        Ok(())
+    }
+
+    /// Every invalid shape — depth 0, depth past the ceiling, capabilities
+    /// beyond the parent, zero output budget — is refused with a permission
+    /// denial before the provider is ever invoked.
+    #[test]
+    fn run_scoped_subagent_rejects_invalid_scope() -> HarnessResult<()> {
+        // If the gate ever fails to refuse an invalid request, this provider
+        // runs and answers "must-not-run" — which every assertion below
+        // then rejects, so the leak cannot pass silently.
+        struct CanaryProvider;
+        impl SubagentProvider for CanaryProvider {
+            fn run(
+                &self,
+                _request: &SubagentRequest,
+                _cancel: &CancellationToken,
+            ) -> HarnessResult<SubagentResult> {
+                Ok(SubagentResult {
+                    child_id: "must-not-run".to_owned(),
+                    output: "the gate leaked this provider".to_owned(),
+                    failure: None,
+                })
+            }
+        }
+        let provider = CanaryProvider;
+        let cancel = CancellationToken::new();
+        let parent = CapabilitySet::all_local();
+        for request in [
+            scoped_request(0, 2, 8),
+            scoped_request(3, 2, 8),
+            scoped_request(1, 2, 0),
+        ] {
+            let refused = matches!(
+                run_scoped_subagent(&provider, &request, &parent, &cancel),
+                Err(Failure {
+                    code: ErrorCode::PermissionDenied,
+                    ..
+                })
+            );
+            assert!(
+                refused,
+                "depth/scope-invalid request must be refused before the provider runs"
+            );
+        }
+        // Capability narrowing: a request asking beyond the parent's set
+        // (parent grants no Subagent capability, the request includes it)
+        // is refused even at a valid depth.
+        let mut narrow = scoped_request(1, 2, 8);
+        let mut parent_only_files = CapabilitySet::new();
+        parent_only_files.insert(crate::providers::Capability::FileRead);
+        narrow.capabilities = parent_only_files.clone();
+        narrow
+            .capabilities
+            .insert(crate::providers::Capability::Subagent);
+        let refused = matches!(
+            run_scoped_subagent(&provider, &narrow, &parent_only_files, &cancel),
+            Err(Failure {
+                code: ErrorCode::PermissionDenied,
+                ..
+            })
+        );
+        assert!(
+            refused,
+            "capability-overflowing subagent request must be refused"
+        );
+        Ok(())
+    }
 }

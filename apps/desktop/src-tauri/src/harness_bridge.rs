@@ -12,6 +12,7 @@ use crate::{
     safety::{DesktopSafetyGuard, SafetyGuardState, ToolAction},
     security, DesktopVaultState,
 };
+use inbharat_harness_core::jobs::{run_scoped_subagent, SubagentProvider};
 use inbharat_harness_core::providers::{EnforcementQuality, SandboxGrant, SandboxRequest};
 use inbharat_harness_core::{
     tools::{ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool},
@@ -19,7 +20,8 @@ use inbharat_harness_core::{
     ConfirmationMode, ConfirmationOutcome, Determinism, ErrorCode, ExecutionLevel, Failure,
     FailureClass, HarnessBuilder, HarnessResult, LocalExecutionBroker, MemoryOptions,
     PermissionDecision, PermissionProvider, RootedFs, RunOptions, SandboxProvider, SideEffect,
-    StaticConfirmationProvider, Tool, ToolArguments, ToolContext, ToolManifest, ToolOutput, Value,
+    StaticConfirmationProvider, SubagentRequest, SubagentResult, Tool, ToolArguments, ToolContext,
+    ToolManifest, ToolOutput, Value,
 };
 use pai_harness_adapter::{
     PaiLlamaLocalProvider, PaiVaultMemoryProvider, PaiVaultMemoryProviderConfig,
@@ -141,6 +143,15 @@ fn progress_detail(tool: &str, arguments: &ToolArguments) -> String {
         }
         "workspace.search" => "Searching the workspace".to_owned(),
         "workspace.patch" => "Patching a workspace file".to_owned(),
+        "agent.spawn" => {
+            let task = arg("task");
+            if task.is_empty() {
+                "Spawning a sub-agent".to_owned()
+            } else {
+                let head: String = task.trim().chars().take(90).collect();
+                format!("Spawning a sub-agent: {head}…")
+            }
+        }
         _ => {
             let canonical = Value::Object(
                 arguments
@@ -180,6 +191,10 @@ fn progress_code_preview(tool: &str, arguments: &ToolArguments) -> Option<String
 struct ProgressTool {
     inner: Arc<dyn Tool>,
     app: tauri::AppHandle,
+    /// Prepended to every emitted detail line. Sub-agent tool runs set this
+    /// to "[subagent-xxxx]" so the user can tell child activity apart from
+    /// the parent agent's in the same live feed.
+    detail_prefix: Option<String>,
 }
 
 impl Tool for ProgressTool {
@@ -195,7 +210,10 @@ impl Tool for ProgressTool {
         context: &ToolContext<'_>,
     ) -> HarnessResult<ToolOutput> {
         let tool = self.inner.manifest().id.clone();
-        let detail = progress_detail(&tool, arguments);
+        let detail = match &self.detail_prefix {
+            Some(prefix) => format!("{prefix} {}", progress_detail(&tool, arguments)),
+            None => progress_detail(&tool, arguments),
+        };
         let preview = progress_code_preview(&tool, arguments);
         let _ = self.app.emit(
             "agent-progress",
@@ -751,6 +769,18 @@ fn desktop_system_prefix(full_access: bool) -> String {
              your answer so the user can stop it later.\n\
              - Drive a real web browser (navigate, click, type, fill forms, screenshot) \
              via browser.act\n\
+             - Spawn sub-agents via agent.spawn to complete complex work: give \
+             each one a COMPLETE, self-contained task (every path and detail, \
+             because it sees nothing else — not even this conversation) and \
+             its finished report comes back as the tool's output. Spawn a \
+             sub-agent when a task splits into independent pieces (e.g. one \
+             writes the tests while you build the app, or one explores a \
+             problem while you build the main path), or to get a fresh \
+             independent pass that double-checks risky work. Sub-agents have \
+             your same tools, up to 2 levels deep. Treat their reports as \
+             claims: verify anything important before relying on it, and \
+             fold the result into your own answer — the user never talks to \
+             the sub-agent directly.\n\
              - Read the user's encrypted Pocket AI vault records \
              (search_notes, list_documents, read_document, verify_vault)\n\
              When a task needs any of this, actually use the tools instead of claiming \
@@ -837,9 +867,11 @@ fn registry_safe_model_id(reported: &str) -> String {
 /// calls, 24 h of wall time, 64 MiB of accumulated tool output.
 /// The user's standing directive is "no cap" — the full-access lane runs at
 /// the validator ceiling in every dimension, so no real task is ever cut
-/// short by a desktop-side budget. Only jobs/subagent-depth stay at their
-/// conservative defaults (the desktop lane spawns no subagents or job
-/// queues today; raising them is meaningless until those lanes exist).
+/// short by a desktop-side budget. Sub-agent depth is 2 (2026-09-15
+/// multi-agent lane: `agent.spawn` delegates to nested harness runs; the
+/// ceiling matches `SUBAGENT_DEPTH_CEILING` and `run_scoped_subagent`
+/// enforces it). Only jobs stay at 0 — the desktop lane runs no job
+/// queues today.
 /// Live-caught 2026-09-12 (defect #16): this shape must stay within the
 /// harness's hard safety bounds — the 64 MiB cumulative output figure was
 /// once rejected by the validator, every full-access chat call threw, and
@@ -866,7 +898,7 @@ fn full_access_budget() -> BudgetLimits {
         max_tool_calls: 100_000,
         max_rounds: 1,
         max_jobs: 0,
-        max_subagent_depth: 0,
+        max_subagent_depth: SUBAGENT_DEPTH_CEILING,
         max_output_bytes: 64 * 1024 * 1024,
         max_duration: Duration::from_secs(24 * 60 * 60),
     }
@@ -1623,6 +1655,491 @@ fn desktop_workspace_tools(
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Multi-agent lane (2026-09-15). The harness core ships a designed,
+// unit-tested sub-agent seam (`SubagentProvider` + `run_scoped_subagent` +
+// `BudgetLimits.max_subagent_depth` + `Capability::Subagent`) with no
+// consumer — the desktop lane ran at depth 0 with no provider. This block
+// wires that seam: `agent.spawn` lets the parent agent delegate a
+// self-contained sub-task to a fresh nested harness run with the same
+// verified model, the same fenced workspace and the same audited tools.
+// The user's standing ask: multi-agent task completion "just like Codex
+// or GLM" — isolated context per sub-task, up to 2 levels deep, every
+// child step still audited and budgeted.
+// ---------------------------------------------------------------------------
+
+/// Sub-agent spawn ceiling shared by every level: a top-level agent may
+/// spawn children at depth 1, those may spawn at depth 2, and depth 2
+/// cannot spawn further. Matches `full_access_budget().max_subagent_depth`
+/// so the request the tool builds always passes `run_scoped_subagent`'s
+/// validation at the top level and is rejected structurally at the fringe.
+const SUBAGENT_DEPTH_CEILING: u8 = 2;
+
+/// The current depth of an agent run, parsed from its actor id. Top-level
+/// runs use "local-user" (depth 0); every child runs as
+/// "subagent-<short>-d<depth>". The spawn tool uses this to compute the
+/// child's depth — the depth chain is enforced by the actor string the
+/// provider stamps on every child run, so a child cannot lie its way
+/// deeper than the ceiling without faking an actor it was never given.
+fn actor_depth(actor: &str) -> u8 {
+    actor
+        .rsplit("-d")
+        .next()
+        .and_then(|tail| tail.parse::<u8>().ok())
+        .filter(|depth| *depth > 0 && actor.starts_with("subagent-"))
+        .unwrap_or(0)
+}
+
+/// The sub-agent's own run budget: generous enough for a real build task,
+/// bounded so a runaway child cannot burn unbounded host resources.
+/// `max_subagent_depth` is the remaining headroom below the ceiling, so
+/// a depth-2 child gets 0 and the harness itself refuses deeper spawns.
+fn subagent_budget(remaining_depth: u8) -> BudgetLimits {
+    BudgetLimits {
+        max_steps: 2_000,
+        max_tool_calls: 10_000,
+        max_rounds: 1,
+        max_jobs: 0,
+        max_subagent_depth: remaining_depth,
+        max_output_bytes: 8 * 1024 * 1024,
+        max_duration: Duration::from_secs(60 * 60),
+    }
+}
+
+/// The sub-agent's system briefing. A sub-agent never sees the user: its
+/// whole job is to complete one task handed to it by the parent agent and
+/// return a report the parent can verify and fold into its own answer.
+fn subagent_system_prefix() -> String {
+    let workspace = workspace_root()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "%USERPROFILE%\\UnoOneAgent".to_owned());
+    format!(
+        "You are a sub-agent spawned by another AI agent to complete ONE \
+         task inside the user's private Pocket AI workspace. You never talk \
+         to the user directly — the parent agent receives your final report \
+         and verifies it.\n\
+         You have the same tools as the parent, all audited and budgeted:\n\
+         - Read/write/list/search/patch files in the workspace folder: {workspace}\n\
+         - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
+         dotnet, go, java, cmake, make, gcc, clang, powershell)\n\
+         - Deploy long-running processes with background:true on process.run\n\
+         - Drive the real web browser via browser.act\n\
+         Do the whole task yourself: create the real files, run the real \
+         commands, read the exact error output when something fails, fix it \
+         and re-run until it genuinely works. Never claim a task is complete \
+         while its own output shows a failure.\n\
+         Your final message IS the report. Make it self-contained: state \
+         exactly what you did, the exact ABSOLUTE path of every file you \
+         created or changed, the exact output of anything you ran, and \
+         anything the parent must double-check. The parent treats your \
+         report as data from a worker, not as established truth — include \
+         the evidence that lets it verify your claims."
+    )
+}
+
+/// Runs a sub-agent to completion against the same verified llama-server,
+/// the same encrypted vault and the same fenced workspace as the parent.
+/// Stateless per run: every `run` builds a fresh nested harness with its
+/// own budget, its own isolated conversation namespace and (at depth
+/// below the ceiling) its own `agent.spawn` tool, so the child can itself
+/// delegate. Every child tool is wrapped in `ProgressTool` so the user
+/// watches sub-agent activity live in the same chat feed, tagged with the
+/// child id.
+struct PaiSubagentProvider {
+    model_id: String,
+    port: u16,
+    vault_root: String,
+    vault: Arc<Mutex<Option<Vault>>>,
+    vault_id: String,
+    safety: Arc<Mutex<DesktopSafetyGuard>>,
+    browser: Arc<BrowserStateHolder>,
+    /// `None` in unit tests: child tools then register without the live
+    /// progress wrapper (there is no UI to stream to).
+    app: Option<tauri::AppHandle>,
+    /// The capability set every spawned child inherits (the parent's own
+    /// full-access set). `run_scoped_subagent` already refuses a request
+    /// whose capabilities are not a subset of the parent's.
+    capabilities: CapabilitySet,
+}
+
+impl PaiSubagentProvider {
+    #[allow(clippy::too_many_arguments)] // one construction site + tests
+    fn new(
+        model_id: String,
+        port: u16,
+        vault_root: String,
+        vault: Arc<Mutex<Option<Vault>>>,
+        vault_id: String,
+        safety: Arc<Mutex<DesktopSafetyGuard>>,
+        browser: Arc<BrowserStateHolder>,
+        app: Option<tauri::AppHandle>,
+        capabilities: CapabilitySet,
+    ) -> Self {
+        Self {
+            model_id,
+            port,
+            vault_root,
+            vault,
+            vault_id,
+            safety,
+            browser,
+            app,
+            capabilities,
+        }
+    }
+
+    /// Build and run one child harness. Returns the child's final report.
+    /// Child-level failures are data, not transport errors: the caller
+    /// wraps them into `SubagentResult::failure` so the parent model can
+    /// read and react to them.
+    fn run_child(
+        &self,
+        request: &SubagentRequest,
+        child_id: &str,
+        cancel: &CancellationToken,
+    ) -> HarnessResult<String> {
+        let child_model_builder = PaiLlamaLocalProvider::new(self.model_id.clone(), self.port)
+            .map_err(|error| {
+                Failure::new(
+                    ErrorCode::ProviderFailed,
+                    FailureClass::Internal,
+                    "subagent.model",
+                    error.to_string(),
+                )
+            })?;
+        let model = Arc::new(child_model_builder);
+        let memory = Arc::new(
+            PaiVaultMemoryProvider::new(
+                Arc::clone(&self.vault),
+                PaiVaultMemoryProviderConfig {
+                    origin_platform: "DESKTOP".to_owned(),
+                    origin_device_id: "unoone-power".to_owned(),
+                    ..PaiVaultMemoryProviderConfig::default()
+                },
+            )
+            .map_err(|error| {
+                Failure::new(
+                    ErrorCode::ProviderFailed,
+                    FailureClass::Internal,
+                    "subagent.memory",
+                    error.to_string(),
+                )
+            })?,
+        );
+        let workspace = workspace_root().map_err(|error| {
+            Failure::new(
+                ErrorCode::FilesystemDenied,
+                FailureClass::Policy,
+                "subagent.workspace",
+                error,
+            )
+        })?;
+        let filesystem = RootedFs::new(&workspace).map_err(|error| {
+            Failure::new(
+                ErrorCode::FilesystemDenied,
+                FailureClass::Policy,
+                "subagent.workspace",
+                error.to_string(),
+            )
+        })?;
+        let broker = LocalExecutionBroker::new(
+            filesystem.clone(),
+            FULL_ACCESS_PROGRAMS.iter().map(|p| (*p).to_owned()),
+        );
+        let child_prefix = format!("[{child_id}]");
+        let mut builder = HarnessBuilder::embedded(Arc::new(broker))
+            .map_err(|error| {
+                Failure::new(
+                    ErrorCode::Conflict,
+                    FailureClass::Internal,
+                    "subagent.build",
+                    error.to_string(),
+                )
+            })?
+            .permission_provider(Arc::new(FullAccessPermission));
+        builder = builder.register_model(model).map_err(|error| {
+            Failure::new(
+                ErrorCode::Conflict,
+                FailureClass::Internal,
+                "subagent.build",
+                error.to_string(),
+            )
+        })?;
+        builder = builder
+            .memory_provider(memory)
+            .system_prefix(subagent_system_prefix())
+            .sandbox_provider(Arc::new(DesktopSandbox {
+                granted: request.capabilities.clone(),
+                trusted_process: true,
+            }))
+            .confirmation_provider(Arc::new(StaticConfirmationProvider {
+                outcome: ConfirmationOutcome::AllowedOnce,
+            }));
+        for tool in desktop_read_tools(
+            &self.vault_root,
+            Arc::clone(&self.vault),
+            Arc::clone(&self.safety),
+        ) {
+            builder = builder.register_tool(self.child_tool(tool, &child_prefix))?;
+        }
+        for tool in desktop_workspace_tools(
+            filesystem,
+            self.app.clone().ok_or_else(|| {
+                Failure::new(
+                    ErrorCode::Internal,
+                    FailureClass::Internal,
+                    "subagent.build",
+                    "sub-agent runs require a UI app handle",
+                )
+            })?,
+            Arc::clone(&self.browser),
+            Arc::clone(&self.safety),
+        ) {
+            builder = builder.register_tool(self.child_tool(tool, &child_prefix))?;
+        }
+        // The child may itself delegate while it is above the depth
+        // fringe. `run_scoped_subagent` + the actor-stamped depth reject
+        // anything past the ceiling, so this registration is safe at
+        // every level that can reach it.
+        if request.depth < SUBAGENT_DEPTH_CEILING {
+            let child_provider = Arc::new(PaiSubagentProvider::new(
+                self.model_id.clone(),
+                self.port,
+                self.vault_root.clone(),
+                Arc::clone(&self.vault),
+                self.vault_id.clone(),
+                Arc::clone(&self.safety),
+                Arc::clone(&self.browser),
+                self.app.clone(),
+                self.capabilities.clone(),
+            ));
+            builder = builder.register_tool(
+                self.child_tool(Arc::new(AgentSpawnTool::new(child_provider)), &child_prefix),
+            )?;
+        }
+        let harness = builder.build();
+        let actor = format!("{child_id}-d{}", request.depth);
+        let conversation_namespace = format!("{}:subagent:{}", self.vault_id, child_id);
+        let remaining_depth = SUBAGENT_DEPTH_CEILING.saturating_sub(request.depth);
+        let options = RunOptions {
+            actor,
+            capabilities: request.capabilities.clone(),
+            provider: "pai-llama-local".to_owned(),
+            model: self.model_id.clone(),
+            memory: MemoryOptions {
+                // Long-term memory only — a sub-agent never reads or
+                // writes the user's conversation history (isolated
+                // namespace, no conversation write-back).
+                scopes: vec![
+                    inbharat_harness_core::MemoryScope::Preferences,
+                    inbharat_harness_core::MemoryScope::Relevant,
+                    inbharat_harness_core::MemoryScope::Project,
+                ],
+                namespace: self.vault_id.clone(),
+                conversation_namespace: Some(conversation_namespace),
+                search_limit: 8,
+                recent_conversation_limit: 16,
+                max_context_bytes: 32 * 1024,
+                write_conversation: false,
+            },
+            explicit_level: Some(ExecutionLevel::L3),
+            budget: Some(subagent_budget(remaining_depth)),
+            ..RunOptions::default()
+        };
+        let (outcome, _session) = harness.run(&request.prompt, &options, cancel)?;
+        Ok(outcome.output)
+    }
+
+    /// Wrap one child tool with the live-progress emitter when a UI is
+    /// attached; register it raw in tests.
+    fn child_tool(&self, tool: Arc<dyn Tool>, child_prefix: &str) -> Arc<dyn Tool> {
+        match &self.app {
+            Some(app) => Arc::new(ProgressTool {
+                inner: tool,
+                app: app.clone(),
+                detail_prefix: Some(child_prefix.to_owned()),
+            }),
+            None => tool,
+        }
+    }
+}
+
+impl SubagentProvider for PaiSubagentProvider {
+    fn run(
+        &self,
+        request: &SubagentRequest,
+        cancel: &CancellationToken,
+    ) -> HarnessResult<SubagentResult> {
+        let child_id = format!(
+            "subagent-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        // Child-level failures are data, not transport errors: the
+        // parent model reads the failure and decides what to do.
+        let outcome = self.run_child(request, &child_id, cancel);
+        match outcome {
+            Ok(output) => Ok(SubagentResult {
+                child_id,
+                output,
+                failure: None,
+            }),
+            Err(failure) => Ok(SubagentResult {
+                child_id,
+                output: String::new(),
+                failure: Some(failure),
+            }),
+        }
+    }
+}
+
+/// The parent agent's delegation tool. One argument — the complete,
+/// self-contained task — because a 12B model calls a simple schema far
+/// more reliably than a complex one (the defect-#38 lesson: the schema
+/// IS the model-facing contract). The child inherits the parent's
+/// capability set; the harness's `run_scoped_subagent` validates depth
+/// and capability narrowing before any child process exists.
+struct AgentSpawnTool {
+    manifest: ToolManifest,
+    provider: Arc<PaiSubagentProvider>,
+}
+
+impl AgentSpawnTool {
+    fn new(provider: Arc<PaiSubagentProvider>) -> Self {
+        Self {
+            manifest: ToolManifest {
+                id: "agent.spawn".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: "Spawn a sub-agent to complete one self-contained task in your \
+                    workspace and return its report. The sub-agent has your same tools \
+                    (files, programs, browser) and works independently — it does not see \
+                    your conversation, only the task you give it, and its final report \
+                    comes back as this tool's output. Give it a COMPLETE, self-contained \
+                    task description: every file path and detail it needs, because it \
+                    knows nothing else. Use it to parallelize independent pieces of a \
+                    large task or to get a fresh independent pass on risky work. \
+                    Verify its claims before relying on them."
+                    .to_owned(),
+                input_schema: r#"{"type":"object","properties":{"task":{"type":"string","description":"The complete, self-contained task for the sub-agent: exactly what to build or check, with every path and detail it needs. Its final report returns as this tool's output."}},"required":["task"],"additionalProperties":false}"#
+                    .to_owned(),
+                output_schema: r#"{"type":"object","properties":{"child_id":{"type":"string"},"status":{"type":"string"},"output":{"type":"string"}},"required":["child_id","status","output"],"additionalProperties":false}"#
+                    .to_owned(),
+                required_capabilities: CapabilitySet::from_slice(&[Capability::Subagent]),
+                supported_levels: vec![ExecutionLevel::L3],
+                determinism: Determinism::NonIdempotent,
+                side_effect: SideEffect::None,
+                confirmation: ConfirmationMode::Never,
+                concurrency_safe: true,
+                default_timeout: Duration::from_secs(60 * 60),
+                max_output_bytes: 512 * 1024,
+                verification: "child-report-v1".to_owned(),
+                compensation: "none".to_owned(),
+            },
+            provider,
+        }
+    }
+}
+
+impl Tool for AgentSpawnTool {
+    fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        if arguments.keys().any(|key| key != "task") {
+            return Err(Failure::invalid(
+                "agent.spawn.arguments",
+                "agent.spawn accepts only the task argument",
+            ));
+        }
+        let task = arguments
+            .get("task")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                Failure::invalid(
+                    "agent.spawn.task",
+                    "task must be a non-empty string of at most 32 KiB",
+                )
+            })?;
+        if task.trim().is_empty() {
+            return Err(Failure::invalid(
+                "agent.spawn.task",
+                "task must be a non-empty string",
+            ));
+        }
+        if task.len() > 32 * 1024 {
+            return Err(Failure::invalid(
+                "agent.spawn.task",
+                "task must be at most 32 KiB",
+            ));
+        }
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        context.cancel.check("agent.spawn")?;
+        let task = arguments
+            .get("task")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty() && value.len() <= 32 * 1024)
+            .ok_or_else(|| {
+                Failure::invalid(
+                    "agent.spawn.task",
+                    "task must be a non-empty string of at most 32 KiB",
+                )
+            })?
+            .to_owned();
+        // The depth chain: this run's depth comes from its actor id, the
+        // child is one level deeper, and run_scoped_subagent rejects any
+        // request past the ceiling before a child harness ever exists.
+        let depth = actor_depth(context.actor) + 1;
+        let request = SubagentRequest {
+            prompt: task,
+            parent_id: context.actor.to_owned(),
+            depth,
+            max_depth: SUBAGENT_DEPTH_CEILING,
+            capabilities: self.provider.capabilities.clone(),
+            max_output_bytes: 256 * 1024,
+        };
+        let result = run_scoped_subagent(
+            self.provider.as_ref(),
+            &request,
+            &self.provider.capabilities,
+            context.cancel,
+        )?;
+        let (status, report) = match &result.failure {
+            None => ("completed".to_owned(), result.output),
+            Some(failure) => (
+                "failed".to_owned(),
+                format!("The sub-agent failed: {failure}"),
+            ),
+        };
+        let value_json = serde_json::json!({
+            "child_id": result.child_id,
+            "status": status,
+            "output": report,
+        });
+        let value = Value::parse_json(&value_json.to_string()).map_err(|message| {
+            Failure::invalid(
+                "agent.spawn.output",
+                format!("invalid result JSON: {message}"),
+            )
+        })?;
+        let model_content = format!(
+            "Sub-agent {} (depth {depth}) {status}.\n\nReport:\n{report}",
+            result.child_id
+        );
+        Ok(ToolOutput {
+            value,
+            model_content,
+            presentation: BTreeMap::new(),
+        })
+    }
+}
+
 /// Unified text orchestration entry point. The legacy agent remains compiled only
 /// as an explicit rollback path while the frontend production text path uses Harness.
 /// The agent workspace's real absolute path for UI display (defect #36,
@@ -1847,10 +2364,28 @@ pub async fn harness_chat(
                 .register_tool(Arc::new(ProgressTool {
                     inner: tool,
                     app: app.clone(),
+                    detail_prefix: None,
                 }))
                 .map_err(|error| error.to_string())?;
         }
-        if let Some(filesystem) = workspace_fs {
+        let subagent_provider = workspace_fs.as_ref().map(|_filesystem| {
+            // The multi-agent lane (2026-09-15): agent.spawn delegates a
+            // self-contained sub-task to a fresh nested harness run — a
+            // sub-agent with the same verified model, the same fenced
+            // workspace and the same audited tools, up to 2 levels deep.
+            Arc::new(PaiSubagentProvider::new(
+                model_id.clone(),
+                port,
+                vault_root.clone(),
+                Arc::clone(&vault),
+                vault_id.clone(),
+                Arc::clone(&safety),
+                Arc::clone(&browser),
+                Some(app.clone()),
+                capabilities.clone(),
+            ))
+        });
+        if let Some(filesystem) = workspace_fs.clone() {
             for tool in desktop_workspace_tools(
                 filesystem,
                 app.clone(),
@@ -1861,6 +2396,16 @@ pub async fn harness_chat(
                     .register_tool(Arc::new(ProgressTool {
                         inner: tool,
                         app: app.clone(),
+                        detail_prefix: None,
+                    }))
+                    .map_err(|error| error.to_string())?;
+            }
+            if let Some(provider) = subagent_provider.clone() {
+                builder = builder
+                    .register_tool(Arc::new(ProgressTool {
+                        inner: Arc::new(AgentSpawnTool::new(provider)),
+                        app: app.clone(),
+                        detail_prefix: None,
                     }))
                     .map_err(|error| error.to_string())?;
             }
@@ -2134,6 +2679,18 @@ mod workspace_tool_tests {
         assert!(
             prompt.contains("browser.act to the served"),
             "the briefing must teach verifying a deploy through the browser"
+        );
+
+        // Multi-agent lane (2026-09-15): the briefing must teach the
+        // delegation tool — an untaught tool is an unused tool (the
+        // defect-#38 lesson, one defect earlier).
+        assert!(
+            prompt.contains("agent.spawn"),
+            "the briefing must teach the agent.spawn sub-agent lane"
+        );
+        assert!(
+            prompt.contains("COMPLETE, self-contained task"),
+            "the briefing must teach that a sub-agent knows nothing but its task"
         );
 
         // Defect #36 label: the command's backing resolver must return the
@@ -2588,5 +3145,142 @@ mod workspace_tool_tests {
         let click_no_selector = string_args(&[("action", "click")]);
         assert!(validate_browser_arguments(&click_no_selector).is_err());
         let _ = context.cancel.is_cancelled();
+    }
+
+    /// A provider with no UI app handle: enough to exercise the spawn
+    /// tool's validation and the depth gate, which both run before any
+    /// child harness is built.
+    fn test_subagent_provider() -> Arc<PaiSubagentProvider> {
+        Arc::new(PaiSubagentProvider::new(
+            "test-model".to_owned(),
+            1,
+            "unused-root".to_owned(),
+            Arc::new(Mutex::new(None)),
+            "test-vault".to_owned(),
+            Arc::new(Mutex::new(DesktopSafetyGuard::new(
+                crate::safety::SecurityLevel::Off,
+            ))),
+            Arc::new(BrowserStateHolder::new()),
+            None,
+            CapabilitySet::all_local(),
+        ))
+    }
+
+    /// Multi-agent lane (2026-09-15): the spawn tool's manifest is the
+    /// model-facing contract. The defect-#38 lesson applies from day one
+    /// — the schema must declare the task argument, and the tool must be
+    /// L3-only behind the Subagent capability so no lower lane can spawn.
+    #[test]
+    fn agent_spawn_manifest_declares_the_contract() {
+        let tool = AgentSpawnTool::new(test_subagent_provider());
+        let manifest = tool.manifest();
+        assert_eq!(manifest.id, "agent.spawn");
+        assert!(
+            manifest.input_schema.contains("task"),
+            "the spawn schema must declare the task argument"
+        );
+        assert!(
+            manifest.input_schema.contains("\"required\""),
+            "the spawn schema must mark task required"
+        );
+        assert!(manifest
+            .required_capabilities
+            .contains(Capability::Subagent));
+        assert_eq!(manifest.supported_levels, vec![ExecutionLevel::L3]);
+        assert!(manifest.validate().is_ok());
+    }
+
+    /// A 12B model calls a simple schema reliably; validation must reject
+    /// everything but a well-formed task string.
+    #[test]
+    fn agent_spawn_validation_rejects_malformed_calls() {
+        let tool = AgentSpawnTool::new(test_subagent_provider());
+        // missing task
+        let missing = args(&[]);
+        assert!(tool.validate_arguments(&missing).is_err());
+        // empty task
+        let empty = string_args(&[("task", "")]);
+        assert!(tool.validate_arguments(&empty).is_err());
+        // whitespace-only task
+        let blank = string_args(&[("task", "   ")]);
+        assert!(tool.validate_arguments(&blank).is_err());
+        // oversized task
+        let oversized = args(&[("task", Value::String("x".repeat(32 * 1024 + 1)))]);
+        assert!(tool.validate_arguments(&oversized).is_err());
+        // unsupported extra argument
+        let extra = string_args(&[("task", "build it"), ("scope", "files")]);
+        assert!(tool.validate_arguments(&extra).is_err());
+        // a real task passes
+        let ok = string_args(&[("task", "Write the test file for the counter module.")]);
+        assert!(tool.validate_arguments(&ok).is_ok());
+    }
+
+    /// The depth chain: an actor at the ceiling (a depth-2 child) cannot
+    /// spawn again — run_scoped_subagent refuses before any child harness
+    /// is built, with no model involved.
+    #[test]
+    fn agent_spawn_refuses_depth_past_the_ceiling() {
+        let (_dir, filesystem) = temp_workspace();
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let mut context = tool_context(&filesystem, &cancel, &broker);
+        context.actor = "subagent-ab12cd34-d2";
+        let tool = AgentSpawnTool::new(test_subagent_provider());
+        let call = string_args(&[("task", "one more level down")]);
+        let failure = tool
+            .execute(&call, &context)
+            .expect_err("a depth-2 child must not spawn again");
+        assert_eq!(
+            failure.code,
+            ErrorCode::PermissionDenied,
+            "depth overflow must be a permission denial"
+        );
+
+        // depth parsing: the actor stamp is the only depth source.
+        assert_eq!(actor_depth("local-user"), 0);
+        assert_eq!(actor_depth("subagent-ab12cd34-d1"), 1);
+        assert_eq!(actor_depth("subagent-ab12cd34-d2"), 2);
+        assert_eq!(actor_depth("bob"), 0);
+        // a forged non-numeric depth stamp reads as top level and still
+        // cannot exceed the ceiling: the child it spawns is depth 1.
+        assert_eq!(actor_depth("subagent-ab12cd34-dNaN"), 0);
+    }
+
+    /// The budget must open the subagent lane: depth 2 matches the ceiling
+    /// the spawn tool and run_scoped_subagent enforce.
+    #[test]
+    fn full_access_budget_opens_the_subagent_lane() {
+        assert_eq!(
+            full_access_budget().max_subagent_depth,
+            SUBAGENT_DEPTH_CEILING,
+            "the full-access budget must match the spawn-tool ceiling"
+        );
+        assert_eq!(SUBAGENT_DEPTH_CEILING, 2);
+        // A depth-1 child's own budget has one level of headroom left
+        // (ceiling 2 − depth 1); a depth-2 child has none.
+        assert_eq!(
+            subagent_budget(SUBAGENT_DEPTH_CEILING - 1).max_subagent_depth,
+            1
+        );
+        assert_eq!(subagent_budget(0).max_subagent_depth, 0);
+    }
+
+    /// The sub-agent briefing must demand self-contained evidence — the
+    /// parent is told to verify, so the child must make that possible.
+    #[test]
+    fn subagent_briefing_demands_a_verifiable_report() {
+        let prompt = subagent_system_prefix();
+        assert!(
+            prompt.contains("ABSOLUTE path of every file you created or changed"),
+            "the sub-agent briefing must force absolute paths in reports"
+        );
+        assert!(
+            prompt.contains("the exact output of anything you ran"),
+            "the sub-agent briefing must demand command output as evidence"
+        );
+        assert!(
+            prompt.contains("You never talk to the user directly"),
+            "the sub-agent briefing must pin the reporting relationship"
+        );
     }
 }
