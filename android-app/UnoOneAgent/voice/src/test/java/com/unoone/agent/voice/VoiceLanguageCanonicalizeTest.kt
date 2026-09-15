@@ -110,7 +110,7 @@ class VoiceLanguageCanonicalizeTest {
                 targets.toSet().size
             )
         }
-        assertEquals(12, VoiceLanguage.CANONICAL_ALIASES.size)
+        assertEquals(48, VoiceLanguage.CANONICAL_ALIASES.size)
     }
 
     // ---- normalize() now routes through the canonical contract (finding A8) ----
