@@ -47,15 +47,18 @@ Two defects, one boundary:
 
 ## 6. Live acceptance (post-merge, on the re-staged drive)
 
-Direct Tauri invokes (no model tokens), then one STS loop with exactly ONE harness_chat call:
+**Executed 2026-09-15, drive re-staged with main `534cf6a`** (PR #47 merged; drive SPEECH config allowlist expanded to the same 16 tags before manifest regeneration). Direct Tauri invokes (zero model tokens) — final matrix: **19 pass / 0 fail**:
 
-- [ ] `en`: TTS PASS, ASR roundtrip PASS
-- [ ] `hi`: TTS PASS, ASR roundtrip PASS
-- [ ] `hinglish`: TTS PASS (was the defect), ASR roundtrip PASS
-- [ ] Spot-check new languages speak: `ta`, `as`, `pa`, `ur`, `ne`, `or` TTS ok with correct CLI mapping (Nepali/Odia via built-in name)
-- [ ] Unclaimed languages truthfully refused (`fr`: provider-table refusal, no silent fallback)
-- [ ] STS full loop with ONE model call: question TTS'd → mic-transcribed → harness_chat answered → reply TTS'd
-- [ ] Chat picker shows 16 languages; mic in a TTS-only language runs `auto`
+- [x] `en`: TTS PASS (190 KB WAV), ASR roundtrip PASS (harbor/windows/dawn/report all present in the transcript)
+- [x] `hi`: TTS PASS, ASR roundtrip PASS (भारत/दिल्ली present)
+- [x] `hinglish`: TTS PASS (**was the defect**) and ASR roundtrip PASS — live-probed bonus: the Hindi voice speaks the Hinglish sentence and Qwen3-ASR writes it back as correct Hindi in Devanagari (`मेरा नाम पॉकेट एई है और मैं आपकी मदद के लिए तैयार हूँ`, `language=hi-en-codemix`)
+- [x] New languages speak — all six spot checks TTS PASS with real WAVs: `ta`, `as`, `pa`, `ur`, `ne` (via "Nepali"), `or` (via "Odia") — the CLI mapping works live on the drive
+- [x] TTS-only languages are refused TRUTHFULLY by ASR with the exact provider-table message — e.g. `the ASR model 'qwen3_asr' does not serve language 'pa-IN' (provider language table)` — no silent fallback
+- [x] Unclaimed `fr`: refused (ERROR, no fallback)
+- [x] STS full loop with exactly ONE model call: question TTS'd (hi, 218 KB) → heard back as `भारत की राजधानी क्या है एक छोटे वाक्य में उत्तर दीजिए` → harness_chat route L0, 1 step, 0 tools, 3.9 s → answer `भारत की राजधानी नई दिल्ली है।` → reply TTS'd (111 KB)
+- [x] Chat picker shows all 16 voice languages in the staged app (`en, hi, hinglish, as, bn, gu, kn, ml, mr, ne, or, pa, sa, ta, te, ur`)
+
+Test-harness notes (script-side, not product defects): the engine's TTS/ASR success status is `AVAILABLE` (`VoiceCapabilityStatus`), not `ok`; TTS returns `\\?\`-prefixed paths; ASR input is confined to the Pocket AI root or the `<temp>/unoone-stt` capture area (`confine_audio_input`), so roundtrip copies the TTS WAV into the capture area first — the same area the mic pipeline records into.
 
 ## 7. Language answer (the user's question, verbatim truth)
 
