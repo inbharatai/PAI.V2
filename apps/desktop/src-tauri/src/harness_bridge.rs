@@ -1359,7 +1359,7 @@ impl DesktopBrowserTool {
             manifest: ToolManifest {
                 id: "browser.act".to_owned(),
                 version: "1.0.0".to_owned(),
-                description: "Drive the desktop browser workspace: navigate, click, type, fill forms, scroll, extract page text, get page info or screenshot. Requires an active browser session (the user opens the BrowserWorkspace first).".to_owned(),
+                description: "Drive the desktop browser workspace: navigate, click, type, fill forms, scroll, extract page text, get page info or screenshot. The browser window opens itself on the first action if none is open — you can show the user any page (e.g. the app you just deployed) without asking them to open anything first.".to_owned(),
                 input_schema: r#"{"type":"object","properties":{"action":{"type":"string","enum":["navigate","back","forward","reload","extract_page_text","extract_element_text","click","type","fill_form","scroll","wait","get_page_info","screenshot","close","clear_session"]},"url":{"type":"string"},"selector":{"type":"string"},"text":{"type":"string"},"direction":{"type":"string","enum":["up","down"]},"amount":{"type":"integer","minimum":1},"milliseconds":{"type":"integer","minimum":1,"maximum":30000},"fields":{"type":"array","items":{"type":"object","properties":{"selector":{"type":"string"},"value":{"type":"string"}},"required":["selector","value"],"additionalProperties":false}}},"required":["action"],"additionalProperties":false}"#.to_owned(),
                 output_schema: r#"{"type":"string"}"#.to_owned(),
                 required_capabilities: CapabilitySet::from_slice(&[Capability::Workspace]),

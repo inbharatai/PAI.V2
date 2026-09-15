@@ -847,9 +847,13 @@ fn schemas(id: &str) -> (&'static str, &'static str) {
             r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
             r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
         ),
+        // Defect #38 follow-up (live-caught 2026-09-15): the background flag
+        // was implemented but NOT declared in the model-facing schema — a
+        // model follows the schema, not a description sentence, so it never
+        // used the deploy lane. The schema is the contract.
         "process.run" => (
-            r#"{"type":"object","properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["program","args"],"additionalProperties":false}"#,
-            r#"{"type":"object","properties":{"status":{"type":["integer","null"]},"stdout":{"type":"string"},"stderr":{"type":"string"},"truncated":{"type":"boolean"}},"required":["status","stdout","stderr","truncated"],"additionalProperties":false}"#,
+            r#"{"type":"object","properties":{"program":{"type":"string"},"args":{"type":"array","items":{"type":"string"}},"background":{"type":"boolean","description":"true spawns the program detached so it keeps running (for servers) — returns immediately with a pid instead of waiting for exit; default false"}},"required":["program","args"],"additionalProperties":false}"#,
+            r#"{"anyOf":[{"type":"object","properties":{"status":{"type":["integer","null"]},"stdout":{"type":"string"},"stderr":{"type":"string"},"truncated":{"type":"boolean"}},"required":["status","stdout","stderr","truncated"],"additionalProperties":false},{"type":"object","properties":{"background":{"type":"boolean"},"pid":{"type":"integer"}},"required":["background","pid"],"additionalProperties":false}]}"#,
         ),
         _ => (r#"{"type":"object","additionalProperties":false}"#, r#"{}"#),
     }
@@ -1285,6 +1289,13 @@ mod tests {
         #[cfg(unix)]
         let (program, args) = ("sh", vec!["-c".to_owned(), "sleep 30".to_owned()]);
         let tool = RunProcessTool::default();
+        // Defect #38 follow-up: the schema is the model-facing contract — if
+        // the background flag is not DECLARED there, a model never learns the
+        // deploy lane exists (the live re-run proved exactly that).
+        assert!(
+            tool.manifest().input_schema.contains("background"),
+            "the process.run input schema must declare the background flag"
+        );
         let root_fs = crate::execution::RootedFs::new(".")?;
         let broker = crate::execution::LocalExecutionBroker::new(root_fs, vec![program.to_owned()]);
         let cancel = CancellationToken::new();
