@@ -28,7 +28,11 @@ The user asked the drive's chat panel (full access ON) to build a small to-do we
 
 ## 5. Live acceptance (post-merge, on the re-staged drive)
 
-- [ ] The full-access label shows the real expanded workspace root (e.g. `C:\Users\reetu\UnoOneAgent`), not the literal `%USERPROFILE%` pattern
-- [ ] The live activity feed shows a local `HH:MM:SS` timestamp on every tool line while the agent runs
-- [ ] The agent's final answer to a build task lists the exact absolute path of every file it created (not "in your workspace")
-- [ ] After the run lands, the folded step pill still shows the timestamps on each tool call/result
+Verified 2026-09-15 on the re-staged drive (main `2e811ba`) by the deploy-demo run (`C:\Users\reetu\UnoOneAgent\pai-live-test\app-ui-test\deploy-demo.js`, a build+test+deploy task through the chat panel):
+
+- [x] The full-access label shows the real expanded workspace root (e.g. `C:\Users\reetu\UnoOneAgent`), not the literal `%USERPROFILE%` pattern — label read back as `C:\Users\reetu\UnoOneAgent`
+- [x] The live activity feed shows a local `HH:MM:SS` timestamp on every tool line while the agent runs — stamps appeared from the first tool call onward (10:43:34 → …)
+- [x] The agent's final answer to a build task lists the exact absolute path of every file it created (not "in your workspace") — all 4 files listed, e.g. `C:\Users\reetu\UnoOneAgent\ping-board\index.html`
+- [x] After the run lands, the folded step pill still shows the timestamps on each tool call/result — 20 timestamps in the folded pill
+
+The same run exposed **defect #38** (the deploy itself was killed at the 180s subprocess deadline — see doc 113, `2026-09-15/113_PROCESS_RUN_BACKGROUND_DEPLOY.md`).
