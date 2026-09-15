@@ -43,9 +43,29 @@ So the answer to the user's question is: **no new mechanism was needed — only 
 
 ## 6. Verification status
 
-- Harness core: **51/51 green** (2 new subagent tests included), `cargo fmt` + `clippy -D warnings` clean.
+- Harness core: **52/52 green** (2 new subagent tests + the defect #42 count-metadata test), `cargo fmt` + `clippy -D warnings` clean.
 - Desktop: **138/138 green**, `cargo fmt` + `clippy` clean.
-- Live (post-merge, on the re-staged drive): [ ] a chat task that splits into independent pieces produces `Spawning a sub-agent…` in the activity feed and the parent cites the child's report [ ] a child failure surfaces as data the parent handles [ ] a depth-2 child's `agent.spawn` is refused by the budget, not by a crash.
+
+### 6.1 Live result (2026-09-15, staged drive ab33734)
+
+Task: spawn two sub-agents (one lists every `.js` file in the live-test folder with exact count and names; one reads `deploy-task.txt` and reports exact size and first 10 words), the parent must verify both reports with its own tools.
+
+- [x] A chat task that splits into independent pieces produces `agent.spawn` in the activity feed (4 spawns visible: 2 live + 2 verification) — **PASS**.
+- [x] Distinct sub-agent ids cited in the answer (`subagent-3da7e0ba`, `subagent-1767efdb`) — **PASS**.
+- [x] A child's undercount surfaced as data the parent handled: the sub-agent reported 93 `.js` files, the parent's own `fs.list` verification found the true 127 and reported the mismatch as a FAILED claim — honest failure surfacing works exactly as designed — **PASS**.
+- [ ] Exact `.js` count and file names in the answer — **FAIL** (see defect #42): the count was tool-reachable but the names came back incomplete because nothing stated a count the model could anchor on.
+- [ ] `deploy-task.txt` size correct — **FAIL** (see defect #42): **both** the sub-agent and the parent claimed "754 characters (Verified)" for a 1,225-char file — a confabulated figure the model repeated because **no tool output ever stated a file size**. RootedFs::read_text was ruled out (it refuses oversize files, never truncates) — the cause is missing metadata, not lost data.
+- [x] Parent verification confirmed the first-10-words claim (exact text matched) — **PASS**.
+
+**Verdict: lane functional, accuracy gap real.** Spawn, ids, completion reports, verification behavior, and honest-failure surfacing all work live on the 12B; the two failures share one root cause — the tools returned bare content with no sizes or counts, so the model invented numbers. That is a tool defect, not a model excuse, and it is fixed below.
+
+### 6.2 Defect #42 fix: tools must state exact sizes and counts (PR #46)
+
+- `fs.read` now prepends `{path} — {bytes} bytes, {chars} chars (complete file):` to the model-facing content — the size comes from the tool, never the model's eye.
+- `fs.list` now appends `(N entries in {path})` (or `{path} — empty (0 entries)`), and gains an **optional `suffix` filter** (e.g. `.js`): the result states `(M of N entries in {path} end with '.js')`, the value array contains only matching names, and the filter is **declared in the input schema** (the defect #38 lesson — the schema is the model-facing contract; a description sentence alone is invisible to a model that follows the schema).
+- Unknown arguments are rejected by key (no silent extras smuggled through the optional slot).
+- New core test `fs_read_and_list_state_exact_sizes_and_counts` pins: exact total count, filtered count out of total, filter named in output, non-matching entries excluded, zero-match stated honestly, stray keys rejected, exact byte/char size on read, suffix declared in the schema. Core 51 → **52 green**.
+- Live re-verification (post-merge, re-staged drive): [ ] parent and sub-agent now cite the exact tool-stated sizes/counts (`.js` count = 127 via `fs.list` with suffix, `deploy-task.txt` = 1,225 chars via `fs.read`).
 
 ## 7. Honest limits (what this deliberately is not)
 

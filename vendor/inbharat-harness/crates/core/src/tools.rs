@@ -497,9 +497,21 @@ impl Tool for ReadFileTool {
     ) -> HarnessResult<ToolOutput> {
         let path = argument_string(arguments, "path")?;
         let text = context.execution.read_text(Path::new(path))?;
+        // Defect #42 (live-caught 2026-09-15, multi-agent acceptance): the
+        // model received bare file text and was asked, verbatim by real
+        // tasks, to "report the exact size in characters" — which no tool
+        // answered, so the model eyeballed a number and the parent agent
+        // then "verified" the same confabulated figure. Exact sizes must
+        // come from the tool, not from the model's eye. read_text either
+        // returns the complete file or refuses (byte cap), so the counts
+        // are the whole truth about what follows.
+        let bytes = text.len();
+        let chars = text.chars().count();
+        let model_content =
+            format!("{path} — {bytes} bytes, {chars} chars (complete file):\n{text}");
         Ok(ToolOutput {
-            value: Value::String(text.clone()),
-            model_content: text,
+            value: Value::String(text),
+            model_content,
             presentation: BTreeMap::from([("kind".to_owned(), "file".to_owned())]),
         })
     }
@@ -515,7 +527,9 @@ impl Default for ListFilesTool {
         Self {
             manifest: manifest(
                 "fs.list",
-                "List one directory inside the configured root",
+                "List one directory inside the configured root; \
+                 optional suffix (e.g. \".js\") filters the entries and the \
+                 result states the exact matching count",
                 CapabilitySet::from_slice(&[Capability::FileRead]),
                 vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
                 SideEffect::Read,
@@ -531,7 +545,31 @@ impl Tool for ListFilesTool {
     }
 
     fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
-        require_exact_string(arguments, &["path"])
+        // Defect #42 follow-up (live-caught 2026-09-15, multi-agent
+        // acceptance): the only way to ask "how many .js files are here" was
+        // to list everything and eyeball the lines, and a 12B model miscounted
+        // 93 of 127. An optional `suffix` filter lets the model ask for the
+        // exact file class, and the output states the exact matching count so
+        // the number comes from the tool, not the model's eye.
+        if arguments.keys().any(|key| key != "path" && key != "suffix") {
+            return Err(Failure::invalid(
+                "tool.arguments",
+                "expected only path and the optional suffix filter",
+            ));
+        }
+        let _path = argument_string(arguments, "path")?;
+        if let Some(suffix) = arguments.get("suffix") {
+            let suffix = suffix
+                .as_str()
+                .ok_or_else(|| Failure::invalid("tool.arguments", "suffix must be a string"))?;
+            if suffix.len() > 64 {
+                return Err(Failure::invalid(
+                    "tool.arguments",
+                    "suffix must be at most 64 bytes",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn execute(
@@ -540,10 +578,43 @@ impl Tool for ListFilesTool {
         context: &ToolContext<'_>,
     ) -> HarnessResult<ToolOutput> {
         let path = argument_string(arguments, "path")?;
-        let entries = context.execution.list(Path::new(path))?;
+        let all = context.execution.list(Path::new(path))?;
+        let total = all.len();
+        let suffix = arguments.get("suffix").and_then(Value::as_str);
+        let entries: Vec<String> = match suffix {
+            Some(suffix) => all
+                .into_iter()
+                .filter(|entry| entry.ends_with(suffix))
+                .collect(),
+            None => all,
+        };
+        // Defect #42 (live-caught 2026-09-15, multi-agent acceptance): a
+        // sub-agent counted 93 .js files from a complete 127-file listing
+        // because the count had to be eyeballed. The exact entry count is
+        // part of the answer, so the tool states it instead of leaving the
+        // model to count lines.
+        let model_content = if entries.is_empty() {
+            match suffix {
+                Some(suffix) => format!("{path} — 0 of {total} entries end with '{suffix}'"),
+                None => format!("{path} — empty (0 entries)"),
+            }
+        } else {
+            match suffix {
+                Some(suffix) => format!(
+                    "{}\n({} of {total} entries in {path} end with '{suffix}')",
+                    entries.join("\n"),
+                    entries.len()
+                ),
+                None => format!(
+                    "{}\n({} entries in {path})",
+                    entries.join("\n"),
+                    entries.len()
+                ),
+            }
+        };
         Ok(ToolOutput {
             value: Value::Array(entries.iter().cloned().map(Value::String).collect()),
-            model_content: entries.join("\n"),
+            model_content,
             presentation: BTreeMap::from([("kind".to_owned(), "directory".to_owned())]),
         })
     }
@@ -836,7 +907,9 @@ fn schemas(id: &str) -> (&'static str, &'static str) {
             r#"{"type":"string"}"#,
         ),
         "fs.list" => (
-            r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
+            // Defect #42 follow-up: the suffix filter must be DECLARED here —
+            // the schema is the model-facing contract, not the description.
+            r#"{"type":"object","properties":{"path":{"type":"string"},"suffix":{"type":"string","description":"optional: only return entries whose names end with this suffix, e.g. \".js\" — the result states the exact matching count so you never have to count lines yourself"}},"required":["path"],"additionalProperties":false}"#,
             r#"{"type":"array","items":{"type":"string"}}"#,
         ),
         "fs.write" => (
@@ -1213,6 +1286,132 @@ mod tests {
                     .join("notes.md")
             )?,
             "auto"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn fs_read_and_list_state_exact_sizes_and_counts() -> HarnessResult<()> {
+        // Defect #42 (live-caught 2026-09-15, multi-agent acceptance): both
+        // agents in the live run claimed "754 characters (Verified)" for a
+        // 1225-char file, and one counted 93 of 127 .js files — because no
+        // tool output ever stated a size or a count, so the model invented
+        // one. fs.read must state the exact byte/char size, fs.list must
+        // state the exact entry count, and the suffix filter must let the
+        // model ask for a file class with the matching count already
+        // computed — the schema must DECLARE it or the model never learns
+        // it exists (same lesson as the defect #38 background flag).
+        let dir = std::env::temp_dir().join(format!(
+            "inbharat-tools-count-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            Failure::invalid("test.setup", format!("temp dir creation failed: {error}"))
+        })?;
+        let write = |name: &str, body: &str| -> HarnessResult<()> {
+            std::fs::write(dir.join(name), body).map_err(|error| {
+                Failure::invalid("test.setup", format!("temp file write failed: {error}"))
+            })
+        };
+        write("a.js", "alpha")?;
+        write("b.js", "beta")?;
+        write("notes.txt", "text")?;
+
+        let tool = ListFilesTool::default();
+        assert!(
+            tool.manifest().input_schema.contains("suffix"),
+            "the fs.list input schema must declare the suffix filter"
+        );
+
+        let root_fs = crate::execution::RootedFs::new(&dir)?;
+        let execution = crate::execution::LocalExecutionBroker::new(root_fs, Vec::new());
+        let cancel = CancellationToken::new();
+        let context = ToolContext {
+            actor: "actor",
+            level: ExecutionLevel::L3,
+            execution: &execution,
+            cancel: &cancel,
+        };
+        let arguments = |pairs: &[(&str, &str)]| -> ToolArguments {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), Value::String((*value).to_owned())))
+                .collect()
+        };
+
+        // Plain listing states the exact total count.
+        let output = tool.execute(&arguments(&[("path", ".")]), &context)?;
+        assert!(
+            output.model_content.contains("(3 entries in"),
+            "fs.list must state the exact entry count, got: {}",
+            output.model_content
+        );
+
+        // Suffix filter returns only matching names and states both the
+        // matching and total counts.
+        let output = tool.execute(&arguments(&[("path", "."), ("suffix", ".js")]), &context)?;
+        assert!(
+            output.model_content.contains("(2 of 3 entries in"),
+            "fs.list must state the exact filtered count out of the total, got: {}",
+            output.model_content
+        );
+        assert!(
+            output.model_content.contains("'.js'"),
+            "fs.list must name the filter it applied, got: {}",
+            output.model_content
+        );
+        let names = match output.value {
+            Value::Array(values) => values,
+            other => {
+                return Err(Failure::invalid(
+                    "test.assert",
+                    format!("fs.list must return an array, got {other:?}"),
+                ));
+            }
+        };
+        assert_eq!(
+            names
+                .iter()
+                .filter(|value| matches!(value, Value::String(name) if name.ends_with(".js")))
+                .count(),
+            2,
+            "fs.list suffix filter must return only matching entries"
+        );
+        assert!(
+            !output.model_content.contains("notes.txt"),
+            "fs.list suffix filter must exclude non-matching entries from the listing"
+        );
+
+        // A suffix nothing matches is stated honestly, with the total still
+        // visible so the model never guesses about a directory's size.
+        let output = tool.execute(&arguments(&[("path", "."), ("suffix", ".rs")]), &context)?;
+        assert!(
+            output.model_content.contains("0 of 3 entries"),
+            "fs.list must state zero matches honestly, got: {}",
+            output.model_content
+        );
+
+        // Unknown extras are rejected (no silent argument smuggling).
+        let stray = arguments(&[("path", "."), ("extra", "x")]);
+        assert!(
+            tool.validate_arguments(&stray).is_err(),
+            "fs.list must reject unexpected arguments"
+        );
+
+        // fs.read states the exact size: 5 ASCII bytes = 5 chars.
+        write("sized.txt", "alpha")?;
+        let read = ReadFileTool::default();
+        let output = read.execute(&arguments(&[("path", "sized.txt")]), &context)?;
+        assert!(
+            output.model_content.contains("5 bytes, 5 chars"),
+            "fs.read must state the exact size, got: {}",
+            output.model_content
         );
 
         let _ = std::fs::remove_dir_all(&dir);
