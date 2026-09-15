@@ -864,6 +864,39 @@ fn ensure_provider_coverage(
     }
 }
 
+/// Translate a canonical BCP-47 tag into the audio.cpp CLI's own language
+/// vocabulary. Defect #43 (live-caught 2026-09-15, speech-matrix acceptance):
+/// the CLI boundary received the RAW alias string, and `audiocpp_cli` rejects
+/// everything outside base ISO codes and a set of built-in language names —
+/// so `hinglish` (a language the pack explicitly allows) failed with
+/// "unsupported OmniVoice language 'hinglish'", and `hi-IN`/`en-IN`/`as-IN`
+/// would all have failed the same way; only bare `en`/`hi` worked by
+/// coincidence of shape. The mapping is evidence, not guesswork:
+///
+/// - `hi-en-codemix` → `hi`: live roundtrip on the staged engine — Hinglish
+///   text synthesized with `hi` reads back through Qwen3-ASR as correct
+///   Hindi ("mera naam Pocket AI hai…" → "मेरा नाम pocket ai है…"), while the
+///   codemix tag itself is not CLI vocabulary.
+/// - `ne-IN` → `Nepali`, `or-IN` → `Odia`: live-probed — the CLI rejects the
+///   ISO codes `ne`/`or` but accepts the built-in names, which synthesize
+///   valid native-script audio (3.4 s / 3.2 s on the staged gguf).
+/// - `auto` passes through: the CLI's ASR detect sentinel (live-probed).
+/// - Everything else → the ISO-639 base code (`en-IN` → `en`, `as-IN` →
+///   `as`, `pa-IN` → `pa`, …), all live-probed accepted by the staged
+///   OmniVoice build.
+fn cli_language_for(tag: &unoone_speech_contracts::LanguageTag) -> String {
+    let canonical = tag.as_str();
+    if tag.is_auto() {
+        return canonical.to_string();
+    }
+    match canonical {
+        "hi-en-codemix" => "hi".to_string(),
+        "ne-IN" => "Nepali".to_string(),
+        "or-IN" => "Odia".to_string(),
+        _ => canonical.split('-').next().unwrap_or(canonical).to_string(),
+    }
+}
+
 #[tauri::command]
 pub fn get_bharat_audio_status(vault_root: String) -> BharatAudioStatus {
     status(&vault_root)
@@ -969,10 +1002,10 @@ pub fn transcribe(
         }
         let tag = unoone_speech_contracts::canonicalize(default)
             .map_err(|e| format!("speech manifest default language is invalid: {e}"))?;
-        (default.to_string(), tag)
+        (cli_language_for(&tag), tag)
     } else {
         let tag = validate_language(&manifest, trimmed)?;
-        (trimmed.to_string(), tag)
+        (cli_language_for(&tag), tag)
     };
     // Provider-table coverage is enforced on the InBharat route itself, not
     // only on the legacy fallback: the manifest allowlist alone must never be
@@ -1066,10 +1099,10 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         }
         let tag = unoone_speech_contracts::canonicalize(default)
             .map_err(|e| format!("speech manifest default language is invalid: {e}"))?;
-        (default.to_string(), tag)
+        (cli_language_for(&tag), tag)
     } else {
         let tag = validate_language(&manifest, trimmed)?;
-        (trimmed.to_string(), tag)
+        (cli_language_for(&tag), tag)
     };
     // Same InBharat-route coverage rule as transcription.
     ensure_provider_coverage(task, SpeechTask::Tts, &language_tag)?;
@@ -1109,6 +1142,36 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Defect #43 (live-caught 2026-09-15): the CLI boundary got raw aliases,
+    // and audiocpp_cli accepts only base ISO codes / built-in names, so
+    // `hinglish` (explicitly allowed by the pack) failed at the CLI. The
+    // canonical→CLI mapping must keep every allowed language inside the
+    // engine's real vocabulary.
+    #[test]
+    fn cli_language_lives_in_the_engines_vocabulary() {
+        let cases: &[(&str, &str)] = &[
+            ("en", "en"),
+            ("en-IN", "en"),
+            ("hi", "hi"),
+            ("hi-IN", "hi"),
+            ("hinglish", "hi"),
+            ("hi-en-codemix", "hi"),
+            ("as", "as"),
+            ("as-IN", "as"),
+            ("pa", "pa"),
+            ("sa", "sa"),
+            ("ur", "ur"),
+            ("ne-IN", "Nepali"),
+            ("or-IN", "Odia"),
+            ("auto", "auto"),
+        ];
+        for (requested, expected) in cases {
+            let tag = unoone_speech_contracts::canonicalize(requested)
+                .unwrap_or_else(|_| panic!("canonicalize({requested}) must succeed"));
+            assert_eq!(cli_language_for(&tag), *expected);
+        }
+    }
 
     #[test]
     fn rejects_parent_traversal() {
@@ -1342,7 +1405,12 @@ mod tests {
         assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Tts, &hindi).is_ok());
         let english = unoone_speech_contracts::canonicalize("en").unwrap();
         assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Tts, &english).is_ok());
-        assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Tts, &assamese).is_err());
+        // Assamese was live-probed on the staged omnivoice.gguf (2026-09-15)
+        // and is truthfully claimed by the table now; a global tag the engine
+        // has never served stays refused.
+        assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Tts, &assamese).is_ok());
+        let french = unoone_speech_contracts::canonicalize("fr").unwrap();
+        assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Tts, &french).is_err());
         // OmniVoice does not do ASR at all.
         assert!(ensure_provider_coverage(&omnivoice, SpeechTask::Asr, &hindi).is_err());
 
