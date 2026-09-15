@@ -14,6 +14,7 @@ import { DocumentsView } from './components/DocumentsView';
 import { AccessibilityView } from './components/AccessibilityView';
 import { tauriApi, type StartupPhase } from './lib/tauri';
 import { listen } from '@tauri-apps/api/event';
+import { ensureBrowserWorkspaceWindow } from './lib/browserWorkspaceWindow';
 
 type AppScreen = 'unlock' | 'main';
 
@@ -228,6 +229,19 @@ function App() {
     const onAsk = () => setCurrentView('chat');
     window.addEventListener('unoone:ask-in-chat', onAsk);
     return () => window.removeEventListener('unoone:ask-in-chat', onAsk);
+  }, []);
+
+  // The agent's browser lane (defect #40, live-caught 2026-09-15): when the
+  // model calls browser.act with no window open, the backend emits
+  // 'unoone:ensure-browser-workspace' and this listener creates the window
+  // through the SAME proven JS path the BrowserWorkspace UI uses. A window
+  // built from Rust — even on the main thread — never started its WebView2.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen('unoone:ensure-browser-workspace', () => {
+      void ensureBrowserWorkspaceWindow();
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
   }, []);
 
   // Auto-lock on window blur (timer from settings)
