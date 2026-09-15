@@ -18,8 +18,7 @@
         "minHeight": 600,
         "center": true,
         "resizable": true,
-        "fullscreen": false,
-        "additionalBrowserArgs": "--autoplay-policy=no-user-gesture-required"
+        "fullscreen": false
       }
     ],
     "security": {

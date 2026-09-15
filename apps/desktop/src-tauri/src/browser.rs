@@ -747,7 +747,10 @@ pub fn browser_session_status(
             "current_title": null,
         }));
     };
-    let window_alive = app.get_webview_window(&session.window_label).is_some();
+    // Probe, don't trust existence: a defect #41 shell still satisfies
+    // get_webview_window, and the remounted UI must not report a session
+    // whose window content is dead as active.
+    let window_alive = window_answers(&app, &session.window_label);
     Ok(serde_json::json!({
         "active": window_alive,
         "window_label": session.window_label,
@@ -805,21 +808,31 @@ fn request_workspace_window_from_frontend(app: &tauri::AppHandle) -> Result<(), 
         .map_err(|e| format!("Could not request the browser window from the app UI: {e}"))
 }
 
+/// Whether the window's WebView2 actually executes JS. Existence alone is
+/// NOT readiness (defect #41, live-caught 2026-09-15): a runtime-created
+/// window whose WebView2 environment conflicted with the main window's
+/// browser arguments still registered in `get_webview_window`, but its
+/// content never started — no OS window, no CDP target, evals never answer.
+fn window_answers(app: &tauri::AppHandle, window_label: &str) -> bool {
+    let Some(window) = app.get_webview_window(window_label) else {
+        return false;
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let tx2 = tx.clone();
+    let dispatched = window.eval_with_callback("true", move |result| {
+        let _ = tx2.send(result);
+    });
+    dispatched.is_ok() && rx.recv_timeout(Duration::from_millis(500)).is_ok()
+}
+
 /// A freshly built window only accepts evals once its WebView2 message loop
 /// is pumping. Probe with a trivial script on a short timeout until the
 /// webview answers, so the first real action never races window readiness.
 fn wait_for_window_ready(app: &tauri::AppHandle, window_label: &str) -> Result<(), String> {
     let start = Instant::now();
     loop {
-        if let Some(window) = app.get_webview_window(window_label) {
-            let (tx, rx) = std::sync::mpsc::channel::<String>();
-            let tx2 = tx.clone();
-            let dispatched = window.eval_with_callback("true", move |result| {
-                let _ = tx2.send(result);
-            });
-            if dispatched.is_ok() && rx.recv_timeout(Duration::from_millis(500)).is_ok() {
-                return Ok(());
-            }
+        if window_answers(app, window_label) {
+            return Ok(());
         }
         if start.elapsed() > SESSION_READY_TIMEOUT {
             return Err(format!(
@@ -831,35 +844,76 @@ fn wait_for_window_ready(app: &tauri::AppHandle, window_label: &str) -> Result<(
     }
 }
 
-/// Ensure a browser session exists: bind the current one if its window is
-/// alive; otherwise have the app UI open the browser-workspace window (same
-/// label and geometry the BrowserWorkspace UI uses) and bind it. The user
-/// keeps the explicit Stop Session button — this only removes the dead-end,
-/// it does not remove the user's control.
+/// Ensure a browser session exists: bind the current one if its window
+/// VERIFIABLY answers; otherwise have the app UI open the browser-workspace
+/// window (same label and geometry the BrowserWorkspace UI uses) and bind
+/// it. The user keeps the explicit Stop Session button — this only removes
+/// the dead-end, it does not remove the user's control.
+///
+/// Every existence check probes with `window_answers`: a window object in
+/// the Tauri runtime whose WebView2 content died (or never started) must
+/// never satisfy a session bind — binding it once poisoned every later
+/// attempt, which then burned a full EVAL_TIMEOUT per action until the user
+/// manually stopped the session.
 fn ensure_session(
     app: &tauri::AppHandle,
     state: &Arc<BrowserStateHolder>,
 ) -> Result<(String, Option<String>, Option<String>), String> {
     let existing = with_session(state, |session| session.clone())?;
     if let Some(session) = existing {
-        if app.get_webview_window(&session.window_label).is_some() {
+        if window_answers(app, &session.window_label) {
             return Ok((session.window_label, session.current_url, session.title));
         }
-        // The bound window is gone (closed by the user or a crash); the
-        // session record is stale — rebind below rather than eval into a
-        // dead window.
+        // The bound window is gone or its content died (closed by the user,
+        // a crash, or a defect #41 shell); the session record is stale.
+        // Destroy the dead window object so the UI can create a fresh one,
+        // then rebind below rather than eval into a dead window.
+        if let Some(window) = app.get_webview_window(&session.window_label) {
+            let _ = window.close();
+        }
+        with_session(state, |slot| *slot = None)?;
     }
-    if app.get_webview_window(BROWSER_WORKSPACE_LABEL).is_none() {
+    // A window may already exist (the user opened the Browser view). Reuse
+    // it only if it verifiably answers; otherwise close the dead shell so
+    // the UI's existence check does not keep recycling it.
+    if let Some(window) = app.get_webview_window(BROWSER_WORKSPACE_LABEL) {
+        if window_answers(app, BROWSER_WORKSPACE_LABEL) {
+            let session = BrowserSession {
+                window_label: BROWSER_WORKSPACE_LABEL.to_owned(),
+                current_url: None,
+                title: None,
+            };
+            with_session(state, |slot| *slot = Some(session.clone()))?;
+            return Ok((session.window_label, session.current_url, session.title));
+        }
+        let _ = window.close();
+    }
+    // Ask the UI to create the window and wait for it to answer. The close
+    // above is dispatched asynchronously, so the UI's existence check can
+    // still observe the dying shell and skip creation — retry the request
+    // once before giving up.
+    let mut last_err = String::new();
+    for _ in 0..2 {
         request_workspace_window_from_frontend(app)?;
-        wait_for_window_ready(app, BROWSER_WORKSPACE_LABEL)?;
+        match wait_for_window_ready(app, BROWSER_WORKSPACE_LABEL) {
+            Ok(()) => {
+                let session = BrowserSession {
+                    window_label: BROWSER_WORKSPACE_LABEL.to_owned(),
+                    current_url: None,
+                    title: None,
+                };
+                with_session(state, |slot| *slot = Some(session.clone()))?;
+                return Ok((session.window_label, session.current_url, session.title));
+            }
+            Err(e) => {
+                last_err = e;
+                if let Some(window) = app.get_webview_window(BROWSER_WORKSPACE_LABEL) {
+                    let _ = window.close();
+                }
+            }
+        }
     }
-    let session = BrowserSession {
-        window_label: BROWSER_WORKSPACE_LABEL.to_owned(),
-        current_url: None,
-        title: None,
-    };
-    with_session(state, |slot| *slot = Some(session.clone()))?;
-    Ok((session.window_label, session.current_url, session.title))
+    Err(last_err)
 }
 
 /// Sync browser executor — also the entry point for the Harness browser tool
