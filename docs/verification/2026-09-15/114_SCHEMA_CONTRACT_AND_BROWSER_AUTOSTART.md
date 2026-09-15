@@ -37,3 +37,12 @@ The re-staged drive (`3cba03a`, both PRs merged) re-ran the build+test+deploy de
 - [ ] `browser.act` succeeds on a fresh app start with no user-opened BrowserWorkspace (the window opens itself)
 - [ ] The separate browser window shows the deployed app's page (CDP target at `localhost:8200` renders "Ping Board")
 - [ ] The agent's answer reports the pid and the served URL
+## 6. Follow-up defect #40 (live-caught on the merged build): the backend-built window had no message loop
+
+The §3 `ensure_session` fix shipped and the deploy demo re-ran on the re-staged drive: `background:true` **worked** (feed: `Starting node in background… Done: started in background (pid …)`), the deployed server answered HTTP after the run, and the answer reported absolute paths + pid + URL. But the browser window itself still never appeared: no CDP `/json` target, not in the window list — and every `browser.act` eval failed with `Eval failed: …`.
+
+**Root cause (forensics: no page reload, no Crashpad dumps, window absent from CDP the instant it was "built"):** `ensure_session` ran inside the harness_chat `spawn_blocking` thread, and `WebviewWindowBuilder…build()` was called there directly. On Windows a Tauri window built off the main thread gets **no message loop**: WebView2 never initializes, evals fail, the window never registers as a CDP target, and it dies with the spawning thread. The frontend's JS `new WebviewWindow(...)` works precisely because Tauri routes that through the main thread.
+
+**Fix:** `create_workspace_window_on_main_thread` — `app.run_on_main_thread(builder.build)` with the result returned over an mpsc channel (`WINDOW_CREATE_TIMEOUT` 10 s), followed by `wait_for_window_ready` — a bounded probe (500 ms eval timeout, 200 ms interval, `SESSION_READY_TIMEOUT` 15 s) so the first real action never races WebView2 startup. Desktop suite stays green (138/138 on the branch with the multi-agent lane; 133/133 + this change in isolation).
+
+**§5 items re-verified after this fix lands on the drive.**
