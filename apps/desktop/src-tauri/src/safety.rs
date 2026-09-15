@@ -88,19 +88,8 @@ pub enum HarmCategory {
 pub struct DesktopSafetyGuard {
     security_level: SecurityLevel,
     blocked_actions: Vec<String>,
-    audit_log: Vec<SafetyAuditEntry>,
     /// D6: Vault root path for persisting security level
     vault_root: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SafetyAuditEntry {
-    pub timestamp: String,
-    pub action_id: String,
-    pub tool_name: String,
-    pub verdict: String,
-    pub reason: String,
-    pub risk_level: String,
 }
 
 impl DesktopSafetyGuard {
@@ -110,7 +99,6 @@ impl DesktopSafetyGuard {
         Self {
             security_level,
             blocked_actions,
-            audit_log: Vec::new(),
             vault_root: None,
         }
     }
@@ -202,7 +190,6 @@ impl DesktopSafetyGuard {
                 risk_level: RiskLevel::Critical,
                 modified_parameters: None,
             };
-            self.log_audit(&verdict, &action.tool_name, &action.raw_output);
             return verdict;
         }
 
@@ -228,7 +215,6 @@ impl DesktopSafetyGuard {
                     risk_level: RiskLevel::Medium,
                     modified_parameters: None,
                 };
-                self.log_audit(&verdict, &action.tool_name, &action.raw_output);
                 return verdict;
             }
         }
@@ -242,23 +228,20 @@ impl DesktopSafetyGuard {
                 risk_level: RiskLevel::High,
                 modified_parameters: None,
             };
-            self.log_audit(&verdict, &action.tool_name, &action.raw_output);
             return verdict;
         }
 
         // 4. Sanitize parameters (remove potentially dangerous values)
         let sanitized = self.sanitize_parameters(&action.parameters);
 
-        // 5. Approve with logging
-        let verdict = SafetyVerdict {
+        // 5. Approve
+        SafetyVerdict {
             action_id: action.action_id.clone(),
             approved: true,
             reason: "Action approved by safety guard".to_string(),
             risk_level: RiskLevel::Safe,
             modified_parameters: sanitized,
-        };
-        self.log_audit(&verdict, &action.tool_name, &action.raw_output);
-        verdict
+        }
     }
 
     /// Detect harmful content in parameters
@@ -368,27 +351,8 @@ impl DesktopSafetyGuard {
         None
     }
 
-    fn log_audit(&mut self, verdict: &SafetyVerdict, tool_name: &str, _raw_output: &str) {
-        self.audit_log.push(SafetyAuditEntry {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            action_id: verdict.action_id.clone(),
-            tool_name: tool_name.to_string(),
-            verdict: if verdict.approved {
-                "APPROVED".to_string()
-            } else {
-                "BLOCKED".to_string()
-            },
-            reason: verdict.reason.clone(),
-            risk_level: format!("{:?}", verdict.risk_level),
-        });
-    }
-
     pub fn get_security_level(&self) -> &SecurityLevel {
         &self.security_level
-    }
-
-    pub fn get_audit_log(&self) -> &[SafetyAuditEntry] {
-        &self.audit_log
     }
 }
 
@@ -436,27 +400,4 @@ pub fn set_security_level(
     guard.set_security_level(new_level)?;
 
     Ok(format!("Security level set to {}", level))
-}
-
-#[tauri::command]
-pub fn get_audit_log(
-    state: tauri::State<'_, SafetyGuardState>,
-) -> Result<Vec<SafetyAuditEntry>, String> {
-    let guard = state
-        .guard
-        .lock()
-        .map_err(|e| format!("State lock error: {}", e))?;
-    Ok(guard.get_audit_log().to_vec())
-}
-
-#[tauri::command]
-pub fn review_tool_action(
-    action: ToolAction,
-    state: tauri::State<'_, SafetyGuardState>,
-) -> Result<SafetyVerdict, String> {
-    let mut guard = state
-        .guard
-        .lock()
-        .map_err(|e| format!("State lock error: {}", e))?;
-    Ok(guard.review_action(&action))
 }

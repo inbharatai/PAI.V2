@@ -145,9 +145,7 @@ fn main() {
             llama::get_model_status,
             llama::start_model_server,
             llama::stop_model_server,
-            llama::send_chat_completion,
             llama::check_model_health,
-            llama::detect_inference_backend,
             llama::model_cache_status,
             llama::stage_model_cache,
             // Filesystem helpers
@@ -155,8 +153,6 @@ fn main() {
             // Safety guard
             safety::get_security_level,
             safety::set_security_level,
-            safety::review_tool_action,
-            safety::get_audit_log,
             // Recording
             recording::start_recording,
             recording::pause_recording,
@@ -175,17 +171,14 @@ fn main() {
             // Documents and memory
             documents::list_documents,
             documents::parse_attached_document,
-            documents::process_document,
             documents::search_memories,
             migrate_plaintext_documents_to_vault,
             // Accessibility
             accessibility::get_accessibility_status,
             accessibility::perform_ocr,
             accessibility::describe_image,
-            accessibility::get_camera_info,
             accessibility::save_vision_snapshot,
             accessibility::capture_screen_snapshot,
-            accessibility::encode_image_for_vision,
             // Security hardening
             security::generate_manifest,
             security::verify_manifest,

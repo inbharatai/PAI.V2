@@ -64,9 +64,10 @@ pub struct DesktopCapabilityProfile {
 /// Audio (Qwen3-ASR/OmniVoice), so the panel actively reported the wrong
 /// engine. Every lane the runtime CAN observe is now probed: speech router
 /// readiness, llama-server state, manifest verification, input-device
-/// negotiation, USB vault detection. Lanes the app cannot self-verify (the
-/// agent loop's end-to-end behaviour, camera capture) keep their honest
-/// posture labels instead of pretending.
+/// negotiation, USB vault detection. Lanes the app cannot self-verify at
+/// runtime (camera capture) keep their honest posture labels instead of
+/// pretending; the agent loop flipped to VerifiedWorking only after the live
+/// 2026-09-14 acceptance proved it end-to-end on the real drive.
 /// Async (defect #23 family): sync commands run on the main/UI thread — this
 /// profile runs manifest verification and a camera-device enumeration, so a
 /// sync version froze the whole UI every time the Capabilities panel loaded.
@@ -228,9 +229,12 @@ pub async fn get_desktop_capability_profile(
         }
     };
 
-    // Agent: the loop's end-to-end behaviour cannot be self-verified without
-    // spending a real model run; keep the honest posture label.
-    let agent = FeatureStatus::ImplementedNotTested;
+    // Agent: earned by the live 2026-09-14 acceptance (docs 111 §5, run 4,
+    // staged main 8b3644b): the drive's agent built a 4-file web app, ran its
+    // own Playwright suite through process.run, failed, fixed its test, and
+    // re-ran to green — verified by an independent test re-run (exit 0, 2
+    // PASS, 0 FAIL). The loop's end-to-end behaviour is proven, not assumed.
+    let agent = FeatureStatus::VerifiedWorking;
 
     // Documents: an unlocked vault is runtime proof the encrypted document
     // store decrypts and is servable; locked means wired but unexercised.

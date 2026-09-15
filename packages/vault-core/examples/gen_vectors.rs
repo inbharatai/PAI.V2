@@ -159,7 +159,6 @@ fn main() {
 // Appended: synthetic-vault fixture for the Kotlin repository test.
 // Real vault created with SYNTHETIC credentials — the unlock path is the
 // contract being proven, so the fixture must come from Rust.
-#[allow(dead_code)]
 fn gen_synthetic_vault_fixture() {
     use unoone_vault_core::{Record, RecordType};
 
@@ -246,7 +245,6 @@ fn gen_synthetic_vault_fixture() {
 // It derives from the COMMITTED header (unwrapping the master key with the
 // fixture password, exactly as unlock does), so running it alone does not
 // churn the other fixtures.
-#[allow(dead_code)]
 fn gen_kotlin_envelope_fixture() {
     use unoone_vault_core::{EncryptedRecord, PrivacyLevel};
 

@@ -12,7 +12,10 @@ interface Memory {
 
 export function MemoryExplorer() {
   const [memories, setMemories] = useState<Memory[]>([]);
-  const [searchQuery, _setSearchQuery] = useState('');
+  // No search box anymore: the panel always loads the wildcard view (the
+  // former dead searchQuery state could never change after the input was
+  // removed — 2026-09-15 dead-code sweep).
+  const searchQuery = '';
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 

@@ -143,22 +143,6 @@ export interface ToolCallResult {
   arguments: Record<string, unknown>;
 }
 
-export interface InferenceRequest {
-  prompt: string;
-  system_prompt?: string;
-  conversation_history: ConversationTurn[];
-  max_tokens?: number;
-  temperature?: number;
-  stop_sequences?: string[];
-}
-
-export interface InferenceResponse {
-  text: string;
-  tokens_generated: number;
-  tokens_per_second: number;
-  model_id: string;
-}
-
 export type AccelerationBackend = 'CUDA' | 'METAL' | 'VULKAN' | 'CPU';
 export type SecurityLevel = 'STANDARD' | 'RELAXED' | 'OFF';
 export type ModelStatus = 'NOT_LOADED' | 'LOADING' | 'LOADED' | 'GENERATING' | 'ERROR';
@@ -170,22 +154,6 @@ export type FeatureStatus =
   | 'NOT_IMPLEMENTED'
   | 'BLOCKED_BY_ENVIRONMENT'
   | 'FAILED';
-
-export interface ToolAction {
-  action_id: string;
-  tool_name: string;
-  parameters: Record<string, unknown>;
-  confidence: number;
-  raw_output: string;
-}
-
-export interface SafetyVerdict {
-  action_id: string;
-  approved: boolean;
-  reason: string;
-  risk_level: 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
-  modified_parameters: Record<string, unknown> | null;
-}
 
 export interface RecordingBookmark {
   timestamp_seconds: number;
@@ -268,11 +236,6 @@ export interface DetectedObject {
   height: number;
 }
 
-export interface CameraInfo {
-  devices: Array<{ name: string; device_id: string; status: string }>;
-  capture_backend: string;
-}
-
 export interface AgentStep {
   type: 'Thinking' | 'ToolCall' | 'ToolResult' | 'InvalidToolCall' | 'SafetyBlock' | 'FinalResponse';
   tool?: string;
@@ -324,16 +287,6 @@ export interface BharatAudioStatus {
   tts_family: string | null;
   inference_ready: boolean;
   streaming_class: string;
-}
-
-export interface SecurityVerificationResult {
-  vault_id: string;
-  manifest_valid: boolean;
-  hmac_valid: boolean;
-  entries_verified: number;
-  entries_failed: number;
-  total_entries: number;
-  errors: string[];
 }
 
 export interface VoiceStatus {
@@ -481,8 +434,6 @@ export const tauriApi = {
   // Safety guard
   getSecurityLevel: () => invoke<SecurityLevel>('get_security_level'),
   setSecurityLevel: (level: SecurityLevel) => invoke<string>('set_security_level', { level }),
-  reviewToolAction: (action: ToolAction, securityLevel: SecurityLevel) =>
-    invoke<SafetyVerdict>('review_tool_action', { action, security_level: securityLevel }),
 
   // Recording
   startRecording: (recordingType: string, privacyLevel: string, vaultRoot: string, language?: string) =>
@@ -504,21 +455,16 @@ export const tauriApi = {
   performOcr: (imagePath: string) => invoke<OcrResult>('perform_ocr', { image_path: imagePath }),
   describeImage: (imagePath: string, mode?: string) =>
     invoke<BlindViewResult>('describe_image', { image_path: imagePath, mode: mode ?? null }),
-  getCameraInfo: () => invoke<CameraInfo>('get_camera_info'),
   saveVisionSnapshot: (dataUrl: string) =>
     invoke<string>('save_vision_snapshot', { data_url: dataUrl }),
   captureScreenSnapshot: () => invoke<string>('capture_screen_snapshot'),
   getWorkspaceRoot: () => invoke<string>('get_workspace_root'),
-  encodeImageForVision: (imagePath: string) => invoke<string>('encode_image_for_vision', { image_path: imagePath }),
 
   // Security
-  emergencyLock: (vaultRoot: string) => invoke<{ success: boolean; keys_cleared: boolean; vault_locked: boolean; timestamp: string }>('emergency_lock', { vault_root: vaultRoot }),
   generateManifest: (vaultRoot: string) => invoke<VaultInfo & { entries: number; manifest_sha256: string }>('generate_manifest', { vault_root: vaultRoot }),
-  verifyManifest: (vaultRoot: string) => invoke<SecurityVerificationResult>('verify_manifest', { vault_root: vaultRoot }),
   recoverFromCrash: (vaultRoot: string) => invoke<{ state: string; recovered_files: number; rolled_back_files: number; errors: string[] }>('recover_from_crash', { vault_root: vaultRoot }),
 
   // Vault state (D7 additions)
-  vaultIsUnlocked: () => invoke<boolean>('vault_is_unlocked'),
   vaultReadRecord: (recordId: string) => invoke<string>('vault_read_record', { record_id: recordId }),
   vaultWriteRecord: (params: {
     recordType: string;
@@ -562,7 +508,6 @@ export const tauriApi = {
   getBharatAudioStatus: (vaultRoot: string) =>
     invoke<BharatAudioStatus>('get_bharat_audio_status', { vault_root: vaultRoot }),
   checkModelHealth: () => invoke<Record<string, unknown>>('check_model_health'),
-  sendChatCompletion: (request: InferenceRequest) => invoke<InferenceResponse>('send_chat_completion', { request }),
 
   // Voice module (D4)
   getVoiceStatus: (vaultRoot: string, language: string) => invoke<VoiceStatus>('get_voice_status', { vault_root: vaultRoot, language }),

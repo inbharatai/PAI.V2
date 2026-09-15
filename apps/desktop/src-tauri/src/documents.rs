@@ -1254,12 +1254,6 @@ pub fn list_documents(
     documents
 }
 
-#[tauri::command]
-pub fn process_document(document_id: String, vault_root: String) -> DocumentProcessResult {
-    let processor = DocumentProcessor::new(&vault_root);
-    processor.process_document(&document_id)
-}
-
 /// Chat attachment the frontend could not interpret itself (PDF/DOCX/XLSX/
 /// PPTX), extracted server-side through the same audited parser lane the
 /// document processor uses. The bytes arrive base64-encoded from the
