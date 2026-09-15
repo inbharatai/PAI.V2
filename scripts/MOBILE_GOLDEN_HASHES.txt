@@ -1,6 +1,6 @@
 # Pocket AI — mobile golden baseline hash manifest
 # Protected path: android-app/UnoOneAgent/
-# Protected tree: 010413f3c5a51106a1b47b86e435d30872ebc554
+# Protected tree: a307716a9cf6535bad8d71133d2b762c6a908c02
 # Regenerate with: scripts/regen-mobile-golden-hashes.sh
 # One SHA-256 per protected file, LF-canonical, verified by sha256sum --check --strict
 e344da5c56060caf479eb0068070b0a586bf445d7c1c5a9d70c8783660ca4369  android-app/UnoOneAgent/.aiexclude
@@ -365,7 +365,7 @@ ad58ae2968beefdcaa2946f5c6260a4bd3f19a3c7e8658851cf5cc310ac116fa  android-app/Un
 62df97691a9d1e0b89331efac335fe9453148d364de3e98fe8d8e10f5ac2d4bb  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceActivityPolicyTest.kt
 69a07492320538e482bca976e5412d73664143977e85a3a510449371211e14e7  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceAgentRuntimeTest.kt
 2a54c26636e4c0304e30b10720728b3b97012d7baf198f86d88153cc46b67f2a  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceCapturePolicyTest.kt
-0962ca44e701603b8277e0c39a604d96e41521b07c7424bc85511a881cf3ab98  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceLanguageCanonicalizeTest.kt
+9fe304914b9f9d63b7155bd8b40a5b5f9b395936128b213c27153190a9705fc3  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceLanguageCanonicalizeTest.kt
 9aa3888a515d6693d03a31ff587ef96626a563fe567892e8554b177cc711d280  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceLanguageMappingTest.kt
 e13723a842128006192c45f68e3c1099fdb5622dcd7031f1c19f750257cfc3d6  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/WakeActivationGateTest.kt
 d9d87eba45cf36b99d7d44d297dcc61dd8d07f1025972f6efad971eaeb6f6839  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/WakePhrasesTest.kt
