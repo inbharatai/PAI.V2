@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use unoone_browser_policy::{evaluate as evaluate_redirect, RedirectVerdict};
 
 /// Browser session configuration
@@ -445,11 +445,9 @@ window.__unooneBrowserBridge = {
 
 const EVAL_TIMEOUT: Duration = Duration::from_secs(10);
 const NAVIGATE_POLL_LIMIT: Duration = Duration::from_secs(20);
-/// Building a window can take a moment under load; the main thread must
-/// still answer within this or something is fundamentally stuck.
-const WINDOW_CREATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A freshly built WebView2 needs its message loop to start pumping before
-/// evals complete; this bounds how long we wait for the first answer.
+/// evals complete; this bounds how long we wait for the first answer after
+/// asking the app UI to open the workspace window.
 const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// WebView2's `ExecuteScript` — what `eval_with_callback` bottoms out in on
@@ -793,39 +791,18 @@ pub async fn browser_execute(
 /// browser itself).
 const BROWSER_WORKSPACE_LABEL: &str = "browser-workspace";
 
-/// Build the browser-workspace window ON THE MAIN THREAD (live-caught root
-/// cause 2026-09-15, defect #40): `WebviewWindowBuilder…build()` from a
-/// background thread (the harness_chat spawn_blocking lane) produces a
-/// window whose WebView2 message loop never starts — every eval then fails
-/// ("Eval failed: …"), the window never appears in CDP /json, and it dies
-/// with the spawning thread. The frontend's JS `new WebviewWindow` works
-/// precisely because Tauri routes it through the main thread;
-/// `run_on_main_thread` gives the backend the same path. The build result
-/// comes back over a channel so the caller still sees the error.
-fn create_workspace_window_on_main_thread(app: &tauri::AppHandle) -> Result<(), String> {
-    let url = tauri::Url::parse("about:blank").map_err(|e| e.to_string())?;
-    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    let handle = app.clone();
-    app.run_on_main_thread(move || {
-        let built = tauri::WebviewWindowBuilder::new(
-            &handle,
-            BROWSER_WORKSPACE_LABEL,
-            tauri::WebviewUrl::External(url),
-        )
-        .title("Browser Workspace")
-        .inner_size(1280.0, 800.0)
-        .center()
-        .build();
-        let _ = tx.send(
-            built
-                .map(|_| ())
-                .map_err(|e| format!("Failed to open the browser workspace window: {e}")),
-        );
-    })
-    .map_err(|e| format!("Could not dispatch browser window creation to the main thread: {e}"))?;
-    rx.recv_timeout(WINDOW_CREATE_TIMEOUT).map_err(|e| {
-        format!("Browser window creation did not complete within {WINDOW_CREATE_TIMEOUT:?}: {e}")
-    })?
+/// Open the browser-workspace window by ASKING THE FRONTEND to create it
+/// (defect #40, live-caught twice 2026-09-15): a window built from Rust —
+/// first from the harness_chat spawn_blocking thread, then even on the main
+/// thread via `run_on_main_thread` — produced a window shell whose WebView2
+/// content process never started: no CDP /json target, no window title, and
+/// eval callbacks never fired. The frontend's JS `new WebviewWindow(...)`
+/// (the BrowserWorkspace UI path) works every time, so the backend emits
+/// `unoone:ensure-browser-workspace` and App.tsx's listener runs that exact
+/// proven construction. The caller then polls for readiness below.
+fn request_workspace_window_from_frontend(app: &tauri::AppHandle) -> Result<(), String> {
+    app.emit("unoone:ensure-browser-workspace", ())
+        .map_err(|e| format!("Could not request the browser window from the app UI: {e}"))
 }
 
 /// A freshly built window only accepts evals once its WebView2 message loop
@@ -846,7 +823,8 @@ fn wait_for_window_ready(app: &tauri::AppHandle, window_label: &str) -> Result<(
         }
         if start.elapsed() > SESSION_READY_TIMEOUT {
             return Err(format!(
-                "Browser workspace window did not answer within {SESSION_READY_TIMEOUT:?}"
+                "The browser workspace window did not open within {SESSION_READY_TIMEOUT:?} \
+                 (the app UI did not answer the open request)"
             ));
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -854,10 +832,10 @@ fn wait_for_window_ready(app: &tauri::AppHandle, window_label: &str) -> Result<(
 }
 
 /// Ensure a browser session exists: bind the current one if its window is
-/// alive; otherwise create the browser-workspace window (same label and
-/// geometry the BrowserWorkspace UI uses) and bind it. The user keeps the
-/// explicit Stop Session button — this only removes the dead-end, it does
-/// not remove the user's control.
+/// alive; otherwise have the app UI open the browser-workspace window (same
+/// label and geometry the BrowserWorkspace UI uses) and bind it. The user
+/// keeps the explicit Stop Session button — this only removes the dead-end,
+/// it does not remove the user's control.
 fn ensure_session(
     app: &tauri::AppHandle,
     state: &Arc<BrowserStateHolder>,
@@ -872,7 +850,7 @@ fn ensure_session(
         // dead window.
     }
     if app.get_webview_window(BROWSER_WORKSPACE_LABEL).is_none() {
-        create_workspace_window_on_main_thread(app)?;
+        request_workspace_window_from_frontend(app)?;
         wait_for_window_ready(app, BROWSER_WORKSPACE_LABEL)?;
     }
     let session = BrowserSession {
