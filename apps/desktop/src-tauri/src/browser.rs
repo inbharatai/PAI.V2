@@ -780,6 +780,54 @@ pub async fn browser_execute(
     Ok(result)
 }
 
+/// The browser workspace window the frontend creates — and the backend now
+/// creates on demand when the model-driven lane calls browser.act with no
+/// session (defect #39: after every app restart the session was gone and
+/// the agent's browser.act hard-failed, so the chat could never open the
+/// browser itself).
+const BROWSER_WORKSPACE_LABEL: &str = "browser-workspace";
+
+/// Ensure a browser session exists: bind the current one if its window is
+/// alive; otherwise create the browser-workspace window (same label and
+/// geometry the BrowserWorkspace UI uses) and bind it. The user keeps the
+/// explicit Stop Session button — this only removes the dead-end, it does
+/// not remove the user's control.
+fn ensure_session(
+    app: &tauri::AppHandle,
+    state: &Arc<BrowserStateHolder>,
+) -> Result<(String, Option<String>, Option<String>), String> {
+    let existing = with_session(state, |session| session.clone())?;
+    if let Some(session) = existing {
+        if app.get_webview_window(&session.window_label).is_some() {
+            return Ok((session.window_label, session.current_url, session.title));
+        }
+        // The bound window is gone (closed by the user or a crash); the
+        // session record is stale — rebind below rather than eval into a
+        // dead window.
+    }
+    if app.get_webview_window(BROWSER_WORKSPACE_LABEL).is_none() {
+        tauri::WebviewWindowBuilder::new(
+            app,
+            BROWSER_WORKSPACE_LABEL,
+            tauri::WebviewUrl::External(
+                tauri::Url::parse("about:blank").map_err(|e| e.to_string())?,
+            ),
+        )
+        .title("Browser Workspace")
+        .inner_size(1280.0, 800.0)
+        .center()
+        .build()
+        .map_err(|e| format!("Failed to open the browser workspace window: {e}"))?;
+    }
+    let session = BrowserSession {
+        window_label: BROWSER_WORKSPACE_LABEL.to_owned(),
+        current_url: None,
+        title: None,
+    };
+    with_session(state, |slot| *slot = Some(session.clone()))?;
+    Ok((session.window_label, session.current_url, session.title))
+}
+
 /// Sync browser executor — also the entry point for the Harness browser tool
 /// (the model-driven lane runs the same typed actions, against the same
 /// session state, as the user-driven BrowserWorkspace buttons).
@@ -789,26 +837,13 @@ pub(crate) fn browser_execute_sync(
     app: tauri::AppHandle,
     state: Arc<BrowserStateHolder>,
 ) -> Result<BrowserActionResult, String> {
-    let (window_label, session_url, session_title) = {
-        let lock = state
-            .session
-            .lock()
-            .map_err(|e| format!("State lock error: {}", e))?;
-        match lock.as_ref() {
-            Some(s) => (
-                s.window_label.clone(),
-                s.current_url.clone(),
-                s.title.clone(),
-            ),
-            None => {
-                return Ok(BrowserActionResult::failure(
-                    "No active browser session. Call browser_start_session first.",
-                    None,
-                    None,
-                ))
-            }
-        }
-    };
+    // Defect #39 (live-caught 2026-09-15): the agent's deploy step could
+    // open the page it just served — browser.act died on a stale
+    // "call browser_start_session first" that the model-driven lane has no
+    // tool for. ensure_session binds the live session if one exists (and
+    // rebinds if its window died), and otherwise opens the browser window
+    // itself — the chat can open the browser, not just drive it.
+    let (window_label, session_url, session_title) = ensure_session(&app, &state)?;
 
     // Evals block on an mpsc channel with a timeout; spawn_blocking keeps
     // the async executor free.
