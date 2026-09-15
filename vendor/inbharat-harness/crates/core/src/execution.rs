@@ -535,6 +535,13 @@ pub struct ProcessOutput {
     pub elapsed: Duration,
 }
 
+/// A detached (background) spawn: the child outlives the tool call and its
+/// output is not captured (defect #38).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DetachedSpawn {
+    pub pid: Option<u32>,
+}
+
 /// One execution-world interface so filesystem and process tools cannot drift.
 pub trait ExecutionBroker: Send + Sync {
     fn world_id(&self) -> &str;
@@ -547,6 +554,26 @@ pub trait ExecutionBroker: Send + Sync {
         spec: &ProcessSpec,
         cancel: &CancellationToken,
     ) -> HarnessResult<ProcessOutput>;
+    /// Spawn `spec` detached so the child keeps running after the tool call
+    /// returns (defect #38, live-caught 2026-09-15: the agent's foreground
+    /// `node server.js` deploy was killed at the 180s deadline — a server
+    /// never exits, so "test and deploy" was impossible). Output is not
+    /// captured; the PID is returned so the agent can stop the process later.
+    /// Worlds that cannot detach refuse honestly instead of pretending.
+    fn spawn_detached(
+        &self,
+        spec: &ProcessSpec,
+        cancel: &CancellationToken,
+    ) -> HarnessResult<DetachedSpawn> {
+        let _ = cancel;
+        Err(Failure::new(
+            ErrorCode::SubprocessDenied,
+            FailureClass::Policy,
+            "process.run",
+            "this execution world cannot spawn detached processes",
+        )
+        .with_detail("program", &spec.program))
+    }
 }
 
 /// Local single-user execution broker with an allowlist and scrubbed environment.
@@ -574,6 +601,39 @@ impl LocalExecutionBroker {
             filesystem,
             allowed_programs: resolved,
         }
+    }
+
+    /// Allowlist + bounds validation shared by foreground runs and detached
+    /// spawns, so the background lane (defect #38) can never be a weaker
+    /// policy surface than the foreground one.
+    fn validated_program(&self, spec: &ProcessSpec) -> HarnessResult<&PathBuf> {
+        let program_path = self.allowed_programs.get(&spec.program).ok_or_else(|| {
+            Failure::new(
+                ErrorCode::SubprocessDenied,
+                FailureClass::Policy,
+                "process.run",
+                "program is not allowlisted or was not resolvable when the broker was created",
+            )
+            .with_detail("program", &spec.program)
+        })?;
+        if spec.args.len() > 256
+            || spec.args.iter().any(|argument| argument.len() > 32 * 1024)
+            || spec.environment.len() > 64
+            || spec.environment.iter().any(|(key, value)| {
+                key.is_empty()
+                    || key.len() > 1024
+                    || value.len() > 32 * 1024
+                    || key.contains('=')
+                    || key.contains('\0')
+                    || value.contains('\0')
+            })
+        {
+            return Err(Failure::invalid(
+                "process.run",
+                "process request exceeds argument or environment bounds",
+            ));
+        }
+        Ok(program_path)
     }
 
     #[must_use]
@@ -609,32 +669,7 @@ impl ExecutionBroker for LocalExecutionBroker {
         cancel: &CancellationToken,
     ) -> HarnessResult<ProcessOutput> {
         cancel.check("process.run")?;
-        let program_path = self.allowed_programs.get(&spec.program).ok_or_else(|| {
-            Failure::new(
-                ErrorCode::SubprocessDenied,
-                FailureClass::Policy,
-                "process.run",
-                "program is not allowlisted or was not resolvable when the broker was created",
-            )
-            .with_detail("program", &spec.program)
-        })?;
-        if spec.args.len() > 256
-            || spec.args.iter().any(|argument| argument.len() > 32 * 1024)
-            || spec.environment.len() > 64
-            || spec.environment.iter().any(|(key, value)| {
-                key.is_empty()
-                    || key.len() > 1024
-                    || value.len() > 32 * 1024
-                    || key.contains('=')
-                    || key.contains('\0')
-                    || value.contains('\0')
-            })
-        {
-            return Err(Failure::invalid(
-                "process.run",
-                "process request exceeds argument or environment bounds",
-            ));
-        }
+        let program_path = self.validated_program(spec)?;
         let started = Instant::now();
         let mut environment = baseline_env_from(env::vars());
         environment.extend(spec.environment.clone());
@@ -733,6 +768,43 @@ impl ExecutionBroker for LocalExecutionBroker {
             truncated,
             elapsed: started.elapsed(),
         })
+    }
+
+    fn spawn_detached(
+        &self,
+        spec: &ProcessSpec,
+        cancel: &CancellationToken,
+    ) -> HarnessResult<DetachedSpawn> {
+        cancel.check("process.run")?;
+        let program_path = self.validated_program(spec)?;
+        let mut environment = baseline_env_from(env::vars());
+        environment.extend(spec.environment.clone());
+        let mut command = Command::new(program_path);
+        command
+            .args(&spec.args)
+            .current_dir(self.filesystem.root())
+            .env_clear()
+            .envs(&environment)
+            // Detached output is deliberately NOT captured: the child must
+            // keep running after the tool call returns, and a piped stdio
+            // with no reader would block the child once the pipe buffer
+            // fills. Null stdio means the server writes to nowhere — the
+            // briefing tells the agent background output is not visible.
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = command.spawn().map_err(|error| {
+            io_failure(
+                ErrorCode::ToolFailed,
+                "process.spawn",
+                "failed to spawn allowlisted program in the background",
+                error,
+            )
+        })?;
+        // Dropping the Child without killing it leaves the process running
+        // on both Windows and Unix.
+        let pid = child.id();
+        Ok(DetachedSpawn { pid: Some(pid) })
     }
 }
 
@@ -954,6 +1026,82 @@ mod tests {
             message.contains("subprocess deadline exceeded"),
             "expected the deadline kill, got: {message}"
         );
+        Ok(())
+    }
+
+    /// Defect #38 (live-caught 2026-09-15): a foreground `node server.js`
+    /// deploy was killed at the 180s deadline because a server never exits —
+    /// the agent had no way to keep a process running. spawn_detached must
+    /// return immediately with a PID, the same allowlist must apply, and the
+    /// child must actually outlive the call.
+    #[test]
+    fn spawn_detached_returns_immediately_and_child_outlives_the_call() -> HarnessResult<()> {
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd",
+            vec!["/C".to_owned(), "ping -n 30 -w 1000 127.0.0.1".to_owned()],
+        );
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_owned(), "sleep 30".to_owned()]);
+        let fs = RootedFs::new(".")?;
+        let broker = LocalExecutionBroker::new(fs, vec![program.to_owned()]);
+
+        // The spawn must return in well under the child's runtime — a
+        // foreground run of the same spec would block for the full 30s.
+        let started = Instant::now();
+        let spawn =
+            broker.spawn_detached(&ProcessSpec::new(program, args), &CancellationToken::new())?;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "spawn_detached blocked for {:?} — it must return immediately",
+            started.elapsed()
+        );
+        assert!(spawn.pid.is_some(), "expected a pid from the spawn");
+        let pid = spawn.pid.unwrap_or(0);
+        assert!(pid > 0, "expected a real pid, got {pid}");
+
+        // The allowlist applies to the background lane exactly as to the
+        // foreground one — background: true must never be a weaker policy.
+        let denied = broker.spawn_detached(
+            &ProcessSpec::new("definitely-not-allowlisted", vec![]),
+            &CancellationToken::new(),
+        );
+        assert!(
+            denied.is_err(),
+            "background spawn must enforce the allowlist"
+        );
+
+        // The child must still be alive: dropping the Child handle detached
+        // it rather than killing it. Reap it so the test leaves no stray
+        // process behind.
+        let still_alive = {
+            #[cfg(windows)]
+            {
+                Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {pid}")])
+                    .output()
+                    .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+                    .unwrap_or(false)
+            }
+            #[cfg(unix)]
+            {
+                Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false)
+            }
+        };
+        assert!(
+            still_alive,
+            "the detached child must outlive the spawn call"
+        );
+        #[cfg(windows)]
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status();
+        #[cfg(unix)]
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
         Ok(())
     }
 

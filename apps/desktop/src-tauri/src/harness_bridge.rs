@@ -122,10 +122,12 @@ fn progress_detail(tool: &str, arguments: &ToolArguments) -> String {
         }
         "process.run" => {
             let program = arg("program");
-            if program.is_empty() {
-                "Running command".to_owned()
-            } else {
-                format!("Running {program}")
+            let background = matches!(arguments.get("background"), Some(Value::Bool(true)));
+            match (program.is_empty(), background) {
+                (true, false) => "Running command".to_owned(),
+                (false, false) => format!("Running {program}"),
+                (true, true) => "Starting background process".to_owned(),
+                (false, true) => format!("Starting {program} in background"),
             }
         }
         "browser.act" => {
@@ -741,6 +743,12 @@ fn desktop_system_prefix(full_access: bool) -> String {
              inside it — both are accepted and fenced to it)\n\
              - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
              dotnet, go, java, cmake, make, gcc, clang, powershell) inside that workspace\n\
+             - Deploy long-running processes (servers, watchers): pass \
+             background:true to process.run — it returns immediately with the \
+             pid and the process keeps running. Its output is NOT captured, so \
+             verify the effect itself (browser.act to the served \
+             http://localhost:PORT and check the page) and report the pid in \
+             your answer so the user can stop it later.\n\
              - Drive a real web browser (navigate, click, type, fill forms, screenshot) \
              via browser.act\n\
              - Read the user's encrypted Pocket AI vault records \
@@ -2116,6 +2124,18 @@ mod workspace_tool_tests {
             "the briefing must tell the agent the workspace root"
         );
 
+        // Defect #38 (live-caught 2026-09-15): the agent must know it can
+        // deploy servers in the background — its foreground node deploy was
+        // killed at the 180s deadline because a server never exits.
+        assert!(
+            prompt.contains("background:true to process.run"),
+            "the briefing must teach the background deploy lane"
+        );
+        assert!(
+            prompt.contains("browser.act to the served"),
+            "the briefing must teach verifying a deploy through the browser"
+        );
+
         // Defect #36 label: the command's backing resolver must return the
         // real expanded root, never the literal %USERPROFILE% pattern.
         let root =
@@ -2185,6 +2205,21 @@ mod workspace_tool_tests {
         assert_eq!(
             progress_detail("process.run", &string_args(&[("program", "node")])),
             "Running node"
+        );
+        // Defect #38: a background deploy must read as a deploy in the feed.
+        assert_eq!(
+            progress_detail(
+                "process.run",
+                &args(&[
+                    ("program", Value::String("node".to_owned())),
+                    (
+                        "args",
+                        Value::Array(vec![Value::String("server.js".to_owned())])
+                    ),
+                    ("background", Value::Bool(true))
+                ])
+            ),
+            "Starting node in background"
         );
         assert_eq!(
             progress_detail(
