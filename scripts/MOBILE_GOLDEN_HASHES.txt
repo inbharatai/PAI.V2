@@ -1,6 +1,6 @@
 # Pocket AI — mobile golden baseline hash manifest
 # Protected path: android-app/UnoOneAgent/
-# Protected tree: 39a7e144effe3dd1efeb396fef97208214f8cffc
+# Protected tree: a307716a9cf6535bad8d71133d2b762c6a908c02
 # Regenerate with: scripts/regen-mobile-golden-hashes.sh
 # One SHA-256 per protected file, LF-canonical, verified by sha256sum --check --strict
 e344da5c56060caf479eb0068070b0a586bf445d7c1c5a9d70c8783660ca4369  android-app/UnoOneAgent/.aiexclude
@@ -348,7 +348,7 @@ bf9e7bc8c3ee442bbc8f5041146c7cf4cec7f678d03f4075a32e77ca590a20c9  android-app/Un
 4a5366385f58b0d93db7f7173b4c71d0fd2545660eda4c54a021ef46e0469f94  android-app/UnoOneAgent/voice/src/main/java/com/unoone/agent/voice/VoiceActivityPolicy.kt
 02b0e5dc78c563d31eeb3c31bc204414fcae1f39420fa0a4edf63d46b176a7a9  android-app/UnoOneAgent/voice/src/main/java/com/unoone/agent/voice/VoiceAgentRuntime.kt
 233463610d990be384f27260578c77a9573d14e023c908c3932f27c031062876  android-app/UnoOneAgent/voice/src/main/java/com/unoone/agent/voice/VoiceCapturePolicy.kt
-5ff0eb10309dd93d4a3bbf6620338e1a00d788457542403699f13e902ee47c16  android-app/UnoOneAgent/voice/src/main/java/com/unoone/agent/voice/VoiceLanguage.kt
+0333469aba8c484e261f766f68cce44afcff39ab852d9b55950cdca6ceead1ff  android-app/UnoOneAgent/voice/src/main/java/com/unoone/agent/voice/VoiceLanguage.kt
 1cb8731b0f8a416d111fabeeedcdaab37f1396ac57978dc7cde325f47d088140  android-app/UnoOneAgent/voice/src/main/java/com/unoone/agent/voice/VoiceModule.kt
 7a541c95175a15553a763f2ccbf1f80a613c872d6e5dbffb8cec597a0870c5d7  android-app/UnoOneAgent/voice/src/main/java/com/unoone/agent/voice/VoiceService.kt
 499c9f6b4059f660a9018caac1bc6ecbd6b2657bb440f45e60f553837df7ced5  android-app/UnoOneAgent/voice/src/main/java/com/unoone/agent/voice/WakeActivationGate.kt
@@ -365,7 +365,7 @@ ad58ae2968beefdcaa2946f5c6260a4bd3f19a3c7e8658851cf5cc310ac116fa  android-app/Un
 62df97691a9d1e0b89331efac335fe9453148d364de3e98fe8d8e10f5ac2d4bb  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceActivityPolicyTest.kt
 69a07492320538e482bca976e5412d73664143977e85a3a510449371211e14e7  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceAgentRuntimeTest.kt
 2a54c26636e4c0304e30b10720728b3b97012d7baf198f86d88153cc46b67f2a  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceCapturePolicyTest.kt
-0962ca44e701603b8277e0c39a604d96e41521b07c7424bc85511a881cf3ab98  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceLanguageCanonicalizeTest.kt
+9fe304914b9f9d63b7155bd8b40a5b5f9b395936128b213c27153190a9705fc3  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceLanguageCanonicalizeTest.kt
 9aa3888a515d6693d03a31ff587ef96626a563fe567892e8554b177cc711d280  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/VoiceLanguageMappingTest.kt
 e13723a842128006192c45f68e3c1099fdb5622dcd7031f1c19f750257cfc3d6  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/WakeActivationGateTest.kt
 d9d87eba45cf36b99d7d44d297dcc61dd8d07f1025972f6efad971eaeb6f6839  android-app/UnoOneAgent/voice/src/test/java/com/unoone/agent/voice/WakePhrasesTest.kt

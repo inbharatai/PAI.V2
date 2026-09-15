@@ -636,11 +636,19 @@ mod tests {
     fn resolved_key_agrees_with_provider_serves() {
         // The whole point of the resolver: coverage questions asked through a
         // manifest family must give the same answer as the raw table key.
+        // Assamese was live-probed on the staged omnivoice.gguf (2026-09-15)
+        // and is now truthfully claimed; ASR still refuses it (Qwen3-ASR does
+        // not serve it — IndicConformer does, when staged) and a global tag
+        // the table has never claimed stays refused.
         let hindi = canonicalize("hi").unwrap();
         let assamese = canonicalize("as").unwrap();
+        let french = canonicalize("fr").unwrap();
         let key = resolve_provider_key("omnivoice", SpeechTask::Tts).unwrap();
         assert!(provider_serves(&key, SpeechTask::Tts, &hindi));
-        assert!(!provider_serves(&key, SpeechTask::Tts, &assamese));
+        assert!(provider_serves(&key, SpeechTask::Tts, &assamese));
+        assert!(!provider_serves(&key, SpeechTask::Tts, &french));
+        let asr_key = resolve_provider_key("qwen3_asr", SpeechTask::Asr).unwrap();
+        assert!(!provider_serves(&asr_key, SpeechTask::Asr, &assamese));
     }
 
     // ---- Streaming-class labels ----

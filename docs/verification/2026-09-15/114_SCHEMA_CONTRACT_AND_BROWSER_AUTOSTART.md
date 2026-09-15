@@ -70,3 +70,11 @@ Desktop suite green (138/138), frontend `oxlint` + `vite build` green.
 4. **Backend truth:** new `window_answers()` probe (eval `"true"`, 500 ms) replaces every bare existence check: `ensure_session` binds a session only if the window verifiably answers, destroys dead shells (stale bound window or an existing-but-dead `browser-workspace` entry) so the UI can create a fresh one, and retries the frontend request once against the close/create race. `browser_session_status` probes too, so a remounted UI never reports a dead session as active. Previously a dead bind poisoned every later action — each burned a full 10 s `EVAL_TIMEOUT` and short-circuited until the user manually stopped the session.
 
 Desktop suite + `cargo fmt`/`clippy -D warnings` green, frontend `vite build` green. **§5 items 3+4 re-verified after this fix lands on the drive.**
+
+## 8. Live re-verification (2026-09-15, drive re-staged with main a712f29 — PRs #45+#46)
+
+- **The `Browser Workspace` OS window exists and is visible** (deep EnumWindows: `hwnd=… class=[Tauri Window] title=[Browser Workspace]`) — the first time since 2026-09-13.
+- Start/stop session lifecycle: `session=true` held with **no ACL error, no banner error** across the whole sweep (previously the reuse branch died at the exact moment of the user-reported rejection).
+- **Real sites, on the user's explicit direction (no `example.com` placeholders):** the Browser tab URL bar navigated to `https://github.com` → workspace webview target `{"url":"https://github.com/","title":"GitHub · Change is constant. GitHub keeps you ahead. · GitHub"}`; then `https://www.google.com` → `{"url":"https://www.google.com/","title":"Google"}`. A real page loads, renders, and is addressable over CDP in the runtime-created window.
+
+**Defect #41: CLOSED, live-verified.**

@@ -433,7 +433,11 @@ export function ChatView() {
     try {
       if (!isRecording) {
         if (!vaultRoot) { setMicError('Vault not detected — voice input needs the Pocket USB.'); return; }
-        await tauriApi.startRecording('VOICE_MEMO', 'TRANSCRIPT_ONLY', vaultRoot, speechLang);
+        // The ASR model serves a narrower set than the TTS voice (Qwen3-ASR:
+        // en/hi/Hinglish). For any other voice language the mic runs in
+        // `auto` — the engine detects what was spoken instead of failing.
+        const asrServed = speechLang === 'en' || speechLang === 'hi' || speechLang === 'hinglish';
+        await tauriApi.startRecording('VOICE_MEMO', 'TRANSCRIPT_ONLY', vaultRoot, asrServed ? speechLang : 'auto');
         setIsRecording(true);
         setRecordSeconds(0);
         recordTimerRef.current = window.setInterval(() => setRecordSeconds(s => s + 1), 1000);
@@ -920,6 +924,19 @@ export function ChatView() {
               <option value="en">English</option>
               <option value="hi">हिन्दी</option>
               <option value="hinglish">Hinglish</option>
+              <option value="as">অসমীয়া</option>
+              <option value="bn">বাংলা</option>
+              <option value="gu">ગુજરાતી</option>
+              <option value="kn">ಕನ್ನಡ</option>
+              <option value="ml">മലയാളം</option>
+              <option value="mr">मराठी</option>
+              <option value="ne">नेपाली</option>
+              <option value="or">ଓଡ଼ିଆ</option>
+              <option value="pa">ਪੰਜਾਬੀ</option>
+              <option value="sa">संस्कृतम्</option>
+              <option value="ta">தமிழ்</option>
+              <option value="te">తెలుగు</option>
+              <option value="ur">اردو</option>
             </select>
           </label>
         </div>
