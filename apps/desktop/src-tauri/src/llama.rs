@@ -278,12 +278,9 @@ pub struct InferenceResponse {
 
 /// Verified server identity returned after a successful start.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ServerIdentity {
-    pub port: u16,
     pub pid: u32,
     pub model_id: String,
-    pub health: serde_json::Value,
 }
 
 /// Model info
@@ -304,7 +301,7 @@ pub struct ModelManager {
     status: Mutex<ModelStatus>,
     backend: Mutex<AccelerationBackend>,
     llama_process: Mutex<Option<std::process::Child>>,
-    /// Verified identity of the running llama-server process (PID, port, model id, health).
+    /// Verified identity of the running llama-server process (PID, port, model id).
     server_identity: Mutex<Option<ServerIdentity>>,
 }
 
@@ -478,8 +475,10 @@ impl ModelManager {
         if !health.status().is_success() {
             return Err(format!("Health endpoint returned {}", health.status()));
         }
-        let health_body: serde_json::Value = health
-            .json()
+        // Parsing the body validates the server answers with well-formed
+        // JSON; the payload itself carries no identity we consume.
+        health
+            .json::<serde_json::Value>()
             .await
             .map_err(|e| format!("Failed to parse health response: {}", e))?;
 
@@ -529,10 +528,8 @@ impl ModelManager {
         .map_err(|e| e.to_string())?;
 
         Ok(ServerIdentity {
-            port,
             pid: 0, // Filled in by start_server after spawn.
             model_id,
-            health: health_body,
         })
     }
 
@@ -825,7 +822,6 @@ impl ModelManager {
     /// Get the llama.cpp binary path for the current platform
     /// Uses manifest-informed directory structure (uppercase CUDA/CPU/VULKAN)
     /// Prefers CUDA > Vulkan > CPU based on detected hardware
-    #[allow(dead_code)]
     fn get_llama_binary_path(&self, vault_root: &str) -> PathBuf {
         let base_dir = if cfg!(target_os = "windows") {
             PathBuf::from(vault_root).join("RUNTIMES").join("WINDOWS")
@@ -883,7 +879,6 @@ impl ModelManager {
     /// Verifies server identity (health + /v1/models + model hash) before
     /// marking the model as LOADED. Any failure resets status to ERROR and
     /// kills the child process.
-    #[allow(dead_code)]
     pub async fn start_server(
         &self,
         config: &ModelConfig,
@@ -1144,7 +1139,6 @@ impl ModelManager {
     }
 
     /// Stop the llama-server process
-    #[allow(dead_code)]
     pub fn stop_server(&self) -> Result<(), String> {
         let mut process = self.llama_process.lock().unwrap();
         if let Some(ref mut child) = *process {
@@ -1160,7 +1154,6 @@ impl ModelManager {
     }
 
     /// Get current model status
-    #[allow(dead_code)]
     pub fn get_status(&self) -> ModelStatus {
         self.status.lock().unwrap().clone()
     }
@@ -1176,7 +1169,6 @@ impl ModelManager {
     }
 
     /// Set backend
-    #[allow(dead_code)]
     pub fn set_backend(&self, backend: AccelerationBackend) {
         *self.backend.lock().unwrap() = backend;
     }
@@ -2133,22 +2125,7 @@ pub async fn start_model_server(
     Ok(port)
 }
 
-/// D1: Send a chat completion request to llama-server. Async because it uses reqwest.
-#[tauri::command]
-pub async fn send_chat_completion(
-    request: InferenceRequest,
-    state: tauri::State<'_, ModelManagerState>,
-) -> Result<InferenceResponse, String> {
-    let port = *state
-        .server_port
-        .lock()
-        .map_err(|e| format!("State lock error: {}", e))?;
-    let manager = state.manager.lock().await;
-    let manager = manager.as_ref().ok_or("Model manager not initialized")?;
-    manager.send_completion(&request, port).await
-}
-
-/// D1: Proper health check using reqwest instead of raw TCP.
+/// Proper health check using reqwest instead of raw TCP.
 /// Tries the configured UnoOne port first, then falls back to Ollama on 11434.
 #[tauri::command]
 pub async fn check_model_health(
@@ -2219,52 +2196,6 @@ pub async fn stop_model_server(state: tauri::State<'_, ModelManagerState>) -> Re
         .lock()
         .map_err(|e| format!("State lock error: {}", e))? = 8342;
     Ok(())
-}
-
-/// Return only the directly managed, manifest-verified llama-server.
-/// Host-installed Ollama and LM Studio are deliberately not trusted fallbacks.
-#[tauri::command]
-pub async fn detect_inference_backend(
-    state: tauri::State<'_, ModelManagerState>,
-) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
-
-    let uno_port = *state
-        .server_port
-        .lock()
-        .map_err(|e| format!("State lock error: {}", e))?;
-    let identity = {
-        let manager_guard = state.manager.lock().await;
-        let manager = manager_guard
-            .as_ref()
-            .ok_or_else(|| "The UnoOne model server has not been started".to_string())?;
-        let verified_identity = manager
-            .server_identity
-            .lock()
-            .map_err(|e| format!("Identity lock error: {e}"))?
-            .clone()
-            .ok_or_else(|| "The UnoOne model server identity is not verified".to_string())?;
-        verified_identity
-    };
-
-    if let Ok(resp) = client
-        .get(format!("http://127.0.0.1:{uno_port}/v1/models"))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-    {
-        if resp.status().is_success() {
-            return Ok(serde_json::json!({
-                "backend": "llama-server",
-                "port": uno_port,
-                "url": format!("http://127.0.0.1:{uno_port}"),
-                "compatible": "openai",
-                "model_id": identity.model_id,
-            }));
-        }
-    }
-
-    Err("The managed UnoOne llama-server is not responding".to_string())
 }
 
 // ---------------------------------------------------------------------------

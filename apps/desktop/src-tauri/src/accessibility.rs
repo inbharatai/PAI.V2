@@ -50,13 +50,6 @@ pub struct DetectedObject {
     pub height: u32,
 }
 
-/// Camera frame info
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CameraInfo {
-    pub devices: Vec<CameraDevice>,
-    pub capture_backend: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CameraDevice {
     pub name: String,
@@ -443,51 +436,6 @@ pub(crate) fn enumerate_camera_devices() -> Result<Vec<CameraDevice>, String> {
         }
     }
     Ok(devices)
-}
-
-/// Camera info — enumerates available video capture devices.
-/// Actual frame capture uses the frontend WebView + getUserMedia API.
-/// Async since it shells out to PowerShell (seconds-long on the main thread
-/// otherwise — defect #23 family: sync commands freeze the UI thread).
-#[tauri::command]
-pub async fn get_camera_info() -> Result<CameraInfo, String> {
-    let devices =
-        tauri::async_runtime::spawn_blocking(crate::accessibility::enumerate_camera_devices)
-            .await
-            .map_err(|e| format!("Camera enumeration task failed: {e}"))??;
-    Ok(CameraInfo {
-        devices,
-        capture_backend: "webview-getUserMedia".to_string(),
-    })
-}
-
-/// Capture an image from a file path and return its base64-encoded content
-/// for vision/OCR processing via the local model.
-/// This is used when the user selects an image from the vault or takes a photo
-/// on mobile and syncs it to the desktop.
-#[tauri::command]
-pub fn encode_image_for_vision(image_path: String) -> Result<String, String> {
-    let path = PathBuf::from(&image_path);
-    if !path.exists() {
-        return Err(format!("Image file not found: {}", image_path));
-    }
-
-    let image_bytes = std::fs::read(&path).map_err(|e| format!("Failed to read image: {}", e))?;
-
-    // Determine MIME type from extension
-    let mime_type = match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        _ => "image/png",
-    };
-
-    let base64_data = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
-
-    // Return as data URI for direct use in vision requests
-    Ok(format!("data:{};base64,{}", mime_type, base64_data))
 }
 
 #[cfg(test)]

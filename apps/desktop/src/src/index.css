@@ -563,19 +563,6 @@ html, body, #root {
   height: 100%;
 }
 
-.recording-header-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 24px;
-}
-
-.recording-controls {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
 .record-btn {
   width: 56px;
   height: 56px;
@@ -718,13 +705,7 @@ html, body, #root {
   margin-bottom: 8px;
 }
 
-.memory-card-type.personal { background: rgba(124, 92, 255, 0.15); color: var(--accent); }
-.memory-card-type.preference { background: rgba(52, 211, 153, 0.15); color: var(--success); }
-.memory-card-type.conversation { background: rgba(251, 191, 36, 0.15); color: var(--warning); }
-.memory-card-type.task { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
 .memory-card-type.knowledge { background: rgba(244, 114, 182, 0.15); color: #f472b6; }
-.memory-card-type.accessibility { background: rgba(251, 146, 60, 0.15); color: #fb923c; }
-.memory-card-type.skill { background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
 
 .memory-card-title {
   font-size: 14px;
@@ -1014,10 +995,6 @@ html, body, #root {
 
 .setup-step.active {
   background: var(--accent);
-}
-
-.setup-step.completed {
-  background: var(--success);
 }
 
 .recovery-key-box {
