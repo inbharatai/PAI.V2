@@ -665,7 +665,8 @@ impl Default for RunProcessTool {
     fn default() -> Self {
         let mut built = manifest(
             "process.run",
-            "Run one allowlisted program with direct argv in the configured root",
+            "Run one allowlisted program with direct argv in the configured root; \
+             background:true spawns it detached with a pid (for servers)",
             CapabilitySet::from_slice(&[Capability::ProcessSpawn]),
             vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
             SideEffect::Process,
@@ -689,10 +690,10 @@ impl Tool for RunProcessTool {
     }
 
     fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
-        if arguments.len() != 2 {
+        if arguments.len() < 2 || arguments.len() > 3 {
             return Err(Failure::invalid(
                 "tool.arguments",
-                "expected only program and args",
+                "expected only program, args and the optional background flag",
             ));
         }
         let _program = argument_string(arguments, "program")?;
@@ -703,6 +704,15 @@ impl Tool for RunProcessTool {
             return Err(Failure::invalid(
                 "tool.arguments",
                 "args must be a bounded string array",
+            ));
+        }
+        if arguments
+            .get("background")
+            .is_some_and(|background| !matches!(background, Value::Bool(_)))
+        {
+            return Err(Failure::invalid(
+                "tool.arguments",
+                "background must be a boolean",
             ));
         }
         Ok(())
@@ -722,6 +732,27 @@ impl Tool for RunProcessTool {
                 .collect(),
             _ => Vec::new(),
         };
+        // Defect #38 (live-caught 2026-09-15): a server never exits, so a
+        // foreground run is killed at the deadline — background:true spawns
+        // the child detached instead, returning immediately with its PID.
+        if matches!(arguments.get("background"), Some(Value::Bool(true))) {
+            let spec = ProcessSpec::new(program, args);
+            let spawn = context.execution.spawn_detached(&spec, context.cancel)?;
+            let pid = spawn.pid.unwrap_or(0);
+            let value = Value::Object(BTreeMap::from([
+                ("background".to_owned(), Value::Bool(true)),
+                ("pid".to_owned(), Value::Integer(i64::from(pid))),
+            ]));
+            return Ok(ToolOutput {
+                model_content: format!(
+                    "started in background (pid {pid}); output is not captured — check the \
+                     effect itself (e.g. browser.act to the served URL), and stop it later by \
+                     pid"
+                ),
+                value,
+                presentation: BTreeMap::from([("kind".to_owned(), "process".to_owned())]),
+            });
+        }
         // Plumb the manifest's output cap AND deadline into the process spec
         // so the pipe reader cap, the post-hoc output check (in ToolDispatch)
         // and the subprocess kill-timer all enforce the SAME limits — instead
@@ -1237,6 +1268,73 @@ mod tests {
             message.contains("subprocess deadline exceeded"),
             "the deadline must come from the manifest, got: {message}"
         );
+        Ok(())
+    }
+
+    /// Defect #38 (live-caught 2026-09-15): a foreground `node server.js`
+    /// deploy hit the 180s deadline because a server never exits. The
+    /// background:true lane must return immediately with the pid, without
+    /// waiting for (or killing) the child.
+    #[test]
+    fn process_run_background_returns_pid_immediately() -> HarnessResult<()> {
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd",
+            vec!["/C".to_owned(), "ping -n 30 -w 1000 127.0.0.1".to_owned()],
+        );
+        #[cfg(unix)]
+        let (program, args) = ("sh", vec!["-c".to_owned(), "sleep 30".to_owned()]);
+        let tool = RunProcessTool::default();
+        let root_fs = crate::execution::RootedFs::new(".")?;
+        let broker = crate::execution::LocalExecutionBroker::new(root_fs, vec![program.to_owned()]);
+        let cancel = CancellationToken::new();
+        let arguments: ToolArguments = [
+            ("program", Value::String(program.to_owned())),
+            (
+                "args",
+                Value::Array(args.into_iter().map(Value::String).collect()),
+            ),
+            ("background", Value::Bool(true)),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect();
+        let context = ToolContext {
+            actor: "actor",
+            level: ExecutionLevel::L3,
+            execution: &broker,
+            cancel: &cancel,
+        };
+        let started = std::time::Instant::now();
+        let output = tool.execute(&arguments, &context)?;
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "background run blocked for {:?} — it must return immediately",
+            started.elapsed()
+        );
+        assert!(
+            output.model_content.contains("started in background"),
+            "the model must learn the spawn is background, got: {}",
+            output.model_content
+        );
+        let pid = match output
+            .value
+            .as_object()
+            .and_then(|object| object.get("pid"))
+        {
+            Some(Value::Integer(pid)) => *pid,
+            _ => 0,
+        };
+        assert!(pid > 0, "the model must learn the pid, got {pid}");
+        // Reap the child so the test leaves no stray process behind.
+        #[cfg(windows)]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status();
+        #[cfg(unix)]
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
         Ok(())
     }
 }
