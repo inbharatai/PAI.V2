@@ -73,7 +73,42 @@ impl DesktopVaultState {
     }
 }
 
+/// Defect #41 (live-caught 2026-09-15): Tauri requires webviews whose
+/// `additionalBrowserArgs` differ to use different data directories. The
+/// defect #21 fix set per-window `additionalBrowserArgs` in tauri.conf.json,
+/// so the main window's WebView2 environment ran with
+/// `--autoplay-policy=no-user-gesture-required` while every runtime-created
+/// window (the browser-workspace the BrowserWorkspace UI and the agent's
+/// browser.act lane open) resolved wry's default arguments — a conflicting
+/// environment on the SAME user-data folder. Live-verified consequence: the
+/// runtime-created window registered in Tauri but its WebView2 content never
+/// started (no OS window, no CDP target, evals never answer) — every browser
+/// session since 2026-09-14 bound to a dead shell.
+///
+/// The WebView2 loader appends `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` to
+/// EVERY environment it creates in this process, so setting the autoplay
+/// policy here (instead of per-window) gives all windows an identical
+/// argument set: one shared browser process, and defect #21's autoplay
+/// policy keeps working everywhere — including the browser workspace, which
+/// the per-window override never covered. Must run before Tauri creates the
+/// first webview. Any existing value (e.g. a live-test remote-debugging
+/// flag) is preserved and extended, not replaced.
+fn ensure_webview2_browser_args() {
+    const AUTOPLAY: &str = "--autoplay-policy=no-user-gesture-required";
+    let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+    if existing.contains("autoplay-policy") {
+        return;
+    }
+    let combined = if existing.trim().is_empty() {
+        AUTOPLAY.to_owned()
+    } else {
+        format!("{existing} {AUTOPLAY}")
+    };
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", combined);
+}
+
 fn main() {
+    ensure_webview2_browser_args();
     let startup_state = startup::StartupCoordinator::from_process_args();
     let vault_state = DesktopVaultState {
         vault: Arc::new(Mutex::new(None)),

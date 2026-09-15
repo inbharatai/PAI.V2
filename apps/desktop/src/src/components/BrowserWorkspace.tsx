@@ -59,7 +59,10 @@ export function BrowserWorkspace() {
       const existing = await WebviewWindow.getByLabel(WEBVIEW_LABEL).catch(() => null);
       if (existing) {
         setSessionActive(true);
-        await existing.setFocus();
+        // Focus is a nicety (defect #18), never a gate: an awaited setFocus
+        // failure used to abort the whole reuse path after the session was
+        // already reported active.
+        void existing.setFocus().catch(() => {});
         return true;
       }
       const webview = new WebviewWindow(WEBVIEW_LABEL, {
@@ -81,7 +84,7 @@ export function BrowserWorkspace() {
         webview.once('tauri://created', () => {
           setSessionActive(true);
           void injectBridge();
-          void webview.setFocus();
+          void webview.setFocus().catch(() => {});
           resolve(true);
         });
       });
