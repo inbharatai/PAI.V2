@@ -462,6 +462,12 @@ pub async fn agent_chat(
             temperature: Some(0.7),
             stop_sequences: None,
             tools: Some(tool_definitions.clone()),
+            // Reasoning stays ON for the agent loop (unchanged behavior):
+            // multi-step tool selection benefits from it, and the loop has
+            // its own 240 s deadline. The harness lane (llama_local.rs) runs
+            // its tool calls think-off with temperature 0.2 — unifying the
+            // two policies is a deliberate follow-up, not a silent change.
+            disable_reasoning: None,
         };
 
         let port = *model_state

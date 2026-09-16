@@ -182,6 +182,11 @@ pub async fn perform_ocr(
         temperature: Some(0.1), // Low temperature for accurate transcription
         stop_sequences: None,
         tools: None,
+        // Think-off (Gap 2b, 2026-09-16): the prompt demands transcription
+        // ONLY, so chain-of-thought can only add latency. Measured live on
+        // the describe lane, same template: 44.6 s -> 5.7 s with comparable
+        // answer length — OCR is the same shape of call.
+        disable_reasoning: Some(true),
     };
 
     let port = *model_state
@@ -303,6 +308,14 @@ pub async fn describe_image(
         temperature: Some(prompt.temperature),
         stop_sequences: None,
         tools: None,
+        // Think-off (Gap 2b, 2026-09-16): the single biggest latency win in
+        // the blind-aid lane. Live A/B on the staged drive, this exact
+        // scene_summary prompt shape: think-on 376 completion tokens /
+        // 44.6 s wall; think-off 55 tokens / 5.7 s — ~8x faster with
+        // comparable answer length (215 -> 245 chars) and zero
+        // reasoning_content. A blind user presses "What's in front of me?"
+        // and this is the difference between waiting ~45 s and ~6 s.
+        disable_reasoning: Some(true),
     };
 
     let port = *model_state
@@ -323,13 +336,22 @@ pub async fn describe_image(
     // surface as success — the blind-aid lane would speak nothing and look
     // healthy. Gemma 4 can spend the whole token budget on reasoning_content
     // (e.g. when the budget is too small or sampling runs long); that is an
-    // error the user must hear about, not silence.
+    // error the user must hear about, not silence. Gap 4: the extracted
+    // `reasoning` field now tells the two failure shapes apart so the error
+    // says what actually happened.
     if response.text.trim().is_empty() {
-        return Err(
-            "The model returned no visible description (its reasoning consumed the token \
-             budget). Try again, or raise the description token budget."
+        let detail = match &response.reasoning {
+            Some(r) => format!(
+                "The model returned no visible description (its reasoning consumed the \
+                 token budget — {} reasoning chars were produced but no answer). Try \
+                 again, or raise the description token budget.",
+                r.len()
+            ),
+            None => "The model returned no visible description and no reasoning — \
+                     the completion came back empty. Try again."
                 .to_string(),
-        );
+        };
+        return Err(detail);
     }
 
     Ok(BlindViewResult {
