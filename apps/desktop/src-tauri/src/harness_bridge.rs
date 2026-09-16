@@ -47,6 +47,16 @@ pub struct HarnessChatResult {
     pub memory_namespace: String,
 }
 
+/// Gap 1 (2026-09-16): one generated token of a plain (tool-free) chat
+/// answer, streamed to the chat panel as it is produced. The adapter's
+/// token tap forwards each SSE delta; `conversation_id` lets the UI ignore
+/// tokens from a conversation it is no longer showing.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ChatTokenEvent {
+    pub conversation_id: String,
+    pub delta: String,
+}
+
 /// One live-activity line streamed to the chat panel while the agent runs.
 /// Live-caught 2026-09-14 (user directive: "the chat panel should show what
 /// it is doing, what codes it's writing — like Codex/GLM"): a multi-file
@@ -2282,12 +2292,30 @@ pub async fn harness_chat(
     }
     let browser = Arc::clone(browser_state.inner());
     let (attachment_metadata, attachment_bytes) = attachments;
+    // Gap 1 (2026-09-16): live token tap for the chat UI. Tool-free model
+    // turns stream their answer token-by-token as `chat-token` events; the
+    // adapter keeps tool-bearing (agentic) turns buffered, so the event only
+    // ever carries a plain answer being generated — never tool activity.
+    let chat_token_app = app.clone();
 
     tokio::task::spawn_blocking(move || {
         let mut model_builder = PaiLlamaLocalProvider::new(model_id.clone(), port)
             .map_err(|error| error.to_string())?;
         for (id, media_type, base64_bytes) in &attachment_bytes {
             model_builder = model_builder.with_attachment(id, media_type, base64_bytes);
+        }
+        {
+            let emitter_app = chat_token_app.clone();
+            let emitter_conversation = conversation_id.clone();
+            model_builder = model_builder.with_token_emitter(Arc::new(move |delta| {
+                let _ = emitter_app.emit(
+                    "chat-token",
+                    ChatTokenEvent {
+                        conversation_id: emitter_conversation.clone(),
+                        delta: delta.to_owned(),
+                    },
+                );
+            }));
         }
         let model = Arc::new(model_builder);
         let memory = Arc::new(
