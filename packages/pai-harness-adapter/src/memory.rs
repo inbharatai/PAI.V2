@@ -1,6 +1,6 @@
 use inbharat_harness_core::{
-    ErrorCode, Failure, FailureClass, HarnessResult, MemoryCapabilities, MemoryProvider,
-    MemoryQuery, MemoryRecord, MemoryScope,
+    CancellationToken, ErrorCode, Failure, FailureClass, HarnessResult, MemoryCapabilities,
+    MemoryProvider, MemoryQuery, MemoryRecord, MemoryScope,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -47,6 +47,16 @@ impl Default for PaiVaultMemoryProviderConfig {
 pub struct PaiVaultMemoryProvider {
     vault: Arc<Mutex<Option<Vault>>>,
     config: PaiVaultMemoryProviderConfig,
+    /// Gap 5 (2026-09-16): optional model-backed rerank of lexical search
+    /// hits (see `with_lexical_rerank`). None keeps the pure lexical order.
+    lexical_rerank: Option<LexicalRerank>,
+}
+
+/// Gap 5 (2026-09-16): the local model endpoint used to rerank lexical
+/// memory hits — the same verified llama-server the chat plane runs on.
+pub(crate) struct LexicalRerank {
+    model_id: String,
+    port: u16,
 }
 
 impl std::fmt::Debug for PaiVaultMemoryProvider {
@@ -55,6 +65,7 @@ impl std::fmt::Debug for PaiVaultMemoryProvider {
             .field("origin_platform", &self.config.origin_platform)
             .field("origin_device_id", &self.config.origin_device_id)
             .field("max_scan_records", &self.config.max_scan_records)
+            .field("lexical_rerank", &self.lexical_rerank.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -111,7 +122,125 @@ impl PaiVaultMemoryProvider {
             ));
         }
         config.max_scan_records = config.max_scan_records.clamp(1, HARD_MAX_REPAIR_RECORDS);
-        Ok(Self { vault, config })
+        Ok(Self {
+            vault,
+            config,
+            lexical_rerank: None,
+        })
+    }
+
+    /// Gap 5 (2026-09-16): install the model-backed rerank. When set,
+    /// text-search results with three or more lexical hits are reordered by
+    /// one small think-off completion on the verified local model
+    /// ("which of these notes is most relevant to the query") before the
+    /// harness injects them into the agent context. Fail-open by design: any
+    /// rerank error keeps the lexical order — retrieval quality must never
+    /// regress below today's behavior.
+    #[must_use]
+    pub fn with_lexical_rerank(mut self, model_id: impl Into<String>, port: u16) -> Self {
+        let model_id = model_id.into();
+        if port != 0 && !model_id.trim().is_empty() {
+            self.lexical_rerank = Some(LexicalRerank { model_id, port });
+        }
+        self
+    }
+
+    /// One bounded think-off rerank call against the local model. Reorders
+    /// `hits` in place (most relevant first) using the model's index ranking;
+    /// every failure path returns with the order unchanged.
+    fn rerank_lexical_hits(&self, query_text: &str, hits: &mut [MemoryRecord]) {
+        let Some(rerank) = &self.lexical_rerank else {
+            return;
+        };
+        // Below three hits there is nothing worth a model call to reorder.
+        if hits.len() < 3 {
+            return;
+        }
+        const CANDIDATES: usize = 8;
+        const EXCERPT_CHARS: usize = 200;
+
+        let mut prompt = format!(
+            "Query: {}\n\nResults:\n",
+            query_text.chars().take(400).collect::<String>()
+        );
+        for (index, record) in hits.iter().take(CANDIDATES).enumerate() {
+            let excerpt: String = record
+                .content
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(EXCERPT_CHARS)
+                .collect();
+            prompt.push_str(&format!("{}. {}\n", index + 1, excerpt));
+        }
+        prompt.push_str("\nRank the results by relevance to the query.");
+
+        let body = serde_json::json!({
+            "model": rerank.model_id,
+            "messages": [
+                {"role": "system", "content": "You rank search results by relevance to a query. Reply with ONLY the result numbers, most relevant first, separated by commas (for example: 3,1,2). Never output anything else."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 96,
+            "temperature": 0.1,
+            "stream": false,
+            "cache_prompt": true,
+            "chat_template_kwargs": { "enable_thinking": false },
+            "reasoning_budget": 0,
+        });
+        let request_bytes = match serde_json::to_vec(&body) {
+            Ok(bytes) => bytes,
+            Err(_) => return,
+        };
+        let cancel = CancellationToken::new();
+        // Bounded hard: the memory trait has no cancellation channel, so the
+        // call must never outlive this short deadline. On any failure the
+        // lexical order stands.
+        let response = match crate::llama_local::post_json_localhost(
+            rerank.port,
+            &request_bytes,
+            std::time::Duration::from_secs(30),
+            &cancel,
+        ) {
+            Ok(response) => response,
+            Err(_) => return,
+        };
+        if !(200..300).contains(&(response.status as usize)) {
+            return;
+        }
+        let payload: serde_json::Value = match serde_json::from_slice(&response.body) {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let ranking_text = payload
+            .pointer("/choices/0/message/content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        // Parse "3,1,2" (tolerant of prose around the numbers) into a stable
+        // 1-based index order, then apply it: ranked hits first (in the
+        // model's order), then everything the model did not list, lexical.
+        let mut order: Vec<usize> = Vec::with_capacity(CANDIDATES);
+        for token in ranking_text.split(|c: char| !c.is_ascii_digit()) {
+            if token.is_empty() {
+                continue;
+            }
+            let Ok(one_based) = token.parse::<usize>() else {
+                continue;
+            };
+            let zero_based = one_based.saturating_sub(1);
+            if zero_based < hits.len() && !order.contains(&zero_based) {
+                order.push(zero_based);
+            }
+        }
+        if order.is_empty() {
+            return;
+        }
+        let mut remaining: Vec<usize> = (0..hits.len())
+            .filter(|index| !order.contains(index))
+            .collect();
+        order.append(&mut remaining);
+        let reordered: Vec<MemoryRecord> =
+            order.into_iter().map(|index| hits[index].clone()).collect();
+        hits.clone_from_slice(&reordered);
     }
 
     fn with_vault<R>(
@@ -674,12 +803,17 @@ impl MemoryProvider for PaiVaultMemoryProvider {
             Ok(recent)
         } else {
             ranked.sort_by_key(|(score, record)| (Reverse(*score), record.id.clone()));
-            Ok(ranked
+            let mut hits: Vec<MemoryRecord> = ranked
                 .into_iter()
                 .filter(|(score, _)| *score > 0)
                 .map(|(_, record)| record)
                 .take(query.limit.min(64))
-                .collect())
+                .collect();
+            // Gap 5: after the lexical filter, one bounded model call
+            // reorders the hits by real relevance. Fail-open — the lexical
+            // order above is returned untouched on any rerank failure.
+            self.rerank_lexical_hits(&query.text, &mut hits);
+            Ok(hits)
         }
     }
 
@@ -933,5 +1067,65 @@ mod tests {
             })
             .unwrap()
             .is_empty());
+    }
+
+    /// Gap 5 fail-open contract: the rerank is a quality boost layered on the
+    /// lexical search, never a dependency. A dead model endpoint (or a model
+    /// that answers garbage) must leave the proven lexical order untouched,
+    /// and search must still succeed.
+    #[test]
+    fn rerank_failure_keeps_lexical_order_and_search_succeeds() {
+        let (_temp, provider) = provider();
+        // A port with no listener: the rerank call fails, the lexical hits
+        // still come back. Port 1 is reserved and never a llama-server.
+        let provider = provider.with_lexical_rerank("test-model", 1);
+        for (id, content) in [
+            ("memory-1", "alpha cardamom notes"),
+            ("memory-2", "beta cardamom notes"),
+            ("memory-3", "gamma cardamom notes"),
+        ] {
+            provider
+                .store(memory(id, MemoryScope::Relevant, "vault-a", content))
+                .unwrap();
+        }
+        let found = provider
+            .search(&MemoryQuery {
+                scope: MemoryScope::Relevant,
+                namespace: Some("vault-a".to_owned()),
+                text: "cardamom".to_owned(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(found.len(), 3);
+        let ids: Vec<&str> = found.iter().map(|record| record.id.as_str()).collect();
+        assert_eq!(ids, ["memory-1", "memory-2", "memory-3"]);
+    }
+
+    /// A disabled rerank (empty model id, or port 0) is a plain no-op, and
+    /// below three hits the model is never called even when configured.
+    #[test]
+    fn rerank_is_noop_when_disabled_or_below_threshold() {
+        let (_temp, provider) = provider();
+        let provider = provider
+            .with_lexical_rerank("", 8080)
+            .with_lexical_rerank("m", 0);
+        provider
+            .store(memory(
+                "memory-1",
+                MemoryScope::Relevant,
+                "vault-a",
+                "alpha cardamom notes",
+            ))
+            .unwrap();
+        let found = provider
+            .search(&MemoryQuery {
+                scope: MemoryScope::Relevant,
+                namespace: Some("vault-a".to_owned()),
+                text: "cardamom".to_owned(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "memory-1");
     }
 }

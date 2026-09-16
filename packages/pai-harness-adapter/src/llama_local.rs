@@ -654,12 +654,14 @@ const HTTP_IO_POLL: Duration = Duration::from_millis(150);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-struct LocalHttpResponse {
-    status: u16,
-    body: Vec<u8>,
+pub(crate) struct LocalHttpResponse {
+    pub(crate) status: u16,
+    pub(crate) body: Vec<u8>,
 }
 
-fn post_json_localhost(
+/// Buffered localhost completion POST. Also used by the memory provider's
+/// Gap 5 lexical rerank (same verified server, one small think-off call).
+pub(crate) fn post_json_localhost(
     port: u16,
     body: &[u8],
     timeout: Duration,
