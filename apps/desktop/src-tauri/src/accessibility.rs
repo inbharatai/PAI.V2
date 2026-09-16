@@ -226,10 +226,22 @@ pub struct DescribePrompt {
 ///   used by the Vision Lab's Describe Image button.
 pub fn describe_prompt_for(mode: &str) -> DescribePrompt {
     if mode == "scene_summary" {
+        // Live-caught 2026-09-16 (defect #44): Gemma 4 emits chain-of-thought
+        // into `reasoning_content` before the visible answer. With the old
+        // 320-token cap the reasoning alone hit the budget (finish_reason
+        // "length") and `content` came back EMPTY — the whole blind-aid
+        // describe lane silently spoke nothing. Measured on the live staged
+        // drive: reasoning + a 60-word answer needs ~620 completion tokens,
+        // so 1024 leaves sampling headroom. Speakable length stays enforced
+        // by the prompt ("under 60 words"), not by this cap.
         DescribePrompt {
-            system_prompt: "You are a blind navigation assistant. Describe what the camera shows in 2 to 4 short sentences: the main objects in front of the user and where they are (left, centre, right, near, far), any text visible, and anything the user might need to avoid or attend to. Write plain spoken sentences with no headings, no lists, and never mention that you are an AI or that this is an image or camera feed. Keep the whole reply under 60 words.".to_string(),
+            // "Answer immediately in one breath" is measured, not stylistic: on
+            // the live drive it cut total completion tokens 619 -> 385 (~30%
+            // faster wall-clock for the narration loop) with identical
+            // answer quality, because Gemma spends fewer tokens on planning.
+            system_prompt: "You are a blind navigation assistant. Describe what the camera shows in 2 to 4 short sentences: the main objects in front of the user and where they are (left, centre, right, near, far), any text visible, and anything the user might need to avoid or attend to. Answer immediately in one breath — no planning, no preamble, no headings, no lists, and never mention that you are an AI or that this is an image or camera feed. Keep the whole reply under 60 words.".to_string(),
             user_prompt: "What is in front of me right now?".to_string(),
-            max_tokens: 320,
+            max_tokens: 1024,
             temperature: 0.3,
         }
     } else {
@@ -306,6 +318,19 @@ pub async fn describe_image(
         .send_completion(&request, port)
         .await
         .map_err(|e| format!("Image description failed: {}", e))?;
+
+    // Live-caught 2026-09-16 (defect #44): an empty visible reply must never
+    // surface as success — the blind-aid lane would speak nothing and look
+    // healthy. Gemma 4 can spend the whole token budget on reasoning_content
+    // (e.g. when the budget is too small or sampling runs long); that is an
+    // error the user must hear about, not silence.
+    if response.text.trim().is_empty() {
+        return Err(
+            "The model returned no visible description (its reasoning consumed the token \
+             budget). Try again, or raise the description token budget."
+                .to_string(),
+        );
+    }
 
     Ok(BlindViewResult {
         description: response.text,
@@ -393,8 +418,9 @@ pub async fn capture_screen_snapshot(app: tauri::AppHandle) -> Result<String, St
     .map_err(|e| format!("Screen capture task failed: {e}"))?
 }
 
-/// Blocking camera-device enumeration via PowerShell Get-PnpDevice. Shared
-/// by the get_camera_info command and the capability profile's vision probe.
+/// Blocking camera-device enumeration via PowerShell Get-PnpDevice. Used by
+/// the capability profile's vision probe (camera capture itself is WebView-side
+/// getUserMedia — there is no backend camera command).
 pub(crate) fn enumerate_camera_devices() -> Result<Vec<CameraDevice>, String> {
     let mut devices = Vec::new();
     if cfg!(target_os = "windows") {
@@ -517,7 +543,13 @@ mod tests {
     fn describe_prompt_for_scene_summary_is_short_and_spoken_style() {
         let scene = describe_prompt_for("scene_summary");
         assert_eq!(scene.user_prompt, "What is in front of me right now?");
-        assert!(scene.max_tokens <= 320, "scene summary must stay speakable");
+        // Defect #44: the cap must cover reasoning_content (~550 tokens on the
+        // live drive) plus the spoken answer, or `content` comes back empty.
+        // Speakable length is enforced by the prompt's word limit, not here.
+        assert!(
+            scene.max_tokens >= 1024,
+            "scene summary budget must cover reasoning plus the answer"
+        );
         assert!(
             scene.temperature < 0.7,
             "narration should be consistent, not creative"
