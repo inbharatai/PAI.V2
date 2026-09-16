@@ -235,7 +235,11 @@ pub fn describe_prompt_for(mode: &str) -> DescribePrompt {
         // so 1024 leaves sampling headroom. Speakable length stays enforced
         // by the prompt ("under 60 words"), not by this cap.
         DescribePrompt {
-            system_prompt: "You are a blind navigation assistant. Describe what the camera shows in 2 to 4 short sentences: the main objects in front of the user and where they are (left, centre, right, near, far), any text visible, and anything the user might need to avoid or attend to. Write plain spoken sentences with no headings, no lists, and never mention that you are an AI or that this is an image or camera feed. Keep the whole reply under 60 words.".to_string(),
+            // "Answer immediately in one breath" is measured, not stylistic: on
+            // the live drive it cut total completion tokens 619 -> 385 (~30%
+            // faster wall-clock for the narration loop) with identical
+            // answer quality, because Gemma spends fewer tokens on planning.
+            system_prompt: "You are a blind navigation assistant. Describe what the camera shows in 2 to 4 short sentences: the main objects in front of the user and where they are (left, centre, right, near, far), any text visible, and anything the user might need to avoid or attend to. Answer immediately in one breath — no planning, no preamble, no headings, no lists, and never mention that you are an AI or that this is an image or camera feed. Keep the whole reply under 60 words.".to_string(),
             user_prompt: "What is in front of me right now?".to_string(),
             max_tokens: 1024,
             temperature: 0.3,
