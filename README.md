@@ -17,7 +17,7 @@ copy.
 | **UI** | Jetpack Compose | Tauri 2 + React 19 |
 | **Storage** | Room cache → USB vault | RAM → USB vault |
 | **Voice** | Sherpa-ONNX STT/TTS | InBharat Audio (Qwen3-ASR / omnivoice, acceptance-gated) with legacy Whisper/Piper as the explicit policy fallback |
-| **Eyes-free** | TalkBack, Blind Aid, Camera OCR | Screen reader, high-contrast, OCR |
+| **Eyes-free** | TalkBack, Blind Aid, Camera OCR | Screen reader, high-contrast, OCR, camera blind-aid describe + narration |
 
 The release identity is not a drive letter, volume label, or USB VID/PID.
 Every host must validate `manifest.json`, `VERSION`, `VAULT/identity/vault.id`,
@@ -70,6 +70,27 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 - Windows bundle CI builds `UnoOnePower.exe`, `UnoOneDock.exe`, and
   `Start UnoOne.exe` together and publishes their SHA-256 sums as one artifact.
 
+### Desktop agent lane (live-verified on the staged drive 2026-09-14/15)
+
+- Chat goes through the **harness bridge** (`harness_bridge.rs` → vendored
+  `inbharat-harness`): a routing planner (L0 deterministic fast path /
+  L1 model / L3 full agent loop with a 48-step budget), model-visible
+  capability contract, audited tool calls, and per-step transcripts in the UI.
+- **Tool surface (FullAccess permission, default ON):** `fs.read/write/list`
+  with exact size/count metadata, `process.run` with allowlisted direct-argv
+  execution and 10 s foreground deadlines (background deploys supported),
+  `workspace.search` (content grep) and `workspace.patch` (anchored edits),
+  `browser.act` typed browser actions over the audited WebView bridge, and
+  `agent.spawn` sub-agents (Codex/GLM-style multi-agent lane).
+- **Vision attachments:** chat can attach images through the audited
+  attachment pipeline (mmproj vision), with CSP-permitted previews.
+- **Browser lane:** the agent opens and drives a real frontend-created
+  WebView window (`github.com`, `google.com` verified live), with
+  session-aware status, focus ACL, and truthful no-browser refusals.
+- Honest-failure design throughout: sub-agent timeouts, tool failures, and
+  budget exhaustion surface in the UI instead of silent fallbacks. Evidence:
+  `docs/verification/2026-09-14/` and `2026-09-15/` (docs 105–116).
+
 ### Android Pocket AI attachment
 
 - The existing UnoOne app handles the physical prototype's USB attach/detach
@@ -82,7 +103,7 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 
 | Component | Status |
 |-----------|--------|
-| Physical Pocket AI | **INTEGRITY-VERIFIED PROTOTYPE** — integrity-verified 2026-08-26 (source staged from main `20d0627`): Power `d194e662…`, Dock `5d5e9a4f…`, Starter `106d9b2d…`; strict 545/545 declared assets (size + SHA-256), starter `--verify-only` exit 0; manifest schema `2`, `pai_version 0.5.0-alpha`. Facts: `docs/verification/2026-07-30/54_LIVE_POCKET_AI_AUDIT.md` + `docs/verification/2026-08-01/` |
+| Physical Pocket AI | **INTEGRITY-VERIFIED PROTOTYPE** — integrity-verified 2026-09-15 (source staged from main `534cf6a`): Power `778C74A7…`, Dock `F60BC96D…`, Starter `AA843F75…`; strict 558/558 declared assets (size + SHA-256: 3 apps, 158 runtimes, 2 desktop models, 381 voice assets, 12 speech assets, 2 mobile models); starter `--verify-only` exit 0; manifest schema `2`, `pai_version 0.5.0-alpha`. Live acceptance 2026-09-14/15 (defects #6–#43 fixed + re-verified on the drive): `docs/verification/2026-09-14/` + `docs/verification/2026-09-15/` (docs 105–116) |
 | Desktop frontend embedding | **VERIFIED** — root cause of the historic "localhost refused to connect" drive is fixed (`tauri/custom-protocol` default feature; without it `generate_context!` embeds zero assets). Byte-level gate passes in CI and on the staged drive binary |
 | Mobile app (Android) | V2 agent pipeline + Pocket AI USB auto-open; M1-M3 truthful fixes (USB detection reasons, Room TTL/clear-on-detach cache, unused permission removed). Compiles, lints, tests, and `assembleDebug` passes; **cross-platform vault contract proven bidirectionally in CI** (Kotlin↔Rust Argon2id + AES-GCM record layer AND XChaCha20 master-key wrap — `packages/vault-core/test-vectors/`, `VaultCryptoCrossPlatformTest`). Physical phone test pending |
 | Desktop frontend (React) | BUILDS — Vite build passes, oxlint clean, real Tauri API calls, no mock data |
@@ -91,7 +112,7 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 | Vault encryption (`packages/vault-core`) | IMPLEMENTED AND CORRECTNESS-HARDENED — Argon2id (256 MiB / t=3 / p=4) + AES-256-GCM for new records (legacy XChaCha20-Poly1305 stays readable, identified by nonce length) + HKDF-SHA-256 + BIP-39 recovery + write-ahead journal; transactional first-use setup refuses re-initialisation and preserves packaged `vault.id` bytes. Per-vault random salts on both the password and recovery paths. The KDF parameters are pinned as a cross-platform contract with the Kotlin `encrypted-vault` package (`SPEC_ARGON2_*` plus a `const` assertion that makes drift a compile error in release builds), because the test profile deliberately uses reduced parameters and would not catch a change that broke Android↔Windows unlock. **Wave 1** additionally fixed four release blockers: header slot selection now picks the newest committed generation (a password change written to the inactive slot used to be silently discarded on restart), record metadata is authenticated and re-verified on every read (privacy level, tombstone, type, revision and timestamps were previously editable on disk while content still decrypted), record writes are wrapped in real journal transactions with fsync-and-verify before promotion, and record IDs must be canonical UUID v4 before touching a path |
 | Model inference | Bundled llama.cpp only; direct runtime test verified (real answer, 127.0.0.1-only, clean stop) — see `docs/verification/2026-07-30/59_DIRECT_GEMMA.md` |
 | Offline voice | VERIFIED pipeline — bundled Piper synth → bundled Whisper transcribe round trip is verbatim; see `docs/verification/2026-07-30/62_OFFLINE_VOICE.md` |
-| InBharat Audio speech plane | ACCEPTANCE-GATED + DEPLOYED 2026-08-26 — `vendor/Inbharat-audiocpp/` (audio.cpp @ `26dcb5c4`); Qwen3-ASR-0.6B Q8_0 + omnivoice Q8_0 GGUF deployed at `SPEECH/models/`; deployed `audiocpp_cli` runs real ASR (exit 0) + TTS (exit 0, 24 kHz); 30/30 hash-bound acceptance gate green (re-hash of 2 CLIs + 2 models). **Speech-architecture hardening (2026-09):** the production Tauri voice path now goes through a `SpeechRouter` (`apps/desktop/src-tauri/src/speech.rs`) with the explicit `InbharatAudioThenLegacy` policy — production code never talks to a backend module directly. The InBharat route hash-verifies its CLIs/models before first execution and reports buffered-final (not stateful-streaming) semantics; the legacy Whisper/Piper route is wrapped behind the same trait, gains binary/model hash verification, deadline timeouts, and `error:` separation from transcript text. Language tags are canonicalized through the shared `packages/speech-contracts` table (`languages.v1.json`), byte-sync-checked against the Android `VoiceLanguage` mirror by `scripts/check_speech_language_sync.py` in CI; Assamese (`as-IN`) routes only to the IndicConformer family and fails closed when its assets are absent — it is never served by Qwen3 |
+| InBharat Audio speech plane | ACCEPTANCE-GATED + DEPLOYED 2026-08-26 — `vendor/Inbharat-audiocpp/` (audio.cpp @ `26dcb5c4`); Qwen3-ASR-0.6B Q8_0 + omnivoice Q8_0 GGUF deployed at `SPEECH/models/`; deployed `audiocpp_cli` runs real ASR (exit 0) + TTS (exit 0, 24 kHz); 30/30 hash-bound acceptance gate green (re-hash of 2 CLIs + 2 models). **Speech-architecture hardening (2026-09):** the production Tauri voice path now goes through a `SpeechRouter` (`apps/desktop/src-tauri/src/speech.rs`) with the explicit `InbharatAudioThenLegacy` policy — production code never talks to a backend module directly. The InBharat route hash-verifies its CLIs/models before first execution and reports buffered-final (not stateful-streaming) semantics; the legacy Whisper/Piper route is wrapped behind the same trait, gains binary/model hash verification, deadline timeouts, and `error:` separation from transcript text. Language tags are canonicalized through the shared `packages/speech-contracts` table (`languages.v1.json`), byte-sync-checked against the Android `VoiceLanguage` mirror by `scripts/check_speech_language_sync.py` in CI; Assamese (`as-IN`) routes only to the IndicConformer family and fails closed when its assets are absent — it is never served by Qwen3. **Live speech matrix on the staged drive 2026-09-15: 19/19 pass** — OmniVoice TTS speaks 15 languages, Qwen3-ASR understands en/hi/hinglish (hinglish transcribes back as correct Hindi in Devanagari), unstaged languages are refused with the truthful provider-table message; full speech-to-speech loop passed with exactly ONE model call (`docs/verification/2026-09-15/116_SPEECH_LANGUAGE_MATRIX.md`) |
 | Recording | IMPLEMENTED WITH ENFORCED PRIVACY — `unoone-recording-policy` crate makes retention decisions exhaustive (20/20 tests); TRANSCRIPT_ONLY/SUMMARY_ONLY retain no audio; temp WAV deleted + verify-checked; zero-samples reports an error. **SUMMARY_ONLY is disabled in the UI** (no summariser exists) until one is implemented |
 | Browser workspace | IMPLEMENTED AS TYPED, VERIFIED ACTIONS — no arbitrary script execution; scheme allowlist; JSON-literal escaping; submit/upload/download require explicit confirmation; real PNG screenshots with SHA-256; 35 deterministic tests. Live-page acceptance journeys are human-gated |
 | Text handling (Indic scripts) | HARDENED — `packages/text-util` provides grapheme-cluster-safe truncation. Eight sites previously sliced `&str` at raw byte offsets, which **panics** mid-character; Devanagari and Bengali code points are 3 bytes, so this crashed on ordinary Hindi/Bengali/Assamese documents. Byte budgets for the model context window remain byte budgets (snapped to cluster boundaries) and truncation notices now report real character counts instead of byte counts |
@@ -111,8 +132,9 @@ corrected on 2026-07-30.
 
 ### CI gate state
 
-`main` was green across all four gates as of 2026-08-01: Desktop CI,
-Mobile Protection, Android CI (`invariants=0 e2e=0 lint=0 tests=0 apk=0`),
+`main` was green across all four gates as of 2026-09-15 (`ed5aefc`, PRs
+#43–#48 all checks green before merge): Desktop CI, Mobile Protection,
+Android CI (`invariants=0 e2e=0 lint=0 tests=0 apk=0`),
 and Pocket AI Windows Bundle (incl. the recording-retention and frontend
 embedding gates). The speech-hardening branch extends the lanes (these are
 workflow changes; each lane's own run is the evidence, not this paragraph):
@@ -351,8 +373,8 @@ PAI/
 │   └── android/                  # USB vault connector, recording engine
 ├── apps/
 │   ├── desktop/                  # Tauri 2 + React 19 desktop app
-│       ├── src/                  # React frontend (11 components)
-│       └── src-tauri/            # Rust backend (8 modules: main, llama, safety, recording, browser, documents, accessibility, security)
+│       ├── src/                  # React frontend (13 components)
+│       └── src-tauri/            # Rust backend (16 modules: main, startup, llama, speech, voice, bharat_audio, capability, harness_bridge, agent, safety, recording, browser, documents, document_migration, accessibility, security)
 │   ├── dock/windows/             # per-user Windows insertion monitor
 │   └── starter/windows/          # on-drive fallback launcher
 ├── packages/usb-manifest/        # shared strict schema-v2 validator
@@ -411,26 +433,36 @@ the two path dependencies above resolve unchanged.
 |--------|---------|--------|
 | `main.rs` / `startup.rs` | Pocket AI detection, strict validation, startup state machine, removal cleanup, hardware profiling, vault-core integration | IMPLEMENTED |
 | `llama.rs` | Manifest-only model/runtime discovery, CUDA/Metal/Vulkan/CPU selection, verified server identity, mmproj vision | IMPLEMENTED |
+| `speech.rs` | SpeechRouter: explicit `InbharatAudioThenLegacy` policy, hash-verified backend selection, buffered-final semantics | IMPLEMENTED |
+| `voice.rs` | Voice capability probes (STT/TTS status, language availability) over the router | IMPLEMENTED |
+| `bharat_audio.rs` | InBharat Audio adapter: audio.cpp ASR (Qwen3-ASR) + TTS (omnivoice), hash-bound acceptance gate, deployed-runtime SHA-256 verification, canonical→CLI language mapping | IMPLEMENTED (live speech matrix 19/19 on the staged drive) |
+| `capability.rs` | Host hardware/capability profile shown in the UI (CPU/RAM/GPU, vision probe) | IMPLEMENTED |
+| `harness_bridge.rs` | The production chat path: routes L0/L1/L3 through the vendored `inbharat-harness` with the model-visible capability contract | IMPLEMENTED (live-verified) |
+| `agent.rs` | Full-access agent lane: fs/process/workspace tools, budgets, audit, `agent.spawn` sub-agents | IMPLEMENTED (live-verified) |
 | `safety.rs` | SafetyGuard (STANDARD/RELAXED/OFF), blocked actions, harm detection | IMPLEMENTED |
 | `recording.rs` | Desktop recording: cpal microphone capture, hound WAV encoding, vault-core AES-256-GCM encryption, 4 privacy levels | IMPLEMENTED |
 | `browser.rs` | Browser workspace: Tauri WebView bridge (no Playwright), DOM query/click/type/extract/fill/scroll/screenshot | IMPLEMENTED |
 | `documents.rs` | Document processing: PDF (lopdf), DOCX/XLSX/PPTX (zip+quick-xml), TXT/MD/CSV/HTML, TF-IDF search | IMPLEMENTED |
-| `accessibility.rs` | Blind View, OCR and image description via Gemma mmproj, camera info, encode_image_for_vision | IMPLEMENTED |
+| `document_migration.rs` | Plaintext→vault migration core (Wave 3) and read path | IMPLEMENTED |
+| `accessibility.rs` | Blind View, OCR and image description via Gemma mmproj, snapshot pipeline, screen capture | IMPLEMENTED |
 | `security.rs` | Manifest-integrity validation, SHA-256, vault-core encryption wiring, crash recovery, emergency lock | IMPLEMENTED |
-| `bharat_audio.rs` | InBharat Audio adapter: audio.cpp ASR (Qwen3-ASR) + TTS (omnivoice), hash-bound acceptance gate, deployed-runtime SHA-256 verification | IMPLEMENTED (status probe wired; ASR/TTS entry points gated behind acceptance) |
 
 ### Desktop React Frontend (`apps/desktop/src/src/`)
 
 | Component | Purpose | Status |
 |-----------|---------|--------|
-| `UnlockScreen` | Password-only vault unlock, USB detection, new vault setup | BUILDS_NOT_RUNTIME_TESTED |
-| `ChatView` | Gemma 4 conversation via llama-server HTTP | IMPLEMENTED (needs running model) |
+| `UnlockScreen` | Password-only vault unlock, USB detection, new vault setup | IMPLEMENTED (live-unlocked on the staged drive each acceptance run) |
+| `Sidebar` | View navigation (Chat, Recordings, Memory, Vault, Model, Browser, Documents, Accessibility, Capabilities, Hardware, Settings) | IMPLEMENTED (live-driven) |
+| `ChatView` | Gemma 4 conversation via the harness bridge (agent lane, attachments, voice picker 16 languages) | IMPLEMENTED (live-verified: chat, STS loop, vision attachments) |
 | `RecordingView` | Recording with type/privacy, pause/resume/bookmarks, vault encryption | IMPLEMENTED (backend wired, needs UI testing) |
 | `MemoryExplorer` | 7 memory types, search, cross-platform sync | BUILDS_NOT_RUNTIME_TESTED |
 | `VaultView` | Vault status, emergency lock | BUILDS_NOT_RUNTIME_TESTED |
-| `BrowserWorkspace` | URL bar, WebView viewport, DOM bridge actions | IMPLEMENTED (backend wired, needs UI testing) |
+| `ModelManager` | Model server start/stop, cache status, context profile | IMPLEMENTED (live-driven each acceptance run) |
+| `BrowserWorkspace` | URL bar, WebView viewport, DOM bridge actions | IMPLEMENTED (live-verified with real pages on the agent lane) |
 | `DocumentsView` | Document import, search (PDF/DOCX/XLSX/PPTX/TXT/MD/CSV/HTML) | IMPLEMENTED (needs UI testing) |
-| `AccessibilityView` | Blind View, OCR, high contrast, camera capture | IMPLEMENTED (backend wired, needs UI testing) |
+| `AccessibilityView` | Blind View, OCR, camera blind-aid describe + live narration, high contrast | IMPLEMENTED (OCR live-verified; describe lane defect #44 fix in PR #49, re-verification pending) |
+| `CapabilityProfile` / `HardwareProfile` | Host capability/hardware report | IMPLEMENTED |
+| `SettingsView` | FullAccess agent toggle, accessibility settings | IMPLEMENTED |
 
 ## Model Verification
 
@@ -444,7 +476,7 @@ the two path dependencies above resolve unchanged.
 | Quantisation | Q4_K_M |
 | Source | Google Gemma 4 12B IT, GGUF Q4_K_M by llama.cpp community |
 | Licence | [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
-| Inference verified | Historical model-content proof exists; current direct manifest-only llama-server execution still requires a prepared host whose policy permits the shipped binaries |
+| Inference verified | Live on the staged drive (2026-09-15): chat, STS one-call loop, OCR (verbatim text read back), vision describe (post-defect-#44 fix), multi-agent tool runs — all through the manifest-verified llama-server on `D:\UNOONE` |
 | Source = Destination SHA-256 | ✅ Exact match |
 
 ### Desktop dependencies and build boundary
@@ -562,9 +594,10 @@ Detailed evidence and honest boundaries are recorded in [Connected-device valida
 ## Mobile Protection
 
 The Android app is protected by CI golden-baseline and exact-file hash
-verification. `mobile-golden-baseline-v2` points to
-`8b66e3e0fa11d462e1676db6ea936ef00f745ada`, the reviewed Pocket AI USB
-auto-open baseline. The original v1 tag remains historical and is not moved.
+verification. The committed tree-hash pointer (`scripts/MOBILE_PROTECTED_TREE`)
+currently holds `a307716a9cf6535bad8d71133d2b762c6a908c02` (re-baselined with
+each reviewed Android change — e.g. the 48-alias voice-language mirror,
+2026-09-15). The original v1 tag remains historical and is not moved.
 
 ```bash
 # Local check
@@ -592,7 +625,7 @@ The following gates remain open:
 - production object storage, catalogue signing key, signed catalogues, deployment, update, and rollback testing;
 - E4B (Medium) model loading and inference on device;
 - live voice, camera, and TalkBack UX validation;
-- desktop runtime testing: recording with real microphone, browser workspace with real pages, OCR with real images;
+- desktop runtime testing still open: recording with a real microphone, and blind-aid camera/OCR validation on a sustained corpus (single-pass live acceptance passed 2026-09-16 — browser with real pages, OCR with real images, speech matrix 19/19; the describe lane's defect-#44 fix is re-verified on the re-staged drive);
 - macOS build and testing;
 - WDAC policy environment testing: verify llama-server, recording, and browser work under real WDAC constraints.
 
