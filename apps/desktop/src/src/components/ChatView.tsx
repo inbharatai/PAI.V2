@@ -151,6 +151,31 @@ export function ChatView() {
     return () => unlisten?.();
   }, []);
 
+  // Gap 1 (2026-09-16): token-by-token streaming of plain chat answers. The
+  // backend's model provider streams every generated token of a tool-free
+  // answer as a `chat-token` event (agentic turns stay buffered and keep the
+  // live progress feed above). The accumulated text renders inside the
+  // generating bubble and is replaced by the authoritative reply when the
+  // call lands — the streamed text is never appended to history itself.
+  const [streamedAnswer, setStreamedAnswer] = useState('');
+  const streamedAnswerRef = useRef('');
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<{ conversation_id: string; delta: string }>('chat-token', event => {
+      // Tokens from a conversation this panel is no longer showing are ignored.
+      const active = conversationIdRef.current || 'default';
+      if (event.payload.conversation_id !== active) return;
+      streamedAnswerRef.current += event.payload.delta;
+      setStreamedAnswer(streamedAnswerRef.current);
+    }).then(fn => {
+      unlisten = fn;
+    }).catch(() => {
+      // Without the token stream the reply still arrives in full; only the
+      // live typing is missing.
+    });
+    return () => unlisten?.();
+  }, []);
+
   // Cross-panel bridge (2026-09-14 OCR/blind-aid alignment): the
   // Accessibility lane hands its frame and follow-up question to this, the
   // one panel, so every capability ends in a single conversation.
@@ -250,7 +275,7 @@ export function ChatView() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, streamedAnswer]);
 
   const checkModelStatus = useCallback(async () => {
     try {
@@ -516,6 +541,8 @@ export function ChatView() {
     setAgentActivity(true);
     setLiveProgress([]);
     liveProgressRef.current = [];
+    streamedAnswerRef.current = '';
+    setStreamedAnswer('');
     setServerError('');
 
     try {
@@ -608,6 +635,8 @@ export function ChatView() {
       setIsGenerating(false);
       setAgentActivity(false);
       liveProgressRef.current = [];
+      streamedAnswerRef.current = '';
+      setStreamedAnswer('');
     }
   };
 
@@ -811,7 +840,7 @@ export function ChatView() {
           <div className="chat-message assistant">
             <div className="chat-avatar">G</div>
             <div className="chat-bubble" style={{ minWidth: '200px' }}>
-              {liveProgress.length === 0 ? (
+              {liveProgress.length === 0 && !streamedAnswer ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span className="spinner" />
                   <span style={{ fontSize: '13px', color: 'var(--text-muted, #666)' }}>Thinking…</span>
@@ -820,7 +849,9 @@ export function ChatView() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
                     <span className="spinner" />
-                    <span style={{ fontSize: '13px', color: 'var(--text-secondary, #888)' }}>Working…</span>
+                    <span style={{ fontSize: '13px', color: 'var(--text-secondary, #888)' }}>
+                      {streamedAnswer ? 'Answering…' : 'Working…'}
+                    </span>
                   </div>
                   {liveProgress.slice(-8).map((ev, i) => (
                     <div key={i} style={{ fontSize: '12px', color: 'var(--text-secondary, #888)' }}>
@@ -857,6 +888,18 @@ export function ChatView() {
                       )}
                     </div>
                   ))}
+                  {streamedAnswer && (
+                    <div style={{
+                      marginTop: '4px',
+                      fontSize: '13px',
+                      lineHeight: '1.5',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      color: 'var(--text-primary, #eee)',
+                    }}>
+                      {streamedAnswer}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
