@@ -183,6 +183,16 @@ pub struct InferenceRequest {
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
     pub tools: Option<Vec<ToolDefinition>>,
+    /// Gap 2b/4 (2026-09-16): when Some(true), the completion is sent with
+    /// `chat_template_kwargs: {"enable_thinking": false}` + `reasoning_budget: 0`
+    /// so Gemma 4 answers directly instead of emitting chain-of-thought first.
+    /// Measured live on the staged drive (A/B, same describe prompt, same
+    /// server): think-on 376 completion tokens / 1181-char reasoning_content /
+    /// 44.6 s; think-off 55 tokens / zero reasoning / 5.7 s — an ~8x latency
+    /// win with comparable answer length. Set by the latency-critical vision
+    /// lanes (OCR, blind-aid describe); None keeps the model's default
+    /// behavior (the agent loop reasons, as before).
+    pub disable_reasoning: Option<bool>,
 }
 
 /// Conversation turn — extended with multimodal content support for vision/OCR
@@ -274,6 +284,20 @@ pub struct InferenceResponse {
     pub model_id: String,
     pub tool_calls: Option<Vec<ToolCallResult>>,
     pub finish_reason: Option<String>, // "stop", "tool_calls", "length"
+    /// Gap 4 (2026-09-16): the model's chain-of-thought when the template
+    /// emits it into `reasoning_content` (Gemma 4 does unless think-off is
+    /// requested). Callers use it to tell the honest "empty visible reply"
+    /// case (defect #44: reasoning consumed the whole budget) apart from a
+    /// model that said nothing at all. None when the server reported none.
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    /// Gap 3 (2026-09-16): how many prompt tokens the server served from its
+    /// prefix cache (usage.prompt_tokens_details.cached_tokens). Measured
+    /// live: llama-server DOES cache across requests (second same-prefix
+    /// request served cached_tokens=91 of its prompt) — surfacing it lets
+    /// callers verify the cache is actually being hit instead of assuming.
+    #[serde(default)]
+    pub cached_prompt_tokens: Option<u32>,
 }
 
 /// Verified server identity returned after a successful start.
@@ -1245,7 +1269,22 @@ impl ModelManager {
             "max_tokens": request.max_tokens.unwrap_or(4096),
             "temperature": request.temperature.unwrap_or(0.7),
             "stream": false,
+            // Gap 3 (2026-09-16): explicit rather than relying on the server
+            // default — llama-server prefix-caches across requests (measured
+            // live: a grown-history request served cached_tokens=91), and this
+            // makes the intent auditable in any request log.
+            "cache_prompt": true,
         });
+
+        // Gap 2b (2026-09-16): think-off for latency-critical lanes. Same
+        // kwargs the harness provider already sends (llama_local.rs) and the
+        // live A/B probe proved honored by the staged Gemma 4 template:
+        // 376 -> 55 completion tokens, 44.6 s -> 5.7 s, reasoning_content
+        // 1181 chars -> 0, with comparable answer length.
+        if request.disable_reasoning.unwrap_or(false) {
+            body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
+            body["reasoning_budget"] = serde_json::json!(0);
+        }
 
         if let Some(tools) = &request.tools {
             body["tools"] = serde_json::json!(tools
@@ -1300,6 +1339,16 @@ impl ModelManager {
             .unwrap_or("")
             .to_string();
 
+        // Gap 4 (2026-09-16): extract the model's chain-of-thought when the
+        // template emits it into reasoning_content, so callers can tell the
+        // honest empty-reply case (defect #44) apart and never mistake
+        // "reasoned for the whole budget" for "said nothing".
+        let reasoning = message
+            .and_then(|m| m.get("reasoning_content"))
+            .and_then(|r| r.as_str())
+            .filter(|r| !r.is_empty())
+            .map(|r| r.to_string());
+
         // Parse tool calls if present
         let tool_calls = message
             .and_then(|m| m.get("tool_calls"))
@@ -1352,7 +1401,21 @@ impl ModelManager {
                 .and_then(|u| u.get("completion_tokens"))
                 .and_then(|t| t.as_u64())
                 .unwrap_or(0) as u32,
-            tokens_per_second: 0.0,
+            // Gap 3 (2026-09-16): real generation speed from the server's
+            // own timings object (present on non-streaming OAI completions)
+            // instead of the old hardcoded 0.0 — measured live, e.g. the A/B
+            // probe's think-off run: 55 tokens in 5.68 s ≈ 9.7 tok/s.
+            tokens_per_second: data
+                .get("timings")
+                .and_then(|t| t.get("predicted_per_second"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32,
+            cached_prompt_tokens: data
+                .get("usage")
+                .and_then(|u| u.get("prompt_tokens_details"))
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|t| t.as_u64())
+                .map(|t| t as u32),
             model_id: data
                 .get("model")
                 .and_then(|m| m.as_str())
@@ -1360,6 +1423,7 @@ impl ModelManager {
                 .to_string(),
             tool_calls: final_tool_calls,
             finish_reason,
+            reasoning,
         })
     }
 
