@@ -1824,7 +1824,10 @@ impl PaiSubagentProvider {
                     "subagent.memory",
                     error.to_string(),
                 )
-            })?,
+            })?
+            // Gap 5 rerank on the child's own model server (same fail-open
+            // contract as the main lane).
+            .with_lexical_rerank(self.model_id.clone(), self.port),
         );
         let workspace = workspace_root().map_err(|error| {
             Failure::new(
@@ -2299,7 +2302,11 @@ pub async fn harness_chat(
                     ..PaiVaultMemoryProviderConfig::default()
                 },
             )
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| error.to_string())?
+            // Gap 5: model-backed rerank of lexical memory hits on the same
+            // verified local server that is already serving this chat turn
+            // (think-off, 30s-bounded, fail-open to the lexical order).
+            .with_lexical_rerank(model_id.clone(), port),
         );
 
         // Full-access mode roots file tools + subprocesses at the host
