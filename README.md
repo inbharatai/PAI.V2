@@ -76,6 +76,21 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   `inbharat-harness`): a routing planner (L0 deterministic fast path /
   L1 model / L3 full agent loop with a 48-step budget), model-visible
   capability contract, audited tool calls, and per-step transcripts in the UI.
+- **Streaming plain answers (2026-09-16):** tool-free chat turns stream
+  token-by-token to the bubble over SSE from the local llama-server
+  (`chat-token` Tauri events); agentic (tool-bearing) turns stay buffered so
+  complete tool calls reach the loop. The authoritative result replaces the
+  streamed text when the turn lands.
+- **Reasoning-aware inference layer (2026-09-16):** one shared request type
+  carries `disable_reasoning` — the vision lanes (describe/OCR) pin think-off
+  (`enable_thinking: false`, `reasoning_budget: 0`), measured live on the
+  staged drive at scene describe **42–60 s → 8.2 s** and OCR **12.7 s →
+  3.7 s** with quality anchors held. Every request sends `cache_prompt: true`
+  and the response surfaces cached-prefix tokens and real tokens/s.
+- **Model-backed memory rerank (2026-09-16):** vault memory search hits
+  (≥3 lexical hits) are reordered by one bounded think-off completion on the
+  same verified local model (top 8 candidates, 30 s hard deadline,
+  fail-open to the lexical order on any error — retrieval can never regress).
 - **Tool surface (FullAccess permission, default ON):** `fs.read/write/list`
   with exact size/count metadata, `process.run` with allowlisted direct-argv
   execution and 10 s foreground deadlines (background deploys supported),
