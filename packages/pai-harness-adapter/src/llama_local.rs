@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Gap 1 (2026-09-16): the provider's live token tap — a cheap, non-blocking
-/// callback fired once per generated token of a tool-free streamed answer.
+/// callback fired once per generated answer token of a streamed completion
+/// (plain Q&A and agentic turns alike; tool calls are assembled separately
+/// and never pass through the tap).
 pub type TokenEmitter = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Clone)]
@@ -32,14 +34,14 @@ pub struct PaiLlamaLocalProvider {
     /// the actual image bytes to this provider so vision requests stay
     /// local and the audit trail records digests, not pixels.
     attachments: std::collections::BTreeMap<String, (String, String)>,
-    /// Gap 1 (2026-09-16): live token tap for the desktop UI. When set AND
-    /// the request carries no tools, the completion is sent as SSE and each
-    /// content delta is forwarded here in addition to the harness sink —
-    /// the bridge turns it into a `chat-token` Tauri event so ChatView can
-    /// render the answer token-by-token. Tool-bearing (agentic) requests
-    /// stay on the buffered path: their tool calls must arrive complete
-    /// before the loop can proceed, and streamed call-assembly is
-    /// protocol-risk the loop does not need.
+    /// Gap 1 (2026-09-16): live token tap for the desktop UI. When set, the
+    /// completion is sent as SSE and each content delta is forwarded here in
+    /// addition to the harness sink — the bridge turns it into a
+    /// `chat-token` Tauri event so ChatView can render the answer
+    /// token-by-token. Agentic (tool-bearing) requests stream too: their
+    /// answer text streams live while the streamed tool-call fragments are
+    /// assembled and emitted complete at the end of the stream, so the
+    /// loop protocol is identical to the buffered path.
     token_emitter: Option<TokenEmitter>,
 }
 
@@ -382,11 +384,16 @@ impl ModelProvider for PaiLlamaLocalProvider {
         // llama.cpp accepts token budgets rather than bytes. Keep this bounded
         // conservatively and let the Harness enforce the exact byte ceiling.
         let max_tokens = (request.max_output_bytes / 4).clamp(64, 8192);
-        // Gap 1 (2026-09-16): tool-free requests with a token tap installed
-        // stream over SSE so the answer renders token-by-token in the UI;
-        // agentic (tool-bearing) requests keep the buffered path — their tool
-        // calls must arrive complete before the loop can continue.
-        let streaming = tools.is_empty() && self.token_emitter.is_some();
+        // Gap 1 (2026-09-16): with a token tap installed, requests stream over
+        // SSE so the answer renders token-by-token in the UI. Agentic
+        // (tool-bearing) requests stream TOO — but their answer text streams
+        // live while the tool calls are assembled and emitted complete at
+        // the end of the stream (stream_sse), so the loop protocol is
+        // byte-identical to the buffered path. Live-caught 2026-09-16: the
+        // tool-free-only gate never fired in the default configuration —
+        // full-access chat pins explicit L3 (harness_bridge), so every turn
+        // carries tools and nothing ever streamed.
+        let streaming = self.token_emitter.is_some();
         let mut body = json!({
             "model": self.model_id,
             "messages": messages,
@@ -539,12 +546,16 @@ impl ModelProvider for PaiLlamaLocalProvider {
 }
 
 impl PaiLlamaLocalProvider {
-    /// Gap 1 (2026-09-16): SSE completion path for tool-free requests with a
-    /// token tap installed. Streams llama-server's OpenAI
-    /// `text/event-stream` answer token-by-token through BOTH the harness
-    /// sink and the provider's token emitter, then assembles the same
-    /// `ModelResponse` the buffered path returns — the harness contract and
-    /// budgets stay identical, only the transport changes.
+    /// Gap 1 (2026-09-16): SSE completion path for requests with a token
+    /// tap installed — plain Q&A and agentic turns alike. Streams
+    /// llama-server's OpenAI `text/event-stream` answer token-by-token
+    /// through BOTH the harness sink and the provider's token emitter;
+    /// tool-call deltas are assembled (llama.cpp may split one call's
+    /// arguments across several chunks) and emitted as complete
+    /// `ModelChunk::ToolCall`s at the end of the stream, so the chunk
+    /// sequence — and the `ModelResponse` — is identical to the buffered
+    /// path. The harness contract and budgets stay identical, only the
+    /// transport (and the answer text's arrival time) changes.
     fn stream_sse(
         &self,
         request: &ModelRequest,
@@ -563,6 +574,7 @@ impl PaiLlamaLocalProvider {
         let mut finish_reason: Option<String> = None;
         let mut usage: Option<(u64, u64)> = None;
         let mut provider_request_id: Option<String> = None;
+        let mut tool_calls: Vec<StreamedToolCall> = Vec::new();
         // llama.cpp emits exactly one SSE chunk per generated token, so the
         // delta count is a truthful completion-token count even on servers
         // that omit the final usage block.
@@ -576,6 +588,7 @@ impl PaiLlamaLocalProvider {
             let usage_ref = &mut usage;
             let id_ref = &mut provider_request_id;
             let deltas_ref = &mut deltas;
+            let tool_calls_ref = &mut tool_calls;
             let sink_ref: &mut dyn FnMut(ModelChunk) -> HarnessResult<()> = &mut *sink;
             let mut on_delta = |event: SseDelta| -> HarnessResult<()> {
                 if id_ref.as_ref().is_none() {
@@ -586,6 +599,48 @@ impl PaiLlamaLocalProvider {
                 }
                 if event.usage.is_some() {
                     *usage_ref = event.usage;
+                }
+                // Agentic turns: assemble streamed tool-call pieces. The
+                // pieces carry NO user-visible text — they are held back and
+                // emitted complete at the end of the stream (below), exactly
+                // like the buffered path.
+                if let Some(pieces) = event.tool_calls {
+                    for piece in pieces.iter() {
+                        let index =
+                            piece.get("index").and_then(JsonValue::as_u64).unwrap_or(0) as usize;
+                        let entry = match tool_calls_ref.iter_mut().find(|c| c.index == index) {
+                            Some(entry) => entry,
+                            None => {
+                                tool_calls_ref.push(StreamedToolCall {
+                                    index,
+                                    call_id: None,
+                                    tool_id: String::new(),
+                                    arguments: String::new(),
+                                });
+                                tool_calls_ref
+                                    .last_mut()
+                                    .expect("tool-call entry just pushed")
+                            }
+                        };
+                        if entry.call_id.is_none() {
+                            if let Some(id) = piece.get("id").and_then(JsonValue::as_str) {
+                                entry.call_id = Some(id.to_owned());
+                            }
+                        }
+                        if let Some(name) =
+                            piece.pointer("/function/name").and_then(JsonValue::as_str)
+                        {
+                            if !name.is_empty() {
+                                entry.tool_id = name.to_owned();
+                            }
+                        }
+                        if let Some(fragment) = piece
+                            .pointer("/function/arguments")
+                            .and_then(JsonValue::as_str)
+                        {
+                            entry.arguments.push_str(fragment);
+                        }
+                    }
                 }
                 let Some(delta) = event.content else {
                     return Ok(());
@@ -623,6 +678,27 @@ impl PaiLlamaLocalProvider {
         }
 
         cancel.check("pai.model.local")?;
+
+        // Assembled tool calls, complete, in request order — the same chunks
+        // the buffered path emits after a full-buffer completion. Calls with
+        // no tool name are skipped there and here.
+        let mut emitted_tool_calls = 0usize;
+        for (position, call) in tool_calls.iter().enumerate() {
+            cancel.check("pai.model.tool_calls")?;
+            if call.tool_id.is_empty() {
+                continue;
+            }
+            sink(ModelChunk::ToolCall {
+                block: u32::try_from(position.saturating_add(1)).unwrap_or(u32::MAX),
+                call_id: call
+                    .call_id
+                    .clone()
+                    .unwrap_or_else(|| format!("call-{}", call.index)),
+                tool_id: call.tool_id.clone(),
+                arguments: call.arguments.clone(),
+            })?;
+            emitted_tool_calls = emitted_tool_calls.saturating_add(1);
+        }
         sink(ModelChunk::End { block: 0 })?;
 
         let (input_units, output_units) = usage.unwrap_or((0, deltas));
@@ -631,9 +707,9 @@ impl PaiLlamaLocalProvider {
             output_units,
         })?;
 
-        // Tool-free path by construction: finish_reason "tool_calls" cannot
-        // occur here (the buffered path handles tool-bearing requests).
-        let finish = if finish_reason.as_deref() == Some("length") {
+        let finish = if emitted_tool_calls > 0 || finish_reason.as_deref() == Some("tool_calls") {
+            FinishReason::ToolCalls
+        } else if finish_reason.as_deref() == Some("length") {
             FinishReason::Length
         } else {
             FinishReason::Stop
@@ -648,6 +724,17 @@ impl PaiLlamaLocalProvider {
             provider_request_id,
         })
     }
+}
+
+/// One tool call reassembled from streamed SSE pieces (agentic turns).
+/// llama.cpp streams `delta.tool_calls` fragments: the first piece carries
+/// the id and function name, later pieces append `arguments` text.
+struct StreamedToolCall {
+    /// OpenAI delta index — pieces of one call share it.
+    index: usize,
+    call_id: Option<String>,
+    tool_id: String,
+    arguments: String,
 }
 
 const HTTP_IO_POLL: Duration = Duration::from_millis(150);
@@ -711,6 +798,10 @@ struct SseDelta {
     /// the server honors `stream_options.include_usage`.
     usage: Option<(u64, u64)>,
     id: Option<String>,
+    /// Raw OpenAI `delta.tool_calls` pieces (agentic turns). The provider
+    /// assembles them — llama.cpp may split one call's `arguments` string
+    /// across several deltas.
+    tool_calls: Option<Vec<JsonValue>>,
 }
 
 /// Gap 1 (2026-09-16): streaming sibling of `post_json_localhost` for
@@ -954,6 +1045,10 @@ fn feed_sse_bytes(
                 .get("id")
                 .and_then(JsonValue::as_str)
                 .map(str::to_owned),
+            tool_calls: event
+                .pointer("/choices/0/delta/tool_calls")
+                .and_then(JsonValue::as_array)
+                .cloned(),
         })?;
     }
     Ok(())
@@ -1617,6 +1712,192 @@ mod transcript_tests {
         assert_eq!(parsed["temperature"], json!(0.2), "{body}");
         assert_eq!(parsed["tool_choice"], json!("auto"), "{body}");
         assert_eq!(parsed["tools"][0]["function"]["name"], "fs.write", "{body}");
+        // No token tap installed: agentic requests stay on the buffered path.
+        assert_eq!(parsed["stream"], json!(false), "{body}");
+    }
+
+    /// A one-shot llama-server SSE stand-in: captures the posted body, then
+    /// streams a fixed `text/event-stream` answer (identity framing).
+    fn capture_sse_server(sse_body: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().expect("mock addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("mock accept");
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let header_end;
+            loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    header_end = buffer
+                        .windows(4)
+                        .position(|w| w == b"\r\n\r\n")
+                        .unwrap_or(0);
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = pos;
+                    break;
+                }
+            }
+            let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+            let content_length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        value.trim().parse().ok()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0);
+            while buffer.len() < header_end + 4 + content_length {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            let body = buffer[header_end + 4..].to_vec();
+            let _ = tx.send(String::from_utf8_lossy(&body).into_owned());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                sse_body.len(),
+                sse_body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        (port, rx)
+    }
+
+    /// Gap 1 regression (live-caught 2026-09-16): the streaming gate was
+    /// `tools.is_empty()`, but the production chat lane pins explicit L3 in
+    /// full-access mode — every real turn carries tools, so nothing ever
+    /// streamed. With a tap installed, tool-bearing requests must go out as
+    /// SSE, stream their answer text live through sink + tap, and assemble
+    /// split tool-call fragments into complete ToolCall chunks at the end —
+    /// byte-identical contract to the buffered path.
+    #[test]
+    fn agentic_requests_stream_and_assemble_tool_calls() {
+        // Text deltas, then a tool call whose arguments llama.cpp splits
+        // across two deltas, then finish + usage.
+        let sse_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+            "\"id\":\"call-1\",\"function\":{\"name\":\"fs.read\",",
+            "\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,",
+            "\"function\":{\"arguments\":\"\\\"a.txt\\\"}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],",
+            "\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":6}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let (port, rx) = capture_sse_server(sse_body);
+        let tapped = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let tap_sink = std::sync::Arc::clone(&tapped);
+        let provider = PaiLlamaLocalProvider::new("test-model", port)
+            .expect("build provider")
+            .with_token_emitter(std::sync::Arc::new(move |delta| {
+                tap_sink.lock().expect("tap lock").push(delta.to_owned());
+            }));
+        let mut request = vision_request(vec![]);
+        request.tools = vec![inbharat_harness_core::providers::ModelTool {
+            id: "fs.read".to_owned(),
+            description: "read a file".to_owned(),
+            input_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.to_owned(),
+        }];
+        let cancel = CancellationToken::new();
+        let mut seen: Vec<String> = Vec::new();
+        let response = provider
+            .stream(&request, &cancel, &mut |chunk| {
+                seen.push(match chunk {
+                    ModelChunk::TextDelta { text, .. } => format!("text:{text}"),
+                    ModelChunk::ToolCall {
+                        call_id,
+                        tool_id,
+                        arguments,
+                        ..
+                    } => format!("tool:{call_id}/{tool_id}/{arguments}"),
+                    ModelChunk::Start { .. } => "start".to_owned(),
+                    ModelChunk::End { .. } => "end".to_owned(),
+                    ModelChunk::Usage { .. } => "usage".to_owned(),
+                    ModelChunk::Finish { reason } => format!("finish:{reason:?}"),
+                    ModelChunk::ReasoningDelta { .. } => "reasoning".to_owned(),
+                });
+                Ok(())
+            })
+            .expect("stream succeeds");
+
+        // The wire: SSE requested, tools still on it.
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("captured");
+        let parsed: JsonValue = serde_json::from_str(&body).expect("posted body is JSON");
+        assert_eq!(parsed["stream"], json!(true), "{body}");
+        assert_eq!(
+            parsed["stream_options"]["include_usage"],
+            json!(true),
+            "{body}"
+        );
+        assert_eq!(parsed["tools"][0]["function"]["name"], "fs.read", "{body}");
+        assert_eq!(parsed["temperature"], json!(0.2), "{body}");
+
+        // The tap saw the live answer text, in order.
+        assert_eq!(
+            *tapped.lock().expect("tap lock"),
+            ["Hel".to_owned(), "lo".to_owned()],
+            "tap must receive the text deltas in stream order"
+        );
+
+        // The sink saw the buffered-path chunk sequence with the assembled
+        // call — fragments joined into one complete ToolCall.
+        assert_eq!(
+            seen,
+            [
+                "start".to_owned(),
+                "text:Hel".to_owned(),
+                "text:lo".to_owned(),
+                "tool:call-1/fs.read/{\"path\":\"a.txt\"}".to_owned(),
+                "end".to_owned(),
+                "usage".to_owned(),
+                "finish:ToolCalls".to_owned(),
+            ],
+            "chunk sequence must match the buffered contract"
+        );
+        assert_eq!(response.text, "Hello");
+        assert_eq!(response.finish, FinishReason::ToolCalls);
+        assert_eq!(response.input_units, 5);
+        assert_eq!(response.output_units, 6);
+    }
+
+    /// The reverse pin: without a tap (the subagent lane), tool-bearing
+    /// requests must keep the buffered JSON path — the loop protocol never
+    /// depends on SSE being available.
+    #[test]
+    fn agentic_requests_without_tap_stay_buffered() {
+        let (port, rx) = capture_server();
+        let provider = PaiLlamaLocalProvider::new("test-model", port).expect("build provider");
+        let mut request = vision_request(vec![]);
+        request.tools = vec![inbharat_harness_core::providers::ModelTool {
+            id: "fs.read".to_owned(),
+            description: "read a file".to_owned(),
+            input_schema: r#"{"type":"object","properties":{"path":{"type":"string"}}}"#.to_owned(),
+        }];
+        let cancel = CancellationToken::new();
+        provider
+            .stream(&request, &cancel, &mut |_chunk| Ok(()))
+            .expect("stream succeeds");
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("captured");
+        let parsed: JsonValue = serde_json::from_str(&body).expect("posted body is JSON");
+        assert_eq!(parsed["stream"], json!(false), "{body}");
     }
 
     #[test]
