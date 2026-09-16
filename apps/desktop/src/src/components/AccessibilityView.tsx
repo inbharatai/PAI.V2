@@ -883,6 +883,92 @@ export function AccessibilityView() {
                     </div>
                   )}
 
+                  {/* Live-caught 2026-09-16 (defect #46): these vision
+                      status/result blocks used to render only inside the
+                      Screen Reader Description / OCR section, so with just
+                      Camera Blind Aid on (the phone-parity blind-user
+                      configuration) "What's in front of me?" SPOKE its
+                      description but never showed it — no result, no error
+                      banner, no "Running vision model…" indicator for the
+                      whole multi-minute run; a failed describe was invisible
+                      too (which silently neuters the defect-#45 honest-error
+                      work). A vision result belongs to the whole Vision Lab:
+                      every configuration that can produce one also surfaces
+                      it. */}
+                  {visionError && (
+                    <div
+                      style={{
+                        marginBottom: '12px',
+                        padding: '8px 12px',
+                        background: 'var(--error-bg)',
+                        color: 'var(--error-text)',
+                        borderRadius: 'var(--radius-sm)',
+                        fontSize: '13px',
+                      }}
+                    >
+                      {visionError}
+                    </div>
+                  )}
+
+                  {isProcessingVision && (
+                    <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                      Running vision model…
+                    </div>
+                  )}
+
+                  {visionResult && (
+                    <div
+                      style={{
+                        padding: '12px',
+                        background: 'var(--bg-primary)',
+                        borderRadius: 'var(--radius-sm)',
+                        border: '1px solid var(--border)',
+                        fontSize: '13px',
+                        lineHeight: 1.5,
+                        whiteSpace: 'pre-wrap',
+                        maxHeight: '240px',
+                        overflow: 'auto',
+                      }}
+                    >
+                      {visionResult}
+                    </div>
+                  )}
+
+                  {/* Chat alignment (2026-09-14): OCR text and vision
+                      results do not dead-end in this panel — hand them to
+                      the chat panel where the full agent (reading,
+                      reasoning, tools) can act on them. */}
+                  {visionResult && (
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      style={{ marginTop: '8px' }}
+                      onClick={() =>
+                        askInChat({
+                          text: `I extracted this with the vision lane (OCR/describe) on this device:\n\n${visionResult.slice(0, 4000)}\n\nWhat is it? Answer in plain language.`,
+                        })
+                      }
+                      title="Continue with this text in the chat panel"
+                    >
+                      Ask in Chat
+                    </button>
+                  )}
+
+                  {speechNotice && (
+                    <div
+                      role="status"
+                      style={{
+                        marginTop: '8px',
+                        padding: '8px 12px',
+                        background: 'var(--bg-primary)',
+                        borderRadius: 'var(--radius-sm)',
+                        border: '1px solid var(--border)',
+                        fontSize: '13px',
+                      }}
+                    >
+                      {speechNotice}
+                    </div>
+                  )}
+
                   {(screenReaderDescription || ocrExtraction) && (
                     <div>
                       <label style={{ display: 'block', fontSize: '13px', marginBottom: '6px' }}>
@@ -936,79 +1022,6 @@ export function AccessibilityView() {
                         )}
                       </div>
 
-                      {visionError && (
-                        <div
-                          style={{
-                            marginBottom: '12px',
-                            padding: '8px 12px',
-                            background: 'var(--error-bg)',
-                            color: 'var(--error-text)',
-                            borderRadius: 'var(--radius-sm)',
-                            fontSize: '13px',
-                          }}
-                        >
-                          {visionError}
-                        </div>
-                      )}
-
-                      {isProcessingVision && (
-                        <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                          Running vision model…
-                        </div>
-                      )}
-
-                      {visionResult && (
-                        <div
-                          style={{
-                            padding: '12px',
-                            background: 'var(--bg-primary)',
-                            borderRadius: 'var(--radius-sm)',
-                            border: '1px solid var(--border)',
-                            fontSize: '13px',
-                            lineHeight: 1.5,
-                            whiteSpace: 'pre-wrap',
-                            maxHeight: '240px',
-                            overflow: 'auto',
-                          }}
-                        >
-                          {visionResult}
-                        </div>
-                      )}
-
-                      {/* Chat alignment (2026-09-14): OCR text and vision
-                          results do not dead-end in this panel — hand them to
-                          the chat panel where the full agent (reading,
-                          reasoning, tools) can act on them. */}
-                      {visionResult && (
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          style={{ marginTop: '8px' }}
-                          onClick={() =>
-                            askInChat({
-                              text: `I extracted this with the vision lane (OCR/describe) on this device:\n\n${visionResult.slice(0, 4000)}\n\nWhat is it? Answer in plain language.`,
-                            })
-                          }
-                          title="Continue with this text in the chat panel"
-                        >
-                          Ask in Chat
-                        </button>
-                      )}
-
-                      {speechNotice && (
-                        <div
-                          role="status"
-                          style={{
-                            marginTop: '8px',
-                            padding: '8px 12px',
-                            background: 'var(--bg-primary)',
-                            borderRadius: 'var(--radius-sm)',
-                            border: '1px solid var(--border)',
-                            fontSize: '13px',
-                          }}
-                        >
-                          {speechNotice}
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>
