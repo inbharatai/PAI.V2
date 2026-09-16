@@ -148,7 +148,7 @@ export function DocumentsView() {
           <div style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
             <p><strong>Text extraction:</strong> TXT, Markdown, CSV, HTML — fully supported</p>
             <p><strong>Rich documents:</strong> PDF, DOCX, XLSX, PPTX — extracted locally via Rust backend</p>
-            <p><strong>OCR:</strong> Image text extraction via Gemma mmproj when model is loaded</p>
+            <p><strong>OCR:</strong> Image text extraction lives in the Accessibility view (Blind Aid / OCR), not in Documents</p>
             <p><strong>Search:</strong> TF-IDF text-based search across vault memory files</p>
           </div>
         </div>
