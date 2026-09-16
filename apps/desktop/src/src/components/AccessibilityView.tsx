@@ -238,7 +238,14 @@ export function AccessibilityView() {
     // Description assist is on, describe it immediately and speak it.
     setCameraError('');
     try {
-      const savedPath = await tauriApi.saveVisionSnapshot(dataUrl);
+      // Live-caught 2026-09-16 (defect #45): save_vision_snapshot was the one
+      // vision invoke still awaited raw — if its IPC response is dropped the
+      // whole capture flow wedges forever with no error (defect #23 pattern).
+      const savedPath = await withVisionTimeout(
+        tauriApi.saveVisionSnapshot(dataUrl),
+        30_000,
+        'Snapshot save'
+      );
       setImagePath(savedPath);
       if (screenReaderDescription) {
         // Blind-aid flow: short spoken-style summary, not the long detailed
@@ -385,7 +392,14 @@ export function AccessibilityView() {
     if (!ctx) throw new Error('The browser did not provide a 2D canvas.');
     ctx.drawImage(video, 0, 0);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
-    const savedPath = await tauriApi.saveVisionSnapshot(dataUrl);
+    // Bounded like the other vision invokes (defect #45): a dropped IPC
+    // response here must throw, so the loop's error backstop can count it
+    // instead of the narration silently going quiet.
+    const savedPath = await withVisionTimeout(
+      tauriApi.saveVisionSnapshot(dataUrl),
+      30_000,
+      'Snapshot save'
+    );
     const result = await withVisionTimeout(
       tauriApi.describeImage(savedPath, 'scene_summary'),
       120_000,
@@ -441,7 +455,15 @@ export function AccessibilityView() {
   /** One-press "what's in front of me": capture, describe in the short
    * spoken-style mode, and speak — regardless of the assist toggles. */
   async function whatsInFront() {
-    if (isProcessingVision || narrationBusyRef.current) return;
+    if (isProcessingVision) return;
+    // Live-caught 2026-09-16 (defect #45): a narration tick that is still
+    // finishing (the user just switched narration off) used to silently eat
+    // this press — the button looked enabled, nothing happened, no feedback.
+    // Say so instead; the status line sits right under these buttons.
+    if (narrationBusyRef.current) {
+      setNarrationStatus('Finishing the last narration — press "What\'s in front of me?" again in a moment.');
+      return;
+    }
     setIsProcessingVision(true);
     setVisionError('');
     try {
@@ -464,7 +486,14 @@ export function AccessibilityView() {
       ctx.drawImage(video, 0, 0);
       const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
       setSnapshots(prev => [dataUrl, ...prev].slice(0, 8));
-      const savedPath = await tauriApi.saveVisionSnapshot(dataUrl);
+      // Bounded like the other vision invokes (defect #45): this raw await
+      // was the one place a dropped IPC response could wedge the one-press
+      // flow forever with the button disabled and no error shown.
+      const savedPath = await withVisionTimeout(
+        tauriApi.saveVisionSnapshot(dataUrl),
+        30_000,
+        'Snapshot save'
+      );
       setImagePath(savedPath);
       const result = await withVisionTimeout(
         tauriApi.describeImage(savedPath, 'scene_summary'),
