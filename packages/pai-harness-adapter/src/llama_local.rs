@@ -17,7 +17,11 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 
-#[derive(Clone, Debug)]
+/// Gap 1 (2026-09-16): the provider's live token tap — a cheap, non-blocking
+/// callback fired once per generated token of a tool-free streamed answer.
+pub type TokenEmitter = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct PaiLlamaLocalProvider {
     provider_id: String,
     model_id: String,
@@ -28,6 +32,29 @@ pub struct PaiLlamaLocalProvider {
     /// the actual image bytes to this provider so vision requests stay
     /// local and the audit trail records digests, not pixels.
     attachments: std::collections::BTreeMap<String, (String, String)>,
+    /// Gap 1 (2026-09-16): live token tap for the desktop UI. When set AND
+    /// the request carries no tools, the completion is sent as SSE and each
+    /// content delta is forwarded here in addition to the harness sink —
+    /// the bridge turns it into a `chat-token` Tauri event so ChatView can
+    /// render the answer token-by-token. Tool-bearing (agentic) requests
+    /// stay on the buffered path: their tool calls must arrive complete
+    /// before the loop can proceed, and streamed call-assembly is
+    /// protocol-risk the loop does not need.
+    token_emitter: Option<TokenEmitter>,
+}
+
+impl std::fmt::Debug for PaiLlamaLocalProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PaiLlamaLocalProvider")
+            .field("provider_id", &self.provider_id)
+            .field("model_id", &self.model_id)
+            .field("port", &self.port)
+            .field("timeout", &self.timeout)
+            .field("attachments", &self.attachments)
+            .field("token_emitter", &self.token_emitter.is_some())
+            .finish()
+    }
 }
 
 impl PaiLlamaLocalProvider {
@@ -45,6 +72,7 @@ impl PaiLlamaLocalProvider {
             port,
             timeout: DEFAULT_TIMEOUT,
             attachments: std::collections::BTreeMap::new(),
+            token_emitter: None,
         })
     }
 
@@ -67,6 +95,19 @@ impl PaiLlamaLocalProvider {
         if !timeout.is_zero() && timeout <= Duration::from_secs(600) {
             self.timeout = timeout;
         }
+        self
+    }
+
+    /// Gap 1 (2026-09-16): install the live token tap (see the field docs).
+    /// The closure must be cheap and non-blocking — it fires once per
+    /// generated token; the desktop bridge only forwards it to the UI event
+    /// queue.
+    #[must_use]
+    pub fn with_token_emitter(
+        mut self,
+        emitter: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> Self {
+        self.token_emitter = Some(emitter);
         self
     }
 
@@ -341,6 +382,11 @@ impl ModelProvider for PaiLlamaLocalProvider {
         // llama.cpp accepts token budgets rather than bytes. Keep this bounded
         // conservatively and let the Harness enforce the exact byte ceiling.
         let max_tokens = (request.max_output_bytes / 4).clamp(64, 8192);
+        // Gap 1 (2026-09-16): tool-free requests with a token tap installed
+        // stream over SSE so the answer renders token-by-token in the UI;
+        // agentic (tool-bearing) requests keep the buffered path — their tool
+        // calls must arrive complete before the loop can continue.
+        let streaming = tools.is_empty() && self.token_emitter.is_some();
         let mut body = json!({
             "model": self.model_id,
             "messages": messages,
@@ -353,7 +399,7 @@ impl ModelProvider for PaiLlamaLocalProvider {
             // format-faithful, deterministic outputs; plain Q&A (no tools)
             // keeps the livelier 0.7.
             "temperature": if tools.is_empty() { 0.7 } else { 0.2 },
-            "stream": false,
+            "stream": streaming,
             "chat_template_kwargs": { "enable_thinking": false },
             "reasoning_budget": 0,
         });
@@ -361,9 +407,17 @@ impl ModelProvider for PaiLlamaLocalProvider {
             body["tools"] = JsonValue::Array(tools);
             body["tool_choice"] = json!("auto");
         }
+        if streaming {
+            // Keep the harness token budget truthful: llama-server puts the
+            // final usage block in the last SSE chunk when asked.
+            body["stream_options"] = json!({ "include_usage": true });
+        }
 
         let request_bytes = serde_json::to_vec(&body)
             .map_err(|error| Self::failure("pai.model.encode", error.to_string()))?;
+        if streaming {
+            return self.stream_sse(request, request_bytes, sink, cancel);
+        }
         let http = post_json_localhost(self.port, &request_bytes, self.timeout, cancel)?;
         if !(200..300).contains(&http.status) {
             let detail = String::from_utf8_lossy(&http.body);
@@ -484,6 +538,118 @@ impl ModelProvider for PaiLlamaLocalProvider {
     }
 }
 
+impl PaiLlamaLocalProvider {
+    /// Gap 1 (2026-09-16): SSE completion path for tool-free requests with a
+    /// token tap installed. Streams llama-server's OpenAI
+    /// `text/event-stream` answer token-by-token through BOTH the harness
+    /// sink and the provider's token emitter, then assembles the same
+    /// `ModelResponse` the buffered path returns — the harness contract and
+    /// budgets stay identical, only the transport changes.
+    fn stream_sse(
+        &self,
+        request: &ModelRequest,
+        request_bytes: Vec<u8>,
+        sink: &mut dyn FnMut(ModelChunk) -> HarnessResult<()>,
+        cancel: &CancellationToken,
+    ) -> HarnessResult<ModelResponse> {
+        let emitter = self.token_emitter.clone().ok_or_else(|| {
+            Self::failure(
+                "pai.model.stream",
+                "SSE completion requested without a token emitter",
+            )
+        })?;
+
+        let mut text = String::new();
+        let mut finish_reason: Option<String> = None;
+        let mut usage: Option<(u64, u64)> = None;
+        let mut provider_request_id: Option<String> = None;
+        // llama.cpp emits exactly one SSE chunk per generated token, so the
+        // delta count is a truthful completion-token count even on servers
+        // that omit the final usage block.
+        let mut deltas = 0u64;
+
+        sink(ModelChunk::Start { block: 0 })?;
+
+        {
+            let text_ref = &mut text;
+            let finish_ref = &mut finish_reason;
+            let usage_ref = &mut usage;
+            let id_ref = &mut provider_request_id;
+            let deltas_ref = &mut deltas;
+            let sink_ref: &mut dyn FnMut(ModelChunk) -> HarnessResult<()> = &mut *sink;
+            let mut on_delta = |event: SseDelta| -> HarnessResult<()> {
+                if id_ref.as_ref().is_none() {
+                    *id_ref = event.id;
+                }
+                if event.finish_reason.is_some() {
+                    *finish_ref = event.finish_reason;
+                }
+                if event.usage.is_some() {
+                    *usage_ref = event.usage;
+                }
+                let Some(delta) = event.content else {
+                    return Ok(());
+                };
+                if delta.is_empty() {
+                    return Ok(());
+                }
+                *deltas_ref = deltas_ref.saturating_add(1);
+                text_ref.push_str(&delta);
+                // Same byte ceiling as the buffered path, enforced DURING
+                // generation instead of after it — an over-budget stream is
+                // cut the moment it crosses the line, not after it finishes.
+                if text_ref.len() > request.max_output_bytes {
+                    return Err(Failure::new(
+                        ErrorCode::BudgetExceeded,
+                        FailureClass::Resource,
+                        "pai.model.output",
+                        "model output exceeded the Harness byte budget",
+                    ));
+                }
+                sink_ref(ModelChunk::TextDelta {
+                    block: 0,
+                    text: delta.clone(),
+                })?;
+                emitter(delta.as_str());
+                Ok(())
+            };
+            post_sse_localhost(
+                self.port,
+                &request_bytes,
+                self.timeout,
+                cancel,
+                &mut on_delta,
+            )?;
+        }
+
+        cancel.check("pai.model.local")?;
+        sink(ModelChunk::End { block: 0 })?;
+
+        let (input_units, output_units) = usage.unwrap_or((0, deltas));
+        sink(ModelChunk::Usage {
+            input_units,
+            output_units,
+        })?;
+
+        // Tool-free path by construction: finish_reason "tool_calls" cannot
+        // occur here (the buffered path handles tool-bearing requests).
+        let finish = if finish_reason.as_deref() == Some("length") {
+            FinishReason::Length
+        } else {
+            FinishReason::Stop
+        };
+        sink(ModelChunk::Finish { reason: finish })?;
+
+        Ok(ModelResponse {
+            text,
+            finish,
+            input_units,
+            output_units,
+            provider_request_id,
+        })
+    }
+}
+
 const HTTP_IO_POLL: Duration = Duration::from_millis(150);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_HTTP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -535,6 +701,262 @@ pub(crate) fn post_json_localhost(
         let _ = stream.shutdown(Shutdown::Both);
     }
     response
+}
+
+/// One parsed `data:` event from llama-server's SSE completion stream.
+struct SseDelta {
+    content: Option<String>,
+    finish_reason: Option<String>,
+    /// (prompt_tokens, completion_tokens) from the final usage chunk, when
+    /// the server honors `stream_options.include_usage`.
+    usage: Option<(u64, u64)>,
+    id: Option<String>,
+}
+
+/// Gap 1 (2026-09-16): streaming sibling of `post_json_localhost` for
+/// tool-free completions. Same localhost-only socket, cancellation and
+/// deadline discipline — but the chunked `text/event-stream` body is decoded
+/// INCREMENTALLY and every parsed `data:` event reaches `on_delta` the
+/// moment it arrives, instead of the whole body buffering first.
+fn post_sse_localhost(
+    port: u16,
+    body: &[u8],
+    timeout: Duration,
+    cancel: &CancellationToken,
+    on_delta: &mut dyn FnMut(SseDelta) -> HarnessResult<()>,
+) -> HarnessResult<()> {
+    cancel.check("pai.model.connect")?;
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream =
+        TcpStream::connect_timeout(&address, HTTP_CONNECT_TIMEOUT).map_err(|error| {
+            PaiLlamaLocalProvider::failure(
+                "pai.model.connect",
+                format!("could not connect to verified local llama-server: {error}"),
+            )
+            .retryable(Some(250))
+        })?;
+    stream
+        .set_read_timeout(Some(HTTP_IO_POLL))
+        .map_err(|error| PaiLlamaLocalProvider::failure("pai.model.socket", error.to_string()))?;
+    stream
+        .set_write_timeout(Some(HTTP_IO_POLL))
+        .map_err(|error| PaiLlamaLocalProvider::failure("pai.model.socket", error.to_string()))?;
+    stream.set_nodelay(true).ok();
+
+    let header = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let deadline = Instant::now() + timeout;
+    write_cancelable(&mut stream, header.as_bytes(), deadline, cancel)?;
+    write_cancelable(&mut stream, body, deadline, cancel)?;
+    stream
+        .flush()
+        .map_err(|error| PaiLlamaLocalProvider::failure("pai.model.write", error.to_string()))?;
+
+    let response = read_sse_response(&mut stream, deadline, cancel, on_delta);
+    if response.is_err() {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+    response
+}
+
+/// Incrementally reads an SSE HTTP response off the socket, decoding chunked
+/// framing as bytes arrive and forwarding each `data:` event through
+/// `on_delta`. Returns when the server sends `data: [DONE]`, closes the
+/// connection, delivers a terminal zero-length chunk, or fills the declared
+/// Content-Length — whichever comes first.
+fn read_sse_response(
+    stream: &mut TcpStream,
+    deadline: Instant,
+    cancel: &CancellationToken,
+    on_delta: &mut dyn FnMut(SseDelta) -> HarnessResult<()>,
+) -> HarnessResult<()> {
+    let mut pending: Vec<u8> = Vec::with_capacity(16 * 1024);
+    let mut scratch = [0u8; 16 * 1024];
+    let mut line_buffer: Vec<u8> = Vec::with_capacity(1024);
+    let mut headers_done = false;
+    let mut identity_remaining: Option<usize> = None;
+    let mut chunked = false;
+    let mut in_chunk = false;
+    let mut chunk_remaining: usize = 0;
+    let mut received: usize = 0;
+    let mut done = false;
+
+    while !done {
+        cancel.check("pai.model.read")?;
+        if Instant::now() >= deadline {
+            return Err(Failure::new(
+                ErrorCode::Timeout,
+                FailureClass::Resource,
+                "pai.model.read",
+                "local model generation exceeded its deadline",
+            ));
+        }
+
+        match stream.read(&mut scratch) {
+            Ok(0) => break, // server closed the connection: stream over
+            Ok(count) => {
+                if received.saturating_add(count) > MAX_HTTP_RESPONSE_BYTES {
+                    return Err(Failure::new(
+                        ErrorCode::BudgetExceeded,
+                        FailureClass::Resource,
+                        "pai.model.read",
+                        "local llama-server HTTP response exceeded 16 MiB",
+                    ));
+                }
+                received = received.saturating_add(count);
+                pending.extend_from_slice(&scratch[..count]);
+            }
+            Err(error) if is_poll_timeout(&error) => continue,
+            Err(error) => {
+                return Err(PaiLlamaLocalProvider::failure(
+                    "pai.model.read",
+                    error.to_string(),
+                ));
+            }
+        }
+
+        loop {
+            if !headers_done {
+                let Some(header_end) = find_subslice(&pending, b"\r\n\r\n") else {
+                    break;
+                };
+                let (status, length, is_chunked) = parse_headers(&pending[..header_end])?;
+                if !(200..300).contains(&(status as usize)) {
+                    return Err(PaiLlamaLocalProvider::failure(
+                        "pai.model.response",
+                        format!("local llama-server returned HTTP {status}"),
+                    ));
+                }
+                identity_remaining = length;
+                chunked = is_chunked;
+                pending.drain(..header_end + 4);
+                headers_done = true;
+            }
+
+            if chunked {
+                if in_chunk {
+                    let take = chunk_remaining.min(pending.len());
+                    if take == 0 {
+                        break;
+                    }
+                    feed_sse_bytes(&pending[..take], &mut line_buffer, on_delta, &mut done)?;
+                    pending.drain(..take);
+                    chunk_remaining -= take;
+                    if chunk_remaining == 0 {
+                        // The chunk is followed by a bare CRLF; the size-line
+                        // parser below skips empty lines, so no extra state.
+                        in_chunk = false;
+                    }
+                } else {
+                    let Some(newline) = pending.iter().position(|byte| *byte == b'\n') else {
+                        break;
+                    };
+                    let size_line = String::from_utf8_lossy(&pending[..newline])
+                        .trim()
+                        .to_owned();
+                    pending.drain(..newline + 1);
+                    if size_line.is_empty() {
+                        continue; // CRLF terminating the previous chunk
+                    }
+                    let size_token = size_line.split(';').next().unwrap_or_default().trim();
+                    let size = usize::from_str_radix(size_token, 16).map_err(|_| {
+                        PaiLlamaLocalProvider::failure(
+                            "pai.model.http",
+                            "invalid chunk size from local llama-server",
+                        )
+                    })?;
+                    if size == 0 {
+                        done = true; // terminal chunk: body complete
+                        break;
+                    }
+                    chunk_remaining = size;
+                    in_chunk = true;
+                }
+            } else if let Some(remaining) = identity_remaining {
+                let take = pending.len().min(remaining);
+                if take == 0 {
+                    done = true; // declared body fully delivered
+                    break;
+                }
+                feed_sse_bytes(&pending[..take], &mut line_buffer, on_delta, &mut done)?;
+                pending.drain(..take);
+                identity_remaining = Some(remaining - take);
+            } else {
+                // No framing declared: Connection: close semantics — every
+                // received byte is body until the server closes.
+                if !pending.is_empty() {
+                    feed_sse_bytes(&pending, &mut line_buffer, on_delta, &mut done)?;
+                    pending.clear();
+                }
+                break;
+            }
+
+            if done {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Feeds raw SSE body bytes into the line assembler; every complete
+/// `data: {...}` line becomes one `SseDelta` through `on_delta`. Lines that
+/// are not `data:` events (SSE comments, `event:`/`id:`/`retry:` fields,
+/// keep-alive blanks) are ignored, as are payloads that do not parse as
+/// JSON — the stream must survive a stray line, not die on it.
+fn feed_sse_bytes(
+    bytes: &[u8],
+    line_buffer: &mut Vec<u8>,
+    on_delta: &mut dyn FnMut(SseDelta) -> HarnessResult<()>,
+    done: &mut bool,
+) -> HarnessResult<()> {
+    for &byte in bytes {
+        if byte != b'\n' {
+            line_buffer.push(byte);
+            continue;
+        }
+        let line = String::from_utf8_lossy(line_buffer).trim().to_owned();
+        line_buffer.clear();
+        let Some(payload) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            *done = true;
+            return Ok(());
+        }
+        if payload.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<JsonValue>(payload) else {
+            continue;
+        };
+        on_delta(SseDelta {
+            content: event
+                .pointer("/choices/0/delta/content")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned),
+            finish_reason: event
+                .pointer("/choices/0/finish_reason")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned),
+            usage: event.get("usage").and_then(|usage| {
+                let input = usage.get("prompt_tokens").and_then(JsonValue::as_u64)?;
+                let output = usage
+                    .get("completion_tokens")
+                    .and_then(JsonValue::as_u64)
+                    .unwrap_or(0);
+                Some((input, output))
+            }),
+            id: event
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned),
+        })?;
+    }
+    Ok(())
 }
 
 fn write_cancelable(
