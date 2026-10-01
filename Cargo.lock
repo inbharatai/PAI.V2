@@ -5436,6 +5436,7 @@ dependencies = [
  "unoone-runtime-select",
  "unoone-speech-contracts",
  "unoone-text",
+ "unoone-tool-contracts",
  "unoone-usb-manifest",
  "unoone-vault-core",
  "uuid",
@@ -5476,6 +5477,14 @@ name = "unoone-text"
 version = "0.1.0"
 dependencies = [
  "unicode-segmentation",
+]
+
+[[package]]
+name = "unoone-tool-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

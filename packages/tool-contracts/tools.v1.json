@@ -1,0 +1,1216 @@
+{
+  "schema": "inbharat.pai.tools.v1",
+  "description": "Single source of truth for the PAI tool vocabulary: canonical id, JSON argument schema, platform availability, permission, risk class, timeout, verification, and audit metadata. Android tool ids are pinned by trained tool-call datasets and are never renamed; cross-platform concepts are linked with `equivalent`. Risk classes use the Android SafetyGuard tiers (DIRECT/CONFIRM/STRONG_CONFIRM/BLOCK); harness tools map by confirmation mode: Always->STRONG_CONFIRM, OnSideEffect->CONFIRM, Never->DIRECT.",
+  "risk_class_mapping": {
+    "harness_confirmation_mode": {
+      "Always": "STRONG_CONFIRM",
+      "OnSideEffect": "CONFIRM",
+      "Never": "DIRECT"
+    }
+  },
+  "tools": [
+    {
+      "id": "create_note",
+      "description": "Create a local note",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "description": "Short title for the note"
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "required": true,
+          "description": "Full note content"
+        }
+      ],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "search_notes",
+      "description": "Search saved notes by keyword",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "summarize_text",
+      "description": "Summarize a block of text",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "speak_response",
+      "description": "Speak a response to the user through offline TTS",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "voice_recording",
+      "description": "Record a short voice memo, transcribe it offline, and save it as a note",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "runtime:RECORD_AUDIO",
+      "params": [
+        {
+          "name": "duration_seconds",
+          "type": "integer",
+          "required": false,
+          "description": "Max recording duration in seconds (1-30, default 5)"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "web_search",
+      "description": "Search the web for an answer (online only; returns nothing offline). Uses a privacy-respecting scrape, never auto-opens links",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_chrome",
+      "description": "Open the Chrome browser",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_app",
+      "description": "Open any installed app by package name or friendly name",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [
+        {
+          "name": "app_name",
+          "type": "string",
+          "required": true,
+          "description": "Human-readable app name, e.g. WhatsApp"
+        }
+      ],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_url",
+      "description": "Open a web URL after safety sanitization",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_camera",
+      "description": "Launch the device camera app",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "runtime:CAMERA",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "system_control",
+      "description": "Control the device UI via AccessibilityService",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "accessibility",
+      "params": [
+        {
+          "name": "action",
+          "type": "string",
+          "required": true,
+          "description": "Action: click, type, fill, scroll_up, scroll_down, swipe, go_back, go_home, open_notifications, open_recents, find_and_click, long_press, read_screen"
+        },
+        {
+          "name": "target",
+          "type": "string",
+          "required": false,
+          "description": "Target text or direction"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active",
+      "legacy": true,
+      "legacy_note": "decomposed into atomic tools; accepted for backward compatibility, prefer the replacement"
+    },
+    {
+      "id": "go_home",
+      "description": "Navigate to the device home screen",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "accessibility",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "go_back",
+      "description": "Navigate back to the previous screen",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "accessibility",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "scroll",
+      "description": "Scroll in a direction: up, down, left, or right",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "accessibility",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "click_accessibility_node",
+      "description": "Click an accessibility node by its node ID for precise UI interaction",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "accessibility",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "type_into_accessibility_node",
+      "description": "Type text into an accessibility node by its node ID",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "accessibility",
+      "params": [
+        {
+          "name": "node_id",
+          "type": "string",
+          "required": true,
+          "description": "The accessibility node ID to type into"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_notifications",
+      "description": "Open the notification shade",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "accessibility",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_recents",
+      "description": "Open the recent apps switcher",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "accessibility",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "long_press_accessibility_node",
+      "description": "Long-press an accessibility node by its node ID",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "accessibility",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "read_screen",
+      "description": "Read visible text from the current screen",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "accessibility",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "ocr_screen",
+      "description": "Capture a screenshot and run OCR for apps without accessibility labels",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "media_projection",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "create_skill",
+      "description": "Create a reusable multi-step skill",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "none",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true,
+          "description": "Skill name"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "draft_email",
+      "description": "Draft an email; the user must review and press send",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "none",
+      "params": [
+        {
+          "name": "to",
+          "type": "string",
+          "required": true,
+          "description": "Recipient email address"
+        },
+        {
+          "name": "subject",
+          "type": "string",
+          "required": true,
+          "description": "Email subject"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "send_whatsapp",
+      "description": "Open WhatsApp with a pre-filled message; the user must press send",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "none",
+      "params": [
+        {
+          "name": "number",
+          "type": "string",
+          "required": true,
+          "description": "Phone number with optional country code"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active",
+      "legacy": true,
+      "legacy_note": "decomposed into atomic tools; accepted for backward compatibility, prefer the replacement"
+    },
+    {
+      "id": "resolve_contact",
+      "description": "Resolve a contact name to a WhatsApp-reachable phone number. Use this first before drafting a WhatsApp message.",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "runtime:READ_CONTACTS",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "draft_whatsapp_message",
+      "description": "Open WhatsApp with a pre-filled message draft for the specified contact. The user must review and press send.",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "none",
+      "params": [
+        {
+          "name": "contact_name",
+          "type": "string",
+          "required": true,
+          "description": "Contact name or phone number"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "send_prepared_whatsapp",
+      "description": "Send a prepared WhatsApp message after user confirmation",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "none",
+      "params": [
+        {
+          "name": "contact_name",
+          "type": "string",
+          "required": true,
+          "description": "Contact name or phone number"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "check_calendar",
+      "description": "Check today's calendar events",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "runtime:READ_CALENDAR",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_calendar",
+      "description": "Open the device's default calendar app",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_calendar_insert",
+      "description": "Open the calendar event creator",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "none",
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "description": "Event title"
+        },
+        {
+          "name": "start_time",
+          "type": "string",
+          "required": false,
+          "description": "Optional start time ISO string"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active",
+      "legacy": true,
+      "legacy_note": "decomposed into atomic tools; accepted for backward compatibility, prefer the replacement"
+    },
+    {
+      "id": "check_calendar_conflict",
+      "description": "Check for calendar conflicts at a proposed time before creating an event",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "runtime:READ_CALENDAR",
+      "params": [
+        {
+          "name": "date",
+          "type": "string",
+          "required": false,
+          "description": "Date for the event (e.g. '2026-07-22')"
+        },
+        {
+          "name": "start_time",
+          "type": "string",
+          "required": false,
+          "description": "Start time (e.g. '15:00')"
+        }
+      ],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "create_calendar_event",
+      "description": "Create a calendar event. Always check for conflicts first using check_calendar_conflict.",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "runtime:READ_CALENDAR",
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "required": true,
+          "description": "Event title"
+        },
+        {
+          "name": "date",
+          "type": "string",
+          "required": false,
+          "description": "Date for the event (e.g. '2026-07-22')"
+        },
+        {
+          "name": "start_time",
+          "type": "string",
+          "required": false,
+          "description": "Start time (e.g. '15:00')"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "open_dialer",
+      "description": "Open the phone dialer with an optional number",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "share_text",
+      "description": "Share text through the system share sheet",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "action-verifier: foreground app change verified",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "delete_notes",
+      "description": "Delete notes matching a query",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "delete_all_notes",
+      "description": "Delete all saved notes",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "export_data",
+      "description": "Export user data",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "detect_objects",
+      "description": "Activate blind-aid camera and obstacle detection",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "runtime:CAMERA",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "deactivate_blind_aid",
+      "description": "Deactivate blind-aid camera and obstacle detection",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "describe_scene",
+      "description": "Describe the current screen as a short scene (foreground app + visible text); optionally narrow what to look for with aspect. Sensitive: captures the screen.",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "media_projection",
+      "params": [],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "secure_browser_task",
+      "description": "Open the UnoOne Secure Browser and run a PageAgent task. Standard accepts approved origins such as unigurus, uniassist, testsprep and inbharat. Explicit Prototype/Off accepts any public HTTPS URL. Standard keeps confirmations and sensitive-step gates enabled.",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "none",
+      "params": [
+        {
+          "name": "origin",
+          "type": "string",
+          "required": true,
+          "description": "Approved origin: friendly name ('unigurus'), bare host ('unigurus.com'), or full HTTPS URL"
+        }
+      ],
+      "timeout_ms": 60000,
+      "timeout_note": "bounded by the 60 s user-confirmation window",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "prepare_document_fill",
+      "description": "Open the fully offline Document Agent to fill a PDF AcroForm or DOCX template and save a new copy",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "no explicit per-tool timeout (local execution)",
+      "verification": "executor-acknowledged result (ActionVerifier deterministic path where applicable)",
+      "audit": true,
+      "status": "active"
+    },
+    {
+      "id": "access_passwords",
+      "description": "Dangerous action class classified BLOCK by SafetyGuard; no executor exists",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "BLOCK",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "never executed",
+      "verification": "classified-only: rejected before execution",
+      "audit": true,
+      "status": "blocked"
+    },
+    {
+      "id": "install_app",
+      "description": "Dangerous action class classified BLOCK by SafetyGuard; no executor exists",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "BLOCK",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "never executed",
+      "verification": "classified-only: rejected before execution",
+      "audit": true,
+      "status": "blocked"
+    },
+    {
+      "id": "make_payment",
+      "description": "Dangerous action class classified BLOCK by SafetyGuard; no executor exists",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "BLOCK",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "never executed",
+      "verification": "classified-only: rejected before execution",
+      "audit": true,
+      "status": "blocked"
+    },
+    {
+      "id": "send_message",
+      "description": "Dangerous action class classified BLOCK by SafetyGuard; no executor exists",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "BLOCK",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "never executed",
+      "verification": "classified-only: rejected before execution",
+      "audit": true,
+      "status": "blocked"
+    },
+    {
+      "id": "silent_control",
+      "description": "Dangerous action class classified BLOCK by SafetyGuard; no executor exists",
+      "platforms": [
+        "android"
+      ],
+      "risk_class": "BLOCK",
+      "permission": "none",
+      "params": [],
+      "timeout_ms": null,
+      "timeout_note": "never executed",
+      "verification": "classified-only: rejected before execution",
+      "audit": true,
+      "status": "blocked"
+    },
+    {
+      "id": "pai.search_notes",
+      "description": "Search the user's local Pocket AI notes, memories and migrated document text.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "capability:FileRead",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50}},\"required\":[\"query\"],\"additionalProperties\":false}",
+      "timeout_ms": 30000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "bounded-local-read-v1",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Read",
+        "confirmation_mode": "Never",
+        "capabilities": [
+          "FileRead"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      },
+      "equivalent": "search_notes"
+    },
+    {
+      "id": "pai.list_documents",
+      "description": "List documents available in the local Pocket AI vault.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "capability:FileRead",
+      "input_schema": "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+      "timeout_ms": 30000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "bounded-local-read-v1",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Read",
+        "confirmation_mode": "Never",
+        "capabilities": [
+          "FileRead"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "pai.read_document",
+      "description": "Read one local Pocket AI document by its document id.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "capability:FileRead",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"document_id\":{\"type\":\"string\"}},\"required\":[\"document_id\"],\"additionalProperties\":false}",
+      "timeout_ms": 30000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "bounded-local-read-v1",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Read",
+        "confirmation_mode": "Never",
+        "capabilities": [
+          "FileRead"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "pai.verify_vault",
+      "description": "Verify the Pocket AI package/vault manifest integrity.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "capability:FileRead",
+      "input_schema": "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+      "timeout_ms": 30000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "bounded-local-read-v1",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Read",
+        "confirmation_mode": "Never",
+        "capabilities": [
+          "FileRead"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "fs.read",
+      "description": "Read a file inside the rooted workspace fence.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "capability:FileRead",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}",
+      "timeout_ms": 10000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "result states the exact byte size read",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Read",
+        "confirmation_mode": "Never",
+        "capabilities": [
+          "FileRead"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "fs.list",
+      "description": "List entries of a directory inside the rooted workspace fence.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "capability:FileRead",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"suffix\":{\"type\":\"string\",\"description\":\"optional: only return entries whose names end with this suffix, e.g. \\\".js\\\" — the result states the exact matching count so you never have to count lines yourself\"}},\"required\":[\"path\"],\"additionalProperties\":false}",
+      "timeout_ms": 10000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "result states exact filtered/total counts and the filter applied",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Read",
+        "confirmation_mode": "Never",
+        "capabilities": [
+          "FileRead"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "fs.write",
+      "description": "Write a file inside the rooted workspace fence.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "capability:FileWrite",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}",
+      "timeout_ms": 10000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "result states path and exact bytes written",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Write",
+        "confirmation_mode": "OnSideEffect",
+        "capabilities": [
+          "FileWrite"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "fs.mkdir",
+      "description": "Create a directory inside the rooted workspace fence.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "capability:FileWrite",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}",
+      "timeout_ms": 10000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "result echoes the created path",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Write",
+        "confirmation_mode": "OnSideEffect",
+        "capabilities": [
+          "FileWrite"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "process.run",
+      "description": "Run an allowlisted direct-argv program with bounded output.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "STRONG_CONFIRM",
+      "permission": "capability:ProcessSpawn",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"program\":{\"type\":\"string\"},\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"background\":{\"type\":\"boolean\",\"description\":\"true spawns the program detached so it keeps running (for servers) — returns immediately with a pid instead of waiting for exit; default false\"}},\"required\":[\"program\",\"args\"],\"additionalProperties\":false}",
+      "timeout_ms": 180000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "explicit user confirmation (Always); status/stdout/stderr returned bounded",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Process",
+        "confirmation_mode": "Always",
+        "capabilities": [
+          "ProcessSpawn"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      },
+      "note": "Power additionally restricts the program to FULL_ACCESS_PROGRAMS (direct-argv allowlist)"
+    },
+    {
+      "id": "workspace.search",
+      "description": "Search the user's workspace files.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "capability:FileRead",
+      "input_schema": "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+      "timeout_ms": 60000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "bounded result set with match excerpts",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Read",
+        "confirmation_mode": "Never",
+        "capabilities": [
+          "FileRead"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "workspace.patch",
+      "description": "Patch a workspace file by unique text match.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "capability:FileWrite",
+      "input_schema": "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+      "timeout_ms": 30000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "unique-match atomic replace; ambiguous matches are refused",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Write",
+        "confirmation_mode": "OnSideEffect",
+        "capabilities": [
+          "FileWrite"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "browser.act",
+      "description": "Drive the real WebView2 browser: navigate, extract, click, type, scroll.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "capability:Workspace",
+      "input_schema": "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+      "timeout_ms": 30000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "action result verified against the live WebView",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Process",
+        "confirmation_mode": "OnSideEffect",
+        "capabilities": [
+          "Workspace"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
+      "id": "agent.spawn",
+      "description": "Spawn a sub-agent with narrowed authority inside the parent budget (L3 only).",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "DIRECT",
+      "permission": "capability:Subagent",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"task\":{\"type\":\"string\",\"description\":\"The complete, self-contained task for the sub-agent: exactly what to build or check, with every path and detail it needs. Its final report returns as this tool's output.\"}},\"required\":[\"task\"],\"additionalProperties\":false}",
+      "timeout_ms": 3600000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "sub-agent runs the same non-bypassable pipeline; report returned as tool output",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "None",
+        "confirmation_mode": "Never",
+        "capabilities": [
+          "Subagent"
+        ],
+        "supported_levels": [
+          "L3"
+        ]
+      },
+      "note": "Confirmation Never is derived from the manifest; the sub-agent authority can only narrow the parent's and every child action re-enters the full permission pipeline"
+    }
+  ]
+}

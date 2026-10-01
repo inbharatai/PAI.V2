@@ -9,6 +9,7 @@ on:
       - 'vendor/inbharat-harness/**'
       - 'vendor/Inbharat-audiocpp/**'
       - 'scripts/check_speech_language_sync.py'
+      - 'scripts/check_tool_contract_sync.py'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/desktop-ci.yml'
@@ -20,6 +21,7 @@ on:
       - 'vendor/inbharat-harness/**'
       - 'vendor/Inbharat-audiocpp/**'
       - 'scripts/check_speech_language_sync.py'
+      - 'scripts/check_tool_contract_sync.py'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/desktop-ci.yml'
@@ -99,6 +101,20 @@ jobs:
       # changes; this job catches Rust/JSON-side edits that must not drift.
       - name: Kotlin mirror == languages.v1.json
         run: python3 scripts/check_speech_language_sync.py
+
+  tool-contract-sync:
+    name: Tool contract sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The canonical tool vocabulary is packages/tool-contracts/tools.v1.json;
+      # the Android production tables (CanonicalToolRegistry / SafetyGuard /
+      # ToolPermissionRegistry) must stay in sync. android-ci.yml runs this
+      # same check for Android-path changes; this job catches contract-side
+      # edits that must not drift from the Kotlin truth.
+      - name: tools.v1.json == Kotlin production tables
+        run: python3 scripts/check_tool_contract_sync.py
 
   vendor-audio-linux:
     name: InBharat Audio (Linux, ctest + ABI)

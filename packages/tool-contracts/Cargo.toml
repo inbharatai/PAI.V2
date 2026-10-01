@@ -1,0 +1,11 @@
+[package]
+name = "unoone-tool-contracts"
+version = "0.1.0"
+edition = "2021"
+description = "Single source of truth for the PAI tool vocabulary (tools.v1.json) — canonical ids, schemas, platform availability, permission, risk class, timeout, verification, audit. Dependency-light on purpose: the same JSON stays readable by the Android-side sync check (scripts/check_tool_contract_sync.py)."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]

@@ -28,6 +28,7 @@ mod security;
 // provider coverage.
 mod speech;
 mod startup;
+mod tool_contract_pin;
 mod voice;
 
 use base64::Engine;

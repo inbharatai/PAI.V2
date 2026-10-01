@@ -279,7 +279,7 @@ enum DesktopToolKind {
     VerifyVault,
 }
 
-struct DesktopReadTool {
+pub(crate) struct DesktopReadTool {
     manifest: ToolManifest,
     kind: DesktopToolKind,
     vault_root: String,
@@ -606,7 +606,7 @@ fn required_string<'a>(arguments: &'a ToolArguments, key: &str) -> HarnessResult
         })
 }
 
-fn desktop_read_tools(
+pub(crate) fn desktop_read_tools(
     vault_root: &str,
     vault: Arc<Mutex<Option<Vault>>>,
     safety: Arc<Mutex<DesktopSafetyGuard>>,
@@ -1072,13 +1072,13 @@ fn value_as_bool(value: &Value) -> Option<bool> {
 /// are enumerated by `list`, files are read by `read_text`), so path escape,
 /// symlink planting and oversized files are rejected by the fence rather
 /// than by this tool's own logic.
-struct DesktopSearchTool {
+pub(crate) struct DesktopSearchTool {
     manifest: ToolManifest,
     filesystem: RootedFs,
 }
 
 impl DesktopSearchTool {
-    fn new(filesystem: RootedFs) -> Self {
+    pub(crate) fn new(filesystem: RootedFs) -> Self {
         Self {
             manifest: ToolManifest {
                 id: "workspace.search".to_owned(),
@@ -1254,13 +1254,13 @@ impl Tool for DesktopSearchTool {
 /// it reproduces a whole file). Reads and writes go through the same
 /// `RootedFs` fence as the built-in fs tools; the atomic write means a
 /// failed or partial patch never leaves a torn file.
-struct DesktopPatchTool {
+pub(crate) struct DesktopPatchTool {
     manifest: ToolManifest,
     filesystem: RootedFs,
 }
 
 impl DesktopPatchTool {
-    fn new(filesystem: RootedFs) -> Self {
+    pub(crate) fn new(filesystem: RootedFs) -> Self {
         Self {
             manifest: ToolManifest {
                 id: "workspace.patch".to_owned(),
