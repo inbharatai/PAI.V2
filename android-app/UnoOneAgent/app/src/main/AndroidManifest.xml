@@ -29,6 +29,12 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- P2-A auto-launch: start the wake-word voice service on boot, only when the
+         user has explicitly turned "Start automatically when the phone starts" ON
+         in Settings. BOOT_COMPLETED is a protected system broadcast — only the OS
+         can send it, so the exported receiver cannot be triggered by other apps. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <!-- System Integration & Control -->
     <!-- READ_CONTACTS removed: declared but never used in code. Will trigger Play review. -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
@@ -137,6 +143,18 @@
             android:name="com.unoone.agent.voice.VoiceService"
             android:foregroundServiceType="microphone"
             android:exported="false" />
+
+        <!-- P2-A auto-launch: boots the wake-word service when the user has opted in -->
+        <receiver
+            android:name=".autostart.BootCompletedReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- Some OEMs send QUICKBOOT_POWERON instead/in addition -->
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

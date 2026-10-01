@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.UnoOneApplication
+import com.unoone.agent.autostart.AutoStartPolicy
 import com.unoone.agent.core.runtime.AgentRuntimeGate
 import com.unoone.agent.core.util.Logger
 import com.unoone.agent.modelmanager.ModelManager
@@ -63,6 +64,11 @@ class SettingsViewModel(context: Context) : ViewModel() {
     private val _securityLevel = MutableStateFlow(SecurityLevel.current(context))
     val securityLevel: StateFlow<SecurityLevel> = _securityLevel.asStateFlow()
 
+    // P2-A auto-launch: start the wake-word service on boot. Default OFF — the
+    // boot receiver only fires when the user explicitly opted in here.
+    private val _autoStartEnabled = MutableStateFlow(prefs.getBoolean(AutoStartPolicy.PREF_KEY, false))
+    val autoStartEnabled: StateFlow<Boolean> = _autoStartEnabled.asStateFlow()
+
     init {
         // Voice commands and the Offline Languages screen can both change this preference outside
         // SettingsViewModel. Observing the source of truth keeps the landing-page language chip in
@@ -111,6 +117,17 @@ class SettingsViewModel(context: Context) : ViewModel() {
         _securityLevel.value = level
         SecurityLevel.set(appContext, level)
         Logger.i("SettingsViewModel: security level set to ${level.name}")
+    }
+
+    /**
+     * P2-A: toggle "Start automatically when the phone starts" and persist it.
+     * Default OFF; the boot receiver honours the persisted value plus the
+     * agent-enabled switch, so a disabled agent never wakes itself.
+     */
+    fun setAutoStart(enabled: Boolean) {
+        _autoStartEnabled.value = enabled
+        prefs.edit { putBoolean(AutoStartPolicy.PREF_KEY, enabled) }
+        Logger.i("SettingsViewModel: auto-start on boot set to $enabled")
     }
 
     /**

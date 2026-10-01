@@ -47,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.unoone.agent.PermissionManager
 import com.unoone.agent.safety.SecurityLevel
 import com.unoone.agent.ui.viewmodel.SettingsViewModel
 import com.unoone.agent.voice.VoiceLanguage
@@ -67,6 +68,7 @@ fun SettingsScreen(
     val voiceLanguage by viewModel.voiceLanguage.collectAsState()
     val securityLevel by viewModel.securityLevel.collectAsState()
     val isAgentEnabled by viewModel.isAgentEnabled.collectAsState()
+    val autoStartEnabled by viewModel.autoStartEnabled.collectAsState()
     var showClearConfirmation by remember { mutableStateOf(false) }
     var showDisableConfirmation by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -103,6 +105,43 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(if (isAgentEnabled) "Disable UnoOne" else "Enable UnoOne")
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            // P2-A: auto-launch on boot — the phone-side equivalent of the
+            // laptop's dock watcher. Explicit opt-in, default off.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Start automatically when the phone starts")
+                Switch(
+                    checked = autoStartEnabled,
+                    onCheckedChange = { enabled -> viewModel.setAutoStart(enabled) }
+                )
+            }
+            if (autoStartEnabled) {
+                Text(
+                    "UnoOne's wake-word service starts on boot. If the phone blocks it, exclude UnoOne from battery optimization below — Android may refuse a background mic start otherwise.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        context.startActivity(PermissionManager.getBatteryOptimizationIntent(context))
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (PermissionManager.isIgnoringBatteryOptimizations(context)) {
+                            "Battery optimization: excluded (tap to re-check)"
+                        } else {
+                            "Exclude from battery optimization"
+                        }
+                    )
+                }
             }
         }
 
