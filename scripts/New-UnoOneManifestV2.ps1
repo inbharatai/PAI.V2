@@ -71,6 +71,7 @@ function Get-AssetKind {
 $runtimeRoot = Join-Path $root "RUNTIMES\WINDOWS"
 $modelRoot = Join-Path $root "MODELS\DESKTOP"
 $mobileModelRoot = Join-Path $root "MODELS\MOBILE"
+$mobileApkPath = Join-Path $root "APPS\ANDROID\UnoOne.apk"
 $speechRoot = Join-Path $root "SPEECH"
 $audioRuntimeRoot = Join-Path $runtimeRoot "AUDIO"
 if (-not (Test-Path -LiteralPath $runtimeRoot -PathType Container)) {
@@ -118,6 +119,19 @@ if (Test-Path -LiteralPath $mobileModelRoot -PathType Container) {
             -Id ("mobile-model-" + $file.BaseName.ToLowerInvariant()) `
             -Architecture "arm64-v8a"
     }
+}
+
+# The Android APK is tracked (kind MOBILE_APP) so the drive README's hash-compare
+# instruction is real: the phone or a human can verify APPS/ANDROID/UnoOne.apk
+# against manifest.json. Windows launch validation still never hashes it — it is
+# an arm64 asset, not needed for desktop launch (same policy as MOBILE_MODEL).
+$mobileApkAsset = $null
+if (Test-Path -LiteralPath $mobileApkPath -PathType Leaf) {
+    $mobileApkAsset = New-Asset `
+        -File (Get-Item -LiteralPath $mobileApkPath) `
+        -Kind "MOBILE_APP" `
+        -Id "unoone-android" `
+        -Architecture "arm64-v8a"
 }
 
 # ---- InBharat Audio speech plane (optional: absent SPEECH/ tree -> no section) ----
@@ -202,6 +216,14 @@ if ($null -ne $speechAssets) {
     $windowsPackage["speech"] = $speechAssets
 }
 
+$mobilePackage = [ordered]@{
+    architectures = @("arm64-v8a")
+    models = @($mobileModelAssets)
+}
+if ($null -ne $mobileApkAsset) {
+    $mobilePackage["apk"] = $mobileApkAsset
+}
+
 $manifest = [ordered]@{
     product_id = "com.inbharatai.unoone.pocket-ai"
     schema_version = 2
@@ -214,10 +236,7 @@ $manifest = [ordered]@{
     }
     platforms = [ordered]@{
         windows = $windowsPackage
-        mobile = [ordered]@{
-            architectures = @("arm64-v8a")
-            models = @($mobileModelAssets)
-        }
+        mobile = $mobilePackage
     }
 }
 
@@ -253,6 +272,7 @@ Write-Host "Runtime assets: $($runtimeAssets.Count)"
 Write-Host "Model assets:   $($modelAssets.Count)"
 Write-Host "Voice assets:   $($voiceAssets.Count)"
 Write-Host "Mobile models:  $($mobileModelAssets.Count)"
+if ($null -ne $mobileApkAsset) { Write-Host "Mobile app:     tracked ($($mobileApkAsset.path))" }
 if ($null -ne $speechAssets) {
     Write-Host ("Speech models:    {0}  configs: {1}  acceptance: {2}  runtimes: {3}" -f `
         $speechAssets.models.Count, $speechAssets.configs.Count, `

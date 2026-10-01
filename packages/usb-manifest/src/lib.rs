@@ -45,6 +45,12 @@ pub struct MobilePackage {
     pub architectures: Vec<String>,
     #[serde(default)]
     pub models: Vec<AssetSpec>,
+    /// The staged Android app (APPS/ANDROID/UnoOne.apk). Declaration-only on
+    /// Windows hosts: the hash is recorded for tamper-evidence (the drive
+    /// runbook and the phone can compare it), but desktop launch validation
+    /// never hashes this arm64 asset.
+    #[serde(default)]
+    pub apk: Option<AssetSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +119,10 @@ pub enum AssetKind {
     WhisperModel,
     PiperModel,
     MobileModel,
+    /// The staged Android app (APPS/ANDROID/UnoOne.apk), tracked so the
+    /// recorded sha256 can be compared against the file (drive runbook /
+    /// phone-side check). Never hash-swept on Windows launch.
+    MobileApp,
     VoiceRuntime,
     /// Speech inference weights under SPEECH/models (e.g. qwen3-asr.gguf,
     /// omnivoice.gguf, future IndicConformer .onnx packs).
@@ -401,6 +411,12 @@ pub fn validate_package(root: &Path, scope: ValidationScope) -> ValidationReport
         }
         for runtime in &speech.runtimes {
             validate_asset_kind(runtime, &[AssetKind::SpeechRuntime], &mut failures);
+        }
+    }
+
+    if let Some(mobile) = manifest.platforms.mobile.as_ref() {
+        if let Some(apk) = mobile.apk.as_ref() {
+            validate_asset_kind(apk, &[AssetKind::MobileApp], &mut failures);
         }
     }
 
@@ -823,6 +839,68 @@ mod tests {
         let mut file = File::create(root.join(MANIFEST_FILE)).unwrap();
         file.write_all(serde_json::to_string_pretty(manifest).unwrap().as_bytes())
             .unwrap();
+    }
+
+    /// Stages the Android APK and declares it as the mobile platform's
+    /// `apk` asset (kind MOBILE_APP), mirroring the drive generator.
+    fn stage_mobile_apk(temp: &TempDir, manifest: &mut PocketManifest) {
+        let root = temp.path();
+        fs::create_dir_all(root.join("APPS/ANDROID")).unwrap();
+        fs::write(root.join("APPS/ANDROID/UnoOne.apk"), b"apk-bytes").unwrap();
+        manifest.platforms.mobile = Some(MobilePackage {
+            architectures: vec!["arm64-v8a".to_string()],
+            models: vec![],
+            apk: Some(AssetSpec {
+                id: "unoone-android".to_string(),
+                kind: AssetKind::MobileApp,
+                path: "APPS/ANDROID/UnoOne.apk".to_string(),
+                size_bytes: 9,
+                sha256: sha(b"apk-bytes"),
+                required: true,
+                architecture: Some("arm64-v8a".to_string()),
+            }),
+        });
+    }
+
+    #[test]
+    fn accepts_mobile_apk_declaration_in_all_scopes() {
+        // The APK is a tracked arm64 asset: it must never fail (or be
+        // hash-swept) on an x86_64 Windows host, in either scope.
+        for scope in [ValidationScope::PackageIdentity, ValidationScope::DesktopLaunch] {
+            let (temp, mut manifest) = fixture();
+            stage_mobile_apk(&temp, &mut manifest);
+            write_manifest(temp.path(), &manifest);
+            let report = validate_package(temp.path(), scope);
+            assert!(report.valid, "{scope:?}: {:?}", report.failures);
+        }
+    }
+
+    #[test]
+    fn rejects_mobile_apk_with_wrong_kind() {
+        let (temp, mut manifest) = fixture();
+        stage_mobile_apk(&temp, &mut manifest);
+        let mobile = manifest.platforms.mobile.as_mut().unwrap();
+        mobile.apk.as_mut().unwrap().kind = AssetKind::MobileModel;
+        write_manifest(temp.path(), &manifest);
+        let report = validate_package(temp.path(), ValidationScope::PackageIdentity);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == ValidationFailureCode::AssetKindMismatch));
+    }
+
+    #[test]
+    fn accepts_manifest_json_with_mobile_apk_field_roundtrip() {
+        // The staged starter binary (older usb-manifest) parses the manifest
+        // with unknown-field tolerance; a NEW reader must accept the apk
+        // field and re-serialize it losslessly (serde round-trip).
+        let (temp, mut manifest) = fixture();
+        stage_mobile_apk(&temp, &mut manifest);
+        let json = serde_json::to_string(&manifest).unwrap();
+        let parsed: PocketManifest = serde_json::from_str(&json).unwrap();
+        let apk = parsed.platforms.mobile.unwrap().apk.unwrap();
+        assert_eq!(apk.kind, AssetKind::MobileApp);
+        assert_eq!(apk.path, "APPS/ANDROID/UnoOne.apk");
     }
 
     #[test]
