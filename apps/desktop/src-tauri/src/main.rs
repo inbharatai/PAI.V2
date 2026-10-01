@@ -15,6 +15,10 @@ mod browser;
 mod capability;
 mod document_migration;
 mod documents;
+// P1-C: desktop producer of the shared ProcedureOutcome contract record —
+// every completed harness agent run leaves honest, never-promotable
+// telemetry in the canonical vault.
+mod env_learning;
 mod harness_bridge;
 mod llama;
 mod recording;

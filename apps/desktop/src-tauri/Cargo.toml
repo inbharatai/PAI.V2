@@ -76,6 +76,10 @@ unoone-runtime-select = { path = "../../../packages/runtime-select" }
 # behind. Same rules on every host, testable without the Tauri shell.
 unoone-speech-contracts = { path = "../../../packages/speech-contracts" }
 unoone-tool-contracts = { path = "../../../packages/tool-contracts" }
+# Shared capability contracts (capability.v1.json): the source of truth for
+# the P1-C environment-learning records (ProcedureOutcome/EnvObservation) the
+# desktop producer writes and the desktop parser reads back.
+unoone-capability-contracts = { path = "../../../packages/capability-contracts" }
 # Reusable InBharat Harness (sibling workspace) + Pocket AI product adapter.
 # The Harness is the unified text plane; pai-harness-adapter holds all
 # product-specific glue (vault memory, localhost llama provider, host/model

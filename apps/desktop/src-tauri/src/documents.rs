@@ -1016,11 +1016,15 @@ fn legacy_ids_for_parents(
 /// `VaultRecordFactory`: `{"kind":"note",title,content,tags}` inside DOCUMENT
 /// records, `{"kind":"memory",key,value,type}` inside MEMORY records,
 /// `{"kind":"skill",...}` inside DOCUMENT records (skills mirror as
-/// documents) and `{"kind":"transcript",sessionId,role,content,inputType}`
-/// inside TRANSCRIPT records (the universal conversation history).
+/// documents), `{"kind":"transcript",sessionId,role,content,inputType}`
+/// inside TRANSCRIPT records (the universal conversation history) and
+/// `{"kind":"envobs",subject,observedCapability,...}` inside DOCUMENT records
+/// (P1-C user-confirmed capability facts). The desktop's own env-learning
+/// producer writes `{"kind":"procedure_outcome",procedureId,...,outcomeJson}`
+/// inside TOOL_RESULT records.
 /// Read-compat only — the desktop never re-writes these records in the
 /// Android format; it reads them so a shared drive shows the same notes,
-/// memories, skills and conversations on every host.
+/// memories, skills, conversations and confirmed capabilities on every host.
 struct AndroidEnvelope {
     kind: String,
     title_or_key: String,
@@ -1084,6 +1088,41 @@ fn parse_android_envelope(bytes: &[u8]) -> Option<AndroidEnvelope> {
                 tags: vec!["transcript".to_string()],
             })
         }
+        // P1-C: a user-confirmed capability fact authored on another host.
+        // The envelope fields let this host list it without parsing the
+        // contract body; only the phone's verified facts and corrections ever
+        // mirror (hypotheses stay device-local and never appear here).
+        "envobs" => {
+            let subject = value.get("subject")?.as_str()?;
+            let status = value
+                .get("epistemicStatus")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let capability = value
+                .get("observedCapability")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            Some(AndroidEnvelope {
+                kind,
+                title_or_key: subject.to_string(),
+                body: format!("confirmed capability: {capability} ({status})"),
+                tags: vec!["env-fact".to_string()],
+            })
+        }
+        // The desktop env-learning producer's own telemetry envelope.
+        "procedure_outcome" => {
+            let procedure_id = value.get("procedureId")?.as_str()?;
+            let result = value
+                .get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            Some(AndroidEnvelope {
+                kind,
+                title_or_key: format!("Procedure {procedure_id} — {result}"),
+                body: String::new(), // telemetry: the contract body is not user prose
+                tags: vec!["procedure-outcome".to_string()],
+            })
+        }
         _ => None,
     }
 }
@@ -1117,7 +1156,10 @@ pub fn list_migrated_documents(vault_root: &str, vault: Option<&Vault>) -> Vec<D
                     .ok()
                     .and_then(|(_, bytes)| parse_android_envelope(&bytes))
                     .filter(|env| {
-                        matches!(env.kind.as_str(), "note" | "skill" | "transcript")
+                        matches!(
+                            env.kind.as_str(),
+                            "note" | "skill" | "transcript" | "envobs"
+                        )
                     })
             });
             let (title, _rel) = legacy
@@ -1294,12 +1336,61 @@ pub fn search_migrated_contents(
         // the universal usage history, searchable like any other memory.
         let is_android_turn =
             entry.record_type == RecordType::Transcript && entry.parent_record_id.is_none();
-        if !is_memory && !is_document_transcript && !is_android_turn {
+        // P1-C: env-learning records join the search surface only when their
+        // DECRYPTED envelope is the shared learning envelope. Document
+        // originals (notes, migrated docs, skills) and other tool results
+        // stay out of memory search exactly as before.
+        let maybe_env_fact =
+            entry.record_type == RecordType::Document && entry.parent_record_id.is_none();
+        let maybe_procedure_outcome =
+            entry.record_type == RecordType::ToolResult && entry.parent_record_id.is_none();
+        if !is_memory
+            && !is_document_transcript
+            && !is_android_turn
+            && !maybe_env_fact
+            && !maybe_procedure_outcome
+        {
             continue;
         }
         let Ok((_, bytes)) = vault.read_record(&entry.record_id) else {
             continue; // a record we cannot decrypt is omitted, not broken over
         };
+        if maybe_env_fact {
+            let Some(env) = parse_android_envelope(&bytes).filter(|env| env.kind == "envobs") else {
+                continue; // an ordinary document original — not memory search material
+            };
+            // Only a phone's user-confirmed facts/corrections ever mirror,
+            // so a hit here is a capability the user approved on some host.
+            contents.push((
+                entry.record_id.clone(),
+                env.title_or_key.clone(),
+                format!("{}: {}", env.title_or_key, env.body),
+                "env-fact".to_string(),
+                entry.updated_at.clone(),
+            ));
+            continue;
+        }
+        if maybe_procedure_outcome {
+            let Some(env) = parse_android_envelope(&bytes)
+                .filter(|env| env.kind == "procedure_outcome")
+            else {
+                continue; // an ordinary tool result — not memory search material
+            };
+            // Telemetry searches over the envelope text (procedure id, route,
+            // result) — honest, and excluded from the agent's four-type
+            // filter unless a caller asks for it.
+            let Ok(raw) = String::from_utf8(bytes) else {
+                continue;
+            };
+            contents.push((
+                entry.record_id.clone(),
+                env.title_or_key,
+                raw,
+                "procedure-outcome".to_string(),
+                entry.updated_at.clone(),
+            ));
+            continue;
+        }
         if is_memory {
             // Android-authored MEMORY records carry a {kind:"memory",key,value}
             // envelope: search "key: value" (clean tokens, real title). Raw
@@ -1637,6 +1728,103 @@ mod migrated_readpath_tests {
         let id = record.record_id.clone();
         vault.write_record(record, payload.as_bytes()).unwrap();
         id
+    }
+
+    #[test]
+    fn android_env_fact_lists_and_searches_as_a_confirmed_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        // The exact envelope VaultRecordFactory.forEnvFact writes (a
+        // user-confirmed capability approved on the phone).
+        let observation = serde_json::json!({
+            "schema": "inbharat.pai.envobs.v1",
+            "subject": "skill:Suggested · Open Calendar",
+            "observed_capability": "execute skill 'Suggested · Open Calendar'",
+            "evidence": "user explicitly enabled skill 'Suggested · Open Calendar'",
+            "confidence": "high",
+            "scope": "user",
+            "epistemic_status": "verified_fact",
+            "provenance": {"platform": "android", "device_id": "phone-uuid", "source": "user-approval"},
+            "timestamp_ms": 1_760_000_000_000u64,
+            "verification_ref": "user_enabled_skill:Suggested · Open Calendar@1760000000000",
+        });
+        let payload = serde_json::json!({
+            "kind": "envobs",
+            "subject": "skill:Suggested · Open Calendar",
+            "observedCapability": "execute skill 'Suggested · Open Calendar'",
+            "epistemicStatus": "verified_fact",
+            "verificationRef": "user_enabled_skill:Suggested · Open Calendar@1760000000000",
+            "observationJson": observation.to_string(),
+        })
+        .to_string();
+        let fact_id = write_android_record(&mut vault, RecordType::Document, &payload);
+
+        // Lists as a document with the subject as its honest title.
+        let listed = list_migrated_documents(&root, Some(&vault));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "skill:Suggested · Open Calendar");
+        assert_eq!(listed[0].tags, vec!["env-fact".to_string()]);
+        assert_eq!(listed[0].id, fact_id);
+        // Reads back by record id (the raw envelope bytes).
+        let bytes = read_migrated_document_content(&root, &fact_id, &vault)
+            .expect("env fact must be readable");
+        assert!(String::from_utf8(bytes).unwrap().contains("envobs"));
+
+        // Searches under its own honest type.
+        let query = MemorySearchQuery {
+            query: "calendar".to_string(),
+            memory_types: vec![],
+            limit: 10,
+            min_relevance: 0.0,
+        };
+        let found = search_migrated_contents(&query, &root, Some(&vault));
+        assert_eq!(found.len(), 1, "expected exactly one hit: {found:?}");
+        assert_eq!(found[0].memory_type, "env-fact");
+        assert!(found[0].preview.contains("confirmed capability"));
+    }
+
+    #[test]
+    fn desktop_procedure_outcome_telemetry_searches_under_its_own_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        // The envelope crate::env_learning writes for one completed harness run.
+        let outcome = serde_json::json!({
+            "schema": "inbharat.pai.procedure.v1",
+            "procedure_id": "harness.agent_run",
+            "result": "success",
+            "risk_class": "DIRECT",
+            "promotion": {"status": "none", "policy_version": "harness-run-policy-v1"},
+        });
+        let payload = serde_json::json!({
+            "kind": "procedure_outcome",
+            "procedureId": "harness.agent_run",
+            "result": "success",
+            "riskClass": "DIRECT",
+            "status": "none",
+            "outcomeJson": outcome,
+        })
+        .to_string();
+        write_android_record(&mut vault, RecordType::ToolResult, &payload);
+
+        let unfiltered = MemorySearchQuery {
+            query: "harness".to_string(),
+            memory_types: vec![],
+            limit: 10,
+            min_relevance: 0.0,
+        };
+        let found = search_migrated_contents(&unfiltered, &root, Some(&vault));
+        assert_eq!(found.len(), 1, "expected exactly one hit: {found:?}");
+        assert_eq!(found[0].memory_type, "procedure-outcome");
+        assert!(found[0].title.contains("harness.agent_run"));
+
+        // Telemetry never leaks into the agent's four-type memory filter.
+        let agent_typed = MemorySearchQuery {
+            query: "harness".to_string(),
+            memory_types: vec!["note".to_string(), "document".to_string(), "memory".to_string(), "transcript".to_string()],
+            limit: 10,
+            min_relevance: 0.0,
+        };
+        assert!(search_migrated_contents(&agent_typed, &root, Some(&vault)).is_empty());
     }
 
     #[test]

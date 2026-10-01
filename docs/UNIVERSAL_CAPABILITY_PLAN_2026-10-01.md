@@ -103,3 +103,19 @@ with the mission's capability/memory/vision/audio/environment-learning scope.
 - Phone ↔ drive ↔ Power round-trip (needs the physical drive + phone).
 
 Everything else is built and tested in-repo with the gates above marked **unverified**.
+
+## Phase status log (implementation log — updated every phase commit)
+
+| Phase | Status | Commit | Gates |
+|---|---|---|---|
+| P0-A tool contract | CLOSED | `917592d` | contract + both-side drift gates in CI |
+| P0-B capability contracts | CLOSED | `e367626` | crate tests + fixtures |
+| P1-A Android vault durability | CLOSED | `e3e4d41` | full android gate; golden re-baseline `beceb33` |
+| P1-B desktop↔phone vault interop | CLOSED | `058329c` + `49afc32` | desktop cargo tests; android full gate; re-baseline `76e19a2` |
+| P1-C MK-style env learning | CLOSED | Android `7138c2d`, desktop (this commit) | contracts 8+10, recorder 10, mirror 20, hydrator 13, factory 7; cargo + full android gate; re-baseline `3f8d530` |
+| P1-D universal transcript lane | CLOSED | `b2128ed` | desktop 148 tests + clippy; android full gate; re-baseline `a857481` |
+| P2-A Android auto-launch | CLOSED | `4940f99` | policy tests 3/3 + full android gate; re-baseline `76f6dd1` |
+
+Physical gates still **unverified** (hardware): on-phone speech/blind-aid, LiteRT vision
+qualification, audiocpp device acceptance, phone↔drive↔Power round-trip (notes, memories,
+skills, conversations AND env facts), pendrive auto-launch, Android boot auto-launch.

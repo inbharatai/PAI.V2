@@ -2487,6 +2487,21 @@ pub async fn harness_chat(
         let (outcome, _session) = harness
             .run(&harness_prompt, &options, &cancel)
             .map_err(|error| error.to_string())?;
+        // P1-C: the completed run leaves one honest ProcedureOutcome record in
+        // the canonical vault — never promotable from this path (no streak,
+        // no verified postconditions, no explicit approval), pure evidence for
+        // the bounded environment-learning layer. Non-fatal by contract.
+        let _ = crate::env_learning::record_harness_run_outcome(
+            &vault,
+            &crate::env_learning::HarnessRunEvidence {
+                route_level: outcome.decision.level.as_str().to_owned(),
+                full_access,
+                steps: outcome.steps,
+                tool_calls: outcome.tool_calls,
+                elapsed_ms: u64::try_from(outcome.elapsed.as_millis()).unwrap_or(u64::MAX),
+                model_id: model_id.clone(),
+            },
+        );
         Ok(HarnessChatResult {
             session_id: outcome.session_id,
             route: outcome.decision.level.as_str().to_owned(),
