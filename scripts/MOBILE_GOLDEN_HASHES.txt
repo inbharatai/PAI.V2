@@ -1,6 +1,6 @@
 # Pocket AI — mobile golden baseline hash manifest
 # Protected path: android-app/UnoOneAgent/
-# Protected tree: 6b253c67201ccbcdd167278a27dc1c16bab60421
+# Protected tree: 6d4967655ec7e5dd2f73fcf2dc3b950aa5fc0d71
 # Regenerate with: scripts/regen-mobile-golden-hashes.sh
 # One SHA-256 per protected file, LF-canonical, verified by sha256sum --check --strict
 e344da5c56060caf479eb0068070b0a586bf445d7c1c5a9d70c8783660ca4369  android-app/UnoOneAgent/.aiexclude
@@ -45,18 +45,19 @@ a1ee7e341552a62aa849b55cb884a52513dd41bf691503e543d7e309b967f5b9  android-app/Un
 1de526137dd57811467d5ef6c0772d7b2e46a6bd1332a95768b12c70242d0a9d  android-app/UnoOneAgent/app/src/debug/AndroidManifest.xml
 e7b4b8206d229002b92c12b50c8da74bcfdeacc2a41741a3b022d69551d018f3  android-app/UnoOneAgent/app/src/debug/java/com/unoone/agent/DebugCommandReceiver.kt
 b337d94a4322155b3daf09fca00dfd50425814977ce9c8f981e0d102724e19d1  android-app/UnoOneAgent/app/src/main/AndroidManifest.xml
-9dccf0c31847f51b646f36cd1bd0fc59982bb741f54ef940b876da21d306061c  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/AgentOrchestrator.kt
+564418278cc2c09549443781661ad01780ca67ecf653632df94566efc54599ca  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/AgentOrchestrator.kt
 139051330e6b132ccf08b02d07196fef2f85fe4293afbd57149ca4073223df69  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/FloatingAgentService.kt
 e472165ca6e3a07210e5eeee451d15a0e21b56811fef631c24edf4348b1631cc  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/MainActivity.kt
 c9695c9679f47a342a4921b0d3f0782fa59642613487ecb921485ec5d9650b3d  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/ModelLoadGate.kt
 b10e5bdb7c117632af92c2d66a5b9217bbec3fdb65b4221b581a7807af4d6a2a  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/PermissionManager.kt
-5ecca44fefe91486b2ed140ec5bf06f19357ab4efc4801f027ada6a265362441  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/UnoOneApplication.kt
+b0dfdd4980325842473f3f3727be46e93393ecb2df8dc551560c100a147b56c8  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/UnoOneApplication.kt
 b5d2bb598374ff655ebafd361326cf68e996ab28ec3266b51dfa6829f328f113  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/autostart/AutoStartPolicy.kt
 aee63bcc203828b1a9fc907452bc1729b0234cb6aa6c26c3766752377c24aab8  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/autostart/BootCompletedReceiver.kt
 1072053902845a69869842962b619c71d090306e11fe39a92e20325463e055eb  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/brain/BrainSelfTest.kt
 997cc0ac3945b566d81d05c7aed27d0f2df5b62ef24931bb1162858529d8e276  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/browser/SecureBrowserModelLease.kt
 b57e8fc7bf5a25e46a553dddc30263fe7e59d705150de5e11b3956b9a0bd0b5a  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/data/DataExporter.kt
 7dec793ace543331ddda94c4d937a9cf43f957bea0da72ee728d88b5c1a8d8d5  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/di/DatabaseProvider.kt
+bfba1b2b2d5ad302962e4cd3d776f270187e3a14b275befafd23739d6a40e956  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/envlearning/EnvLearningRecorder.kt
 8d273f48a35449e4bc03a6db6e13ac0104ada53826d1ec0abe9bb8d634eefaaf  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/execution/ActionExecutor.kt
 74f7896d9e38dd55e3615a7941d10961eea84c31e85ec82a8b5b297ab76c26ae  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/execution/ForegroundLaunchVerifier.kt
 d83f1a1dda86e7f2d65918ef01fa45815cbc53b8095f483f18a4f743c67fd7d4  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/parsing/CommandParser.kt
@@ -100,8 +101,8 @@ a81b7350707a9ee458a6cbdfa74894ebf3a8d934aab1cfc019131ad980bc558b  android-app/Un
 e960ca4a47291093f860ae86c42bf1300647bc7d6495bdb1a4ec7f7f651c759f  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/ui/viewmodel/VoiceTestViewModel.kt
 b1e1baea5395f367d465a25d5c9276bf78642d7c52860cca5fc67af2d9f840bd  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/vaultbridge/VaultConnection.kt
 0e83054f0ed4beacc71b92308effaa6591dfc780d0ff7049c9ebc810367e7269  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/vaultbridge/VaultDeviceId.kt
-2737f0d424ce708a5a397b2df3511932751e364ae1aa2747375e7fc25a3852d0  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/vaultbridge/VaultHydrator.kt
-7af6abae4afa6f58f27960c13a23f3673ac1f471045867cb1cb07f8f697eb25c  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/vaultbridge/VaultMirror.kt
+d1f78edc0c9eeff23f34a2e78ffc13289dfed327a1b5b14e7a6bf06d2dce4cf4  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/vaultbridge/VaultHydrator.kt
+01f99799301f8453bfaaad9de4de0e0330db40eef9e0e0e2ff85a12bc15dc256  android-app/UnoOneAgent/app/src/main/java/com/unoone/agent/vaultbridge/VaultMirror.kt
 0a714a0566a7c428fe7ec567f0630885840f42fda07a5f7bd14c9ce457658b06  android-app/UnoOneAgent/app/src/main/res/drawable/ic_launcher_background.xml
 259e14ddbca150217eea2b9452311e0d9dbf7f98d16e93126380f1a35ddee8b9  android-app/UnoOneAgent/app/src/main/res/drawable/ic_launcher_foreground.xml
 6d0988175971f41bdc83eadb144af3d84c40052fa125e90edbe7d89227be4b25  android-app/UnoOneAgent/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
@@ -119,6 +120,7 @@ f7cf2fc1242a89c5c20e1e12aa87ecdfc46f2d0400453345258e1758d4f9fe5d  android-app/Un
 61af0589db4384f8714ac5c418819b7d0c59c82ee80491e08a3cf14bbad7159c  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/core/model/RiskAssessmentTest.kt
 48e036e0c18492e1db699a711095fb29093593cf8b7d96c0dfbe92309304d403  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/core/util/CallbackMulticastTest.kt
 03b34d3d018ecc297064102db33796f05fe96fcd2721aa0d49cb7b27a0b97331  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/core/util/InputSanitizerTest.kt
+c2d6c8e80ccc4274ccd787121c00d78f0d071ad7001d8353db34813ff07faf44  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/envlearning/EnvLearningRecorderTest.kt
 fdf8ad90bb11e51e66a5880aed6b4cc01e101f5c9f0af4ced7e69a92efc5013e  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/execution/ActionExecutorToolCoverageTest.kt
 2af4b3750cd69456ef1c3316b81630db364d5baa3ad1236811f64e98cf7b0ea8  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/execution/ForegroundLaunchVerifierTest.kt
 74ef6514c65ce99b78d972415f4793cc10bacbbb6d4d700998ec31a25f361ff7  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/memory/MemoryModuleDeleteCallbackTest.kt
@@ -135,8 +137,8 @@ bddac25aa56720a0000802f7b88d47cdb95c66fb2a73e326e519cf545d1671fa  android-app/Un
 835e32b8896253ec0a1b8b5c5df979b1c39a88e78ca01a5af54eca60d3debd83  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/ui/viewmodel/BrowserFileSelectionTest.kt
 1a60a2e579427b323f87a9ad4e6e58bd01f50f09e6526d5d16bf31cbba54324a  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/ui/viewmodel/LanguagePackActivationTest.kt
 f102feec7be2041418b191ef6702502845ae5bd917af30b014d7fe6340f6eff7  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/ui/viewmodel/SecureBrowserTaskRoutingTest.kt
-00b47bbcd3239f8657ffefd54b3afb8db58dd90ccea64cce1f74bda6648396b0  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/vaultbridge/VaultHydratorTest.kt
-631eb56645b5fd0a11fad9cb6932078c704212ec6b477d2fe176b8ca21acd9f9  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/vaultbridge/VaultMirrorTest.kt
+6bd4331248b581cdd0c6015892dab683fc7d11a1eda24db980815184d42702b1  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/vaultbridge/VaultHydratorTest.kt
+997bf87f93b5db7e39317bfa7797d6a7b774d85ab2bae4597e906a8c473f9c8b  android-app/UnoOneAgent/app/src/test/java/com/unoone/agent/vaultbridge/VaultMirrorTest.kt
 84cbccbde9be168bc528db384803d1c90cfb8729e4cc6bccbe63e1adc97bc2ae  android-app/UnoOneAgent/build.gradle.kts
 c41b72b2f7f18895b56079340b6912f2d1bb310089c8618bcac374b0fcdb9b9d  android-app/UnoOneAgent/core/build.gradle.kts
 bfe643676c7bfecf2683b1ad8044a754bc53141c9e4fc6714ad58c1530937b6d  android-app/UnoOneAgent/core/src/main/AndroidManifest.xml
@@ -159,6 +161,8 @@ f86193d76954505e8b82c1cc872926b04897a7f51e4d7fbc464f8578406a54f2  android-app/Un
 0fd5d59c58adc323063dab8a27f0ac326c974ad0e02e561678e9b0085ffdbe7b  android-app/UnoOneAgent/core/src/main/java/com/unoone/agent/core/agent/ToolProposalValidator.kt
 b7fd76b4331d7e49a724aa01f1418c6a2d6c7860f9b03f352535aeff9a49ddea  android-app/UnoOneAgent/core/src/main/java/com/unoone/agent/core/agent/VoiceFastReply.kt
 dd54320bfd3da1f700d0330cd76458a08aefc43078e87d173fd62ba74f9b1754  android-app/UnoOneAgent/core/src/main/java/com/unoone/agent/core/agent/VoiceResponseLocalizer.kt
+a5e86e28d4374cdc92b85b6458039d7559b7164511c236957c9ccfa01bd3b73a  android-app/UnoOneAgent/core/src/main/java/com/unoone/agent/core/contracts/EnvObservation.kt
+8295744270158f09c997adabab3bd60520fb33e0f8d203524a03259f01c36c28  android-app/UnoOneAgent/core/src/main/java/com/unoone/agent/core/contracts/ProcedureOutcome.kt
 d626e6a276bcbf7a3fe06ea61388aae279f7ae848557ab2f2b2d660736975d7a  android-app/UnoOneAgent/core/src/main/java/com/unoone/agent/core/document/DocxTemplateProcessor.kt
 f9b6dd0ea2944a06659180bce07d8e4a87cdb539f190c697cfa8d0c66ca0d7d9  android-app/UnoOneAgent/core/src/main/java/com/unoone/agent/core/document/ExtractedDoc.kt
 d43af7d4a9185b3b2926663a32ec0a67677cb555e29eceaf1a788549cd0192e5  android-app/UnoOneAgent/core/src/main/java/com/unoone/agent/core/document/HtmlTextExtractor.kt
@@ -213,6 +217,7 @@ b42c8f5d34354b25c78463b76c4dc3fa6c8035cce9b150d911ca3acd1c917bb1  android-app/Un
 ea9df39740167e684e7d19c6dc0a93cfbc00251290182783b9f946c7f416c435  android-app/UnoOneAgent/core/src/test/java/com/unoone/agent/core/agent/ToolProposalValidatorTest.kt
 ba9ac16c0fcf20168f746368521938358277beb97a3614e0417940436fdc20d9  android-app/UnoOneAgent/core/src/test/java/com/unoone/agent/core/agent/VoiceFastReplyTest.kt
 c0e72b3b8781d023299d1a00e864d4fe6f4c6bbd50998b05b0afae0262aee88a  android-app/UnoOneAgent/core/src/test/java/com/unoone/agent/core/agent/VoiceResponseLocalizerTest.kt
+7ea33b486244e217430c2151955502f006ab159ee36910f029e2137ecd2d9c8f  android-app/UnoOneAgent/core/src/test/java/com/unoone/agent/core/contracts/CapabilityContractsTest.kt
 4849bf296953c81dba0e581e3fb84e731938dd6e8f3ba9c22e331501bee469ea  android-app/UnoOneAgent/core/src/test/java/com/unoone/agent/core/document/DocxTemplateProcessorTest.kt
 1fd7f4ca84ea18a7695f11b402214c9ec6ad007b8156167b508e56741e4ad268  android-app/UnoOneAgent/core/src/test/java/com/unoone/agent/core/document/HtmlTextExtractorTest.kt
 02233b70548005d7377fc062fff61ed0dc8266470f926208d504241dea04d963  android-app/UnoOneAgent/core/src/test/java/com/unoone/agent/core/document/PlainTextExtractorTest.kt
@@ -254,9 +259,9 @@ ebb06bc690a19d2448278ab7a1c2c303cf6db0cc43be93ba05631c1fc49d2a6a  android-app/Un
 e13792045315c37b1fcb43c210e79d529b06e724b5260db9ba3dde0099f27b68  android-app/UnoOneAgent/localbrain/src/test/java/com/unoone/agent/localbrain/PromptBuilderTest.kt
 84ea67db192b401bd4b4445a85d12b15d48203d5f21ebf434ca33ca82595b0f0  android-app/UnoOneAgent/localbrain/src/test/java/com/unoone/agent/localbrain/RAGManagerTest.kt
 e4d214309bc6ed0284d78338330ea523b942f45fb180accedc73f08d1b937c2a  android-app/UnoOneAgent/localbrain/src/test/java/com/unoone/agent/localbrain/ToolRegistryAgreementTest.kt
-83dcb85602cfe918af88950550fd1a44b463813ced4b013d9dfaaafa95b6cdfc  android-app/UnoOneAgent/memory/build.gradle.kts
+4a278f1ad69b9748471fc6afd2d877651f07c88a97d620d3c83ef79abc1e2c88  android-app/UnoOneAgent/memory/build.gradle.kts
 bfe643676c7bfecf2683b1ad8044a754bc53141c9e4fc6714ad58c1530937b6d  android-app/UnoOneAgent/memory/src/main/AndroidManifest.xml
-10196124b9384fb549fe97024f616fd6c19991f1d0f13ce03769cadab3b3beed  android-app/UnoOneAgent/memory/src/main/java/com/unoone/agent/memory/MemoryModule.kt
+6f46f45a045d6714724d076d93cb3aa8970339bdd2dbb03d2120947d30ef170d  android-app/UnoOneAgent/memory/src/main/java/com/unoone/agent/memory/MemoryModule.kt
 6faff2b449c703da847eb09528d7052536d7f976af280c96ad01c96dff5bde7a  android-app/UnoOneAgent/modelmanager/build.gradle.kts
 bfe643676c7bfecf2683b1ad8044a754bc53141c9e4fc6714ad58c1530937b6d  android-app/UnoOneAgent/modelmanager/src/main/AndroidManifest.xml
 289db3099d0b8d074d00578c277220410b0d89880481338f538c0d1bbdea673d  android-app/UnoOneAgent/modelmanager/src/main/assets/espeak-ng-data.zip
@@ -310,7 +315,7 @@ edc7d92a8932388f34f53cdb4f142302b133f510d5a67a1b151336360c2a1235  android-app/Un
 9008b224d06c5d8b5dda5d90414a4e1e88643da055cc67bf97b47824740667c5  android-app/UnoOneAgent/skills/build.gradle.kts
 bfe643676c7bfecf2683b1ad8044a754bc53141c9e4fc6714ad58c1530937b6d  android-app/UnoOneAgent/skills/src/main/AndroidManifest.xml
 9a767871714713042a00e7536a6c1cf5a7a8723783c42169b270acd0baab527b  android-app/UnoOneAgent/skills/src/main/java/com/unoone/agent/skills/SkillPolicies.kt
-b378891975f8425668faf9b8e266516415ee6fd5f030dc9a1f69fa81168e6050  android-app/UnoOneAgent/skills/src/main/java/com/unoone/agent/skills/SkillsModule.kt
+ebb5214e339b49c167de6fc7a7032ea19f196a72c420167a7868691a00a00496  android-app/UnoOneAgent/skills/src/main/java/com/unoone/agent/skills/SkillsModule.kt
 c718e06f9d3e337404c0fce098e5f963772220b5f891fb778152267dc44d326f  android-app/UnoOneAgent/skills/src/test/java/com/unoone/agent/skills/SkillPoliciesTest.kt
 24ac3f8b6ee07f4eec2dc2e3ed99f3e617de18acb4e732a51a991bb13040f3c0  android-app/UnoOneAgent/storage/build.gradle.kts
 bfe643676c7bfecf2683b1ad8044a754bc53141c9e4fc6714ad58c1530937b6d  android-app/UnoOneAgent/storage/src/main/AndroidManifest.xml
@@ -320,7 +325,7 @@ a09ded21b48f13d7e3bb14bf7ff2ba31a3b81f0cd50412b43e529ba9171507c9  android-app/Un
 3b5e7e39df163f3c6918bccf7bc5e062655d9484ea19924e6214982e55e06a8d  android-app/UnoOneAgent/storage/src/main/java/com/unoone/agent/storage/cache/VaultCacheLifecycle.kt
 0392dc116c74cd52bc6dfbb2b51a1a0999827ed96926bad309f9387c87d8e023  android-app/UnoOneAgent/storage/src/main/java/com/unoone/agent/storage/dao/ActionLogDao.kt
 b450c262c2de24e81014bcf188bf0bdbf35daad72c63b19500f58b406f29f9bb  android-app/UnoOneAgent/storage/src/main/java/com/unoone/agent/storage/dao/ConversationTurnDao.kt
-09dac157bc4316690c8a260a23df1736b6b7cbc7055cd08d897bb3aea8598e3f  android-app/UnoOneAgent/storage/src/main/java/com/unoone/agent/storage/dao/MemoryDao.kt
+96820e8ab558d441f6565d2f0eb8f13ae7537b893a05c338ede9d12661d9cc9f  android-app/UnoOneAgent/storage/src/main/java/com/unoone/agent/storage/dao/MemoryDao.kt
 4b7c0f0ecc5d0a6b606b4d8cf2f4c279b8fd1ee78b718a953f0e7d9bd963d81e  android-app/UnoOneAgent/storage/src/main/java/com/unoone/agent/storage/dao/ModelMetadataDao.kt
 50a5ddae5616c7a2b75a13b27d1b8cbaaa2d76d2d9e7c01e8b46d60ad94c8eee  android-app/UnoOneAgent/storage/src/main/java/com/unoone/agent/storage/dao/NoteDao.kt
 ea897cda8bc00830a8a1acafbf662e4b11de4d8864d6f80daabe39462b927689  android-app/UnoOneAgent/storage/src/main/java/com/unoone/agent/storage/dao/PendingTombstoneDao.kt
@@ -343,14 +348,14 @@ ee860b04556fa77512d097e8c90743531a1d065a171a5a82f80365878668098a  android-app/Un
 10b5103aab7302b1e0237273478f26a7a0112d5d03dcbe26a459f1fc59f76ffc  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/PocketVaultAccess.kt
 0c4be8a63808ca631abe01aa244a0fa2dde15cbab3ebc9c81690bffd24bc5671  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/SafVaultIO.kt
 618b7818ac53879a3d11bb8f84de1fe204c4f9fab7acb3defd115da47c869c42  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/VaultCrypto.kt
-2604fd9e33d160d005007bf332a65e7cbb7932b3447c2ad90558af6c4d3cdc0d  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/VaultRecordFactory.kt
+74539ef55a1270a00575762620c504c23472aa1ee901cef4830b8e4761a60ea6  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/VaultRecordFactory.kt
 001936ecdeb4b4d0e0314275fe2d32b3c12e24a35947ddd5ab579d515e55e321  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/VaultRecordReader.kt
 28b85ce77997bfe10044a433d01926afde0fce0069ebfd9ad8dd5fd6bd8857dd  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/VaultRecordWriter.kt
-382aa0e8e06536e3e2256cd607ffefbdd74de39458ff969a91f906f1bd9653cb  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/VaultSyncPlanner.kt
+2f82420e6ca62e5ec5f71d82d012247f3c0ee24a4e43ae7487bda4160fb56159  android-app/UnoOneAgent/vault/src/main/java/com/unoone/agent/vault/VaultSyncPlanner.kt
 3702a91944a814d640f328f3dd82b1ad83ea66252938ed4f5c39cafc7e0f4331  android-app/UnoOneAgent/vault/src/test/java/com/unoone/agent/vault/MobileVaultRepositoryTest.kt
 341676112265d068518c5ff0cd43c7ede9eabba9aebc4eb008621573d328d95a  android-app/UnoOneAgent/vault/src/test/java/com/unoone/agent/vault/PocketVaultAccessTest.kt
 a472b23897344e8e835e3e014e452cbaded541f4aa597a09ce7d1bcd47f6dede  android-app/UnoOneAgent/vault/src/test/java/com/unoone/agent/vault/VaultCryptoCrossPlatformTest.kt
-a549c05b87cbf4d38c884032cc6edc9e205beb9a5256a1dfb074a27e5e37d8ce  android-app/UnoOneAgent/vault/src/test/java/com/unoone/agent/vault/VaultRecordFactoryTest.kt
+59c4a92fc05f2bc20d9fc32922317a77d999209601f3762e667f28656c853db5  android-app/UnoOneAgent/vault/src/test/java/com/unoone/agent/vault/VaultRecordFactoryTest.kt
 81be4bd60091f9906035bba27242cf540e93d8d510a4fd4762e85282f642e495  android-app/UnoOneAgent/vault/src/test/java/com/unoone/agent/vault/VaultSyncPlannerTest.kt
 c376c23c9dab3319a72baa22d773909ea531e4927ca8b2865ae6d2e9431ca4c4  android-app/UnoOneAgent/voice/build.gradle.kts
 8b3ab0b8536db9c2f333b0d1321c278ea7643bf0f32a192690d9e7ffc133ff34  android-app/UnoOneAgent/voice/libs/README.md
