@@ -91,9 +91,21 @@ export interface ModelInfo {
   quantization: string;
   file_size_gb: number;
   context_length: number;
+  /** True when context_length was read from the artifact's GGUF metadata
+   * (the model's actual trained context); false = conservative default. */
+  context_verified: boolean;
   available: boolean;
   path: string;
   mmproj_path?: string;
+}
+
+/** Universal-adaptive context derivation (gguf_meta.rs): what the server
+ * launcher will grant and why, for any requested size. */
+export interface ContextBudget {
+  native_context: number | null;
+  granted_context: number;
+  reasons: string[];
+  kv_estimate_bytes: number | null;
 }
 
 export interface ModelConfig {
@@ -420,6 +432,12 @@ export const tauriApi = {
   listModels: (vaultRoot: string) => invoke<ModelInfo[]>('list_models', { vault_root: vaultRoot }),
   detectAcceleration: () => invoke<AccelerationBackend[]>('detect_acceleration'),
   getModelConfig: () => invoke<ModelConfig>('get_model_config'),
+  getContextBudget: (modelPath: string, requestedContext: number, cacheTypeK?: string) =>
+    invoke<ContextBudget>('get_context_budget', {
+      model_path: modelPath,
+      requested_context: requestedContext,
+      cache_type_k: cacheTypeK,
+    }),
   getModelStatus: () => invoke<ModelStatus>('get_model_status'),
   startModelServer: (config: ModelConfig, vaultRoot: string) =>
     invoke<number>('start_model_server', { config, vault_root: vaultRoot }),

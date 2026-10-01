@@ -496,6 +496,9 @@ the two path dependencies above resolve unchanged.
 | Source | Google Gemma 4 12B IT, GGUF Q4_K_M by llama.cpp community |
 | Licence | [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
 | Inference verified | Live on the staged drive (2026-09-15): chat, STS one-call loop, OCR (verbatim text read back), vision describe (post-defect-#44 fix), multi-agent tool runs — all through the manifest-verified llama-server on `D:\UNOONE` |
+| Native context (read from the artifact) | **131,072 tokens** — `gemma4.context_length` in the GGUF header, parsed by `apps/desktop/src-tauri/src/gguf_meta.rs` (verified live against the staged drive model 2026-10-02) |
+| Session context | **Host-adaptive and model-adaptive** — `start_server` clamps the requested context to (1) the artifact's trained context and (2) the host RAM tier (≥24 GiB → 32,768; ≥12 GiB → 16,384; else 4,096), with every clamp reason written to `unoone-logs/llama-server.log` and shown in the Model panel's "Adaptive context budget" row. The Model panel offers the artifact's native context as a dropdown option whenever it exceeds the tier ladder. Unreadable artifact metadata is surfaced as "unverified", never guessed |
+| KV-cache cost | Derived from the artifact's shape metadata (48 layers, 16 KV heads, 512 head_dim → ~0.8 MiB/token at q8_0): 32,768 tokens ≈ 25.5 GiB, which is why the 64 GiB dev host tops out at 32K rather than 131K — the estimate is displayed, not hidden |
 | Source = Destination SHA-256 | ✅ Exact match |
 
 ### Desktop dependencies and build boundary

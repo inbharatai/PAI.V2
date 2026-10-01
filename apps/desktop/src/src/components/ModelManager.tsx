@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { tauriApi, type ModelInfo, type ModelConfig, type ModelStatus, type AccelerationBackend, type SecurityLevel, type ModelCacheStatus } from '../lib/tauri';
+import { tauriApi, type ModelInfo, type ModelConfig, type ModelStatus, type AccelerationBackend, type SecurityLevel, type ModelCacheStatus, type ContextBudget } from '../lib/tauri';
 
 export function ModelManager() {
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -13,6 +13,9 @@ export function ModelManager() {
   const [vaultRoot, setVaultRoot] = useState<string>('');
   const [cacheStatus, setCacheStatus] = useState<ModelCacheStatus | null>(null);
   const [stagingCache, setStagingCache] = useState(false);
+  // Universal-adaptive context derivation for the selected model + current
+  // request. Null until a model is selected; unverified stays honest.
+  const [contextBudget, setContextBudget] = useState<ContextBudget | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -50,6 +53,18 @@ export function ModelManager() {
     }
     load();
   }, []);
+
+  // Derive the budget the server launcher will actually apply, so the panel
+  // states the granted context and every clamp reason before a session starts.
+  useEffect(() => {
+    if (!selectedModelPath || !config) { setContextBudget(null); return; }
+    let active = true;
+    tauriApi
+      .getContextBudget(selectedModelPath, config.context_size, config.cache_type_k)
+      .then(budget => { if (active) setContextBudget(budget); })
+      .catch(() => { if (active) setContextBudget(null); });
+    return () => { active = false; };
+  }, [selectedModelPath, config?.context_size, config?.cache_type_k]);
 
   // Probe the host-disk model cache for the selected model. Cheap on purpose:
   // the backend only reads the manifest and stats two files, never hashes
@@ -158,7 +173,8 @@ export function ModelManager() {
               <div className="recording-item-info">
                 <div className="recording-item-title">{model.name}</div>
                 <div className="recording-item-meta">
-                  {model.quantization} · {model.context_length} ctx · {model.file_size_gb.toFixed(1)} GB
+                  {model.quantization} · {model.context_length.toLocaleString()} ctx
+                  {model.context_verified ? '' : ' (unverified)'} · {model.file_size_gb.toFixed(1)} GB
                   {!model.available && ' · Not downloaded'}
                 </div>
               </div>
@@ -274,8 +290,45 @@ export function ModelManager() {
                     <option value={8192}>8192</option>
                     <option value={16384}>16384</option>
                     <option value={32768}>32768</option>
+                    {/* The artifact's own trained context, offered whenever it
+                        exceeds the fixed ladder — the model defines the
+                        ceiling, not this list. */}
+                    {!!contextBudget?.native_context && contextBudget.native_context > 32768 && (
+                      <option value={contextBudget.native_context}>
+                        {contextBudget.native_context} (model native)
+                      </option>
+                    )}
                   </select>
                 </div>
+                {contextBudget && (
+                  <div
+                    className="settings-row"
+                    style={{
+                      background: 'var(--bg-tertiary)',
+                      borderRadius: 'var(--radius-sm)',
+                      margin: '0 12px 12px',
+                      padding: '10px 12px',
+                    }}
+                  >
+                    <div>
+                      <div className="settings-row-label" style={{ fontSize: '12px' }}>
+                        Adaptive context budget
+                      </div>
+                      <div className="settings-row-desc">
+                        Granted {contextBudget.granted_context.toLocaleString()} tokens · native{' '}
+                        {contextBudget.native_context
+                          ? `${contextBudget.native_context.toLocaleString()} (read from the artifact)`
+                          : 'unverified (artifact metadata unreadable)'}
+                        {' '}· KV cache ≈{' '}
+                        {contextBudget.kv_estimate_bytes
+                          ? `${(contextBudget.kv_estimate_bytes / 2 ** 30).toFixed(1)} GiB`
+                          : 'unverified'}
+                        {contextBudget.reasons.length > 0 &&
+                          ` · ${contextBudget.reasons[contextBudget.reasons.length - 1]}`}
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div className="settings-row">
                   <div>
                     <div className="settings-row-label">KV Cache (K)</div>

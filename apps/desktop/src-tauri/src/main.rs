@@ -19,6 +19,7 @@ mod documents;
 // every completed harness agent run leaves honest, never-promotable
 // telemetry in the canonical vault.
 mod env_learning;
+mod gguf_meta;
 mod harness_bridge;
 mod llama;
 mod recording;
@@ -184,6 +185,7 @@ fn main() {
             llama::list_models,
             llama::detect_acceleration,
             llama::get_model_config,
+            llama::get_context_budget,
             llama::get_model_status,
             llama::start_model_server,
             llama::stop_model_server,

@@ -315,9 +315,26 @@ pub struct ModelInfo {
     pub quantization: String,
     pub file_size_gb: f64,
     pub context_length: u32,
+    /// True only when `context_length` was read from the artifact's own GGUF
+    /// metadata; false means it is the conservative declared default, not a
+    /// verified trained-context claim.
+    pub context_verified: bool,
     pub available: bool,
     pub path: String,
     pub mmproj_path: Option<String>,
+}
+
+/// Native context of a model artifact, read from the GGUF header when the
+/// file parses. Unreadable/absent metadata yields the conservative default
+/// marked unverified — never a guess presented as the model's trained limit.
+pub(crate) fn native_context_or_default(path: &std::path::Path) -> (u32, bool) {
+    match crate::gguf_meta::read_metadata(path) {
+        Ok(meta) => match meta.context_length {
+            Some(ctx) => (ctx, true),
+            None => (8192, false),
+        },
+        Err(_) => (8192, false),
+    }
 }
 
 /// Model manager state
@@ -647,12 +664,15 @@ impl ModelManager {
                     .filter(|asset| asset.kind == unoone_usb_manifest::AssetKind::Model)
                 {
                     let full_path = PathBuf::from(vault_root).join(model.path.replace('/', "\\"));
+                    let (native_context, context_verified) =
+                        native_context_or_default(&full_path);
                     models.push(ModelInfo {
                         name: model.id.clone(),
                         model_type: "gemma-4-12b".to_string(),
                         quantization: "manifest-verified".to_string(),
                         file_size_gb: model.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
-                        context_length: 8192,
+                        context_length: native_context,
+                        context_verified,
                         available: full_path.is_file(),
                         path: full_path.to_string_lossy().to_string(),
                         mmproj_path: mmproj_path.clone(),
@@ -677,6 +697,8 @@ impl ModelManager {
                                 let file_size = std::fs::metadata(&full_path)
                                     .map(|m| m.len() as f64 / (1024.0 * 1024.0 * 1024.0))
                                     .unwrap_or(0.0);
+                                let (native_context, context_verified) =
+                                    native_context_or_default(&full_path);
 
                                 models.push(ModelInfo {
                                     name,
@@ -691,7 +713,8 @@ impl ModelManager {
                                         .unwrap_or("unknown")
                                         .to_string(),
                                     file_size_gb: file_size,
-                                    context_length: 8192,
+                                    context_length: native_context,
+                                    context_verified,
                                     available: true,
                                     path: full_path.to_string_lossy().to_string(),
                                     mmproj_path: model
@@ -722,6 +745,8 @@ impl ModelManager {
                                     .map(|m| m.len() as f64 / (1024.0 * 1024.0 * 1024.0))
                                     .unwrap_or(0.0);
 
+                                let (native_context, context_verified) =
+                                    native_context_or_default(&full_path);
                                 models.push(ModelInfo {
                                     name: model
                                         .get("name")
@@ -739,7 +764,8 @@ impl ModelManager {
                                         .unwrap_or("unknown")
                                         .to_string(),
                                     file_size_gb: file_size,
-                                    context_length: 4096,
+                                    context_length: native_context,
+                                    context_verified,
                                     available: true,
                                     path: full_path.to_string_lossy().to_string(),
                                     mmproj_path: None,
@@ -767,12 +793,15 @@ impl ModelManager {
                                 let file_size = std::fs::metadata(&path)
                                     .map(|m| m.len() as f64 / (1024.0 * 1024.0 * 1024.0))
                                     .unwrap_or(0.0);
+                                let (native_context, context_verified) =
+                                    native_context_or_default(&path);
                                 models.push(ModelInfo {
                                     name: "Gemma 4 12B Q4_K_M".to_string(),
                                     model_type: "gemma-4-12b".to_string(),
                                     quantization: "Q4_K_M".to_string(),
                                     file_size_gb: file_size,
-                                    context_length: 8192,
+                                    context_length: native_context,
+                                    context_verified,
                                     available: true,
                                     path: path.to_string_lossy().to_string(),
                                     mmproj_path: std::fs::read_dir(&desktop_dir)
@@ -809,12 +838,15 @@ impl ModelManager {
                                 let file_size = std::fs::metadata(&path)
                                     .map(|m| m.len() as f64 / (1024.0 * 1024.0 * 1024.0))
                                     .unwrap_or(0.0);
+                                let (native_context, context_verified) =
+                                    native_context_or_default(&path);
                                 models.push(ModelInfo {
                                     name: "Gemma 4 E2B Q4_K_M".to_string(),
                                     model_type: "gemma-4-e2b".to_string(),
                                     quantization: "Q4_K_M".to_string(),
                                     file_size_gb: file_size,
-                                    context_length: 4096,
+                                    context_length: native_context,
+                                    context_verified,
                                     available: true,
                                     path: path.to_string_lossy().to_string(),
                                     mmproj_path: None,
@@ -834,6 +866,7 @@ impl ModelManager {
                 quantization: "Q4_K_M".to_string(),
                 file_size_gb: 7.14,
                 context_length: 8192,
+                context_verified: false,
                 available: false,
                 path: String::new(),
                 mmproj_path: None,
@@ -929,6 +962,19 @@ impl ModelManager {
             return Err(format!("Model file not found: {:?}", config.model_path));
         }
 
+        // Universal-adaptive context (2026-10-02): the requested context is
+        // clamped against the *artifact's* trained context (read from the
+        // GGUF header) and the host RAM tier before the server ever sees it.
+        // The derivation and its reasons are recorded in the session log so
+        // the panel and the log agree on why the session runs at this size.
+        let gguf_meta = crate::gguf_meta::read_metadata(&model_path).ok();
+        let context_budget = crate::gguf_meta::derive_context_budget(
+            gguf_meta.as_ref(),
+            config.context_size,
+            detected_ram_gib().map(|gib| gib as u64),
+            config.cache_type_k.as_deref(),
+        );
+
         // Strict identity policy requires a disk hash compared against the
         // manifest hash. Hash the model ONCE here, BEFORE spawning
         // llama-server:
@@ -972,6 +1018,34 @@ impl ModelManager {
         // Rotate the previous run's log so each session starts fresh.
         let _ = std::fs::rename(&log_path, log_dir.join("llama-server.prev.log"));
         let log_file = std::fs::File::create(&log_path).ok();
+        {
+            // Budget header: every clamp is visible in the same log the
+            // server diagnostics land in.
+            use std::io::Write as _;
+            let native = context_budget
+                .native_context
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unverified (artifact not readable)".to_string());
+            let kv = context_budget
+                .kv_estimate_bytes
+                .map(|b| format!("{:.2} GiB", b as f64 / (1024.0 * 1024.0 * 1024.0)))
+                .unwrap_or_else(|| "unverified".to_string());
+            let mut header = format!(
+                "# context budget: requested {} granted {} | native {} | kv-estimate {} | {}\n",
+                config.context_size,
+                context_budget.granted_context,
+                native,
+                kv,
+                context_budget.limiting_reason()
+            );
+            for reason in &context_budget.reasons {
+                header.push_str(&format!("# clamp: {reason}\n"));
+            }
+            let _ = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&log_path)
+                .and_then(|mut f| f.write_all(header.as_bytes()));
+        }
         match log_file.and_then(|f| f.try_clone().ok().map(|dup| (f, dup))) {
             Some((file, dup)) => {
                 cmd.stdout(std::process::Stdio::from(file));
@@ -988,7 +1062,7 @@ impl ModelManager {
             "--port",
             &port.to_string(),
             "-c",
-            &config.context_size.to_string(),
+            &context_budget.granted_context.to_string(),
             "-b",
             &config.batch_size.to_string(),
             "--temp",
@@ -2101,6 +2175,11 @@ pub fn get_model_config() -> ModelConfig {
     // 32K + q8_0 KV lane was verified live on the target laptop class
     // (RTX 5050). Stepped by detected RAM so weak hosts still get a
     // working server; the Model view lets the user override at any time.
+    // `start_server` additionally clamps this value against the loaded
+    // artifact's own trained context — see gguf_meta::derive_context_budget.
+    // 32K + q8_0 KV lane was verified live on the target laptop class
+    // (RTX 5050). Stepped by detected RAM so weak hosts still get a
+    // working server; the Model view lets the user override at any time.
     let mut config = ModelConfig::default();
     match detected_ram_gib() {
         Some(ram) if ram >= 24 => {
@@ -2117,6 +2196,24 @@ pub fn get_model_config() -> ModelConfig {
         _ => {}
     }
     config
+}
+
+/// Universal-adaptive context: the exact derivation the server launcher will
+/// apply, surfaced to the UI so the Model panel can state the granted
+/// context and the reason for every clamp BEFORE a session starts.
+#[tauri::command]
+pub fn get_context_budget(
+    model_path: String,
+    requested_context: u32,
+    cache_type_k: Option<String>,
+) -> crate::gguf_meta::ContextBudget {
+    let meta = crate::gguf_meta::read_metadata(&model_path).ok();
+    crate::gguf_meta::derive_context_budget(
+        meta.as_ref(),
+        requested_context,
+        detected_ram_gib().map(|gib| gib as u64),
+        cache_type_k.as_deref(),
+    )
 }
 
 #[tauri::command]
