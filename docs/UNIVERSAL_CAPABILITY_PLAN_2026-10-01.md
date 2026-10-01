@@ -115,6 +115,8 @@ Everything else is built and tested in-repo with the gates above marked **unveri
 | P1-C MK-style env learning | CLOSED | Android `7138c2d`, desktop (this commit) | contracts 8+10, recorder 10, mirror 20, hydrator 13, factory 7; cargo + full android gate; re-baseline `3f8d530` |
 | P1-D universal transcript lane | CLOSED | `b2128ed` | desktop 148 tests + clippy; android full gate; re-baseline `a857481` |
 | P2-A Android auto-launch | CLOSED | `4940f99` | policy tests 3/3 + full android gate; re-baseline `76f6dd1` |
+| P2 one harness: ABI v2 registration surface | CLOSED | (this commit) | ffi 15 tests (7 v2 registration incl. C-vtable L1 tool loop + hash-chained ledger, 5 ABI-manifest drift gates) + workspace 79 green + clippy clean; on-device Kotlin/JNI loop = device gate |
+| P1-E vault honesty hardening (source-review findings) | NEXT | — | tombstoned-Skill deletion on hydrate, stable vault record ids + queued tombstone retry, Power harness-memory envelope → Android, honest `boundedArguments`, unlock drain-failure regression |
 
 Physical gates still **unverified** (hardware): on-phone speech/blind-aid, LiteRT vision
 qualification, audiocpp device acceptance, phone↔drive↔Power round-trip (notes, memories,

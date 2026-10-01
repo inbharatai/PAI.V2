@@ -73,25 +73,30 @@ pub struct IbHarnessConfigV1 {
 /// destroyed. Checked on every dereference and zeroed on destroy so a stale,
 /// swapped, or type-confused pointer fails with IB_STATUS_INVALID_ARGUMENT
 /// instead of causing undefined behavior.
-const HARNESS_HANDLE_MAGIC: u64 = 0x4942_4841_5253_0031; // "IBHARS\0\x31"
+pub(crate) const HARNESS_HANDLE_MAGIC: u64 = 0x4942_4841_5253_0031; // "IBHARS\0\x31"
 /// Magic tag for cancellation handles (distinct from the harness tag so a
 /// `*mut IbHarnessHandle` can never be accepted where a cancellation handle is
 /// expected and vice versa).
-const CANCEL_HANDLE_MAGIC: u64 = 0x4942_4341_4E43_0031; // "IBCANC\0\x31"
+pub(crate) const CANCEL_HANDLE_MAGIC: u64 = 0x4942_4341_4E43_0031; // "IBCANC\0\x31"
 
 /// Opaque allocation returned to C.
 #[repr(C)]
 pub struct IbHarnessHandle {
-    magic: u64,
-    harness: Harness,
+    pub(crate) magic: u64,
+    pub(crate) harness: Harness,
 }
 
 /// Opaque cancellation allocation safe to request from another caller thread.
 #[repr(C)]
 pub struct IbCancellationHandle {
-    magic: u64,
-    token: CancellationToken,
+    pub(crate) magic: u64,
+    pub(crate) token: CancellationToken,
 }
+
+/// The ABI v2 registration surface (builder-stage registration of model
+/// providers, tools, memory and permission over C vtables, plus the
+/// audit-ledger run). See `v2` for the full contract.
+pub mod v2;
 
 /// Returns ABI major version 1.
 #[unsafe(no_mangle)]
