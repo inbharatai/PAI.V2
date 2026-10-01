@@ -436,6 +436,16 @@ impl SecurityManager {
         match components.next() {
             Some(component) if component.as_os_str() == "locks" => true,
             Some(component) if component.as_os_str() == "recordings" => true,
+            // Vault records (VAULT/records/*.enc.json) are the vault's own
+            // mutable data store: every memory write, harness_memory row, and
+            // agent run trail appends one. Each record is individually
+            // encrypted and authenticated (AEAD) by the vault layer, so its
+            // integrity does not depend on this manifest. Pinning them here
+            // turned every legitimate use of memory into a "Security &
+            // Manifest: Failed" on the Capability panel (live-caught
+            // 2026-10-01: baseline 2026-09-12 vs. records written through
+            // 2026-10-01).
+            Some(component) if component.as_os_str() == "records" => true,
             Some(component) if component.as_os_str() == "config" => {
                 components.next().is_some_and(|name| {
                     name.as_os_str() == "manifest.json" || name.as_os_str() == "accessibility.json"
@@ -582,6 +592,7 @@ mod baseline_tests {
         std::fs::create_dir_all(vault.join("identity")).expect("identity dir");
         std::fs::create_dir_all(vault.join("locks")).expect("locks dir");
         std::fs::create_dir_all(vault.join("recordings")).expect("recordings dir");
+        std::fs::create_dir_all(vault.join("records")).expect("records dir");
         std::fs::create_dir_all(vault.join("config")).expect("config dir");
         std::fs::write(vault.join("identity").join("vault.id"), "test-vault-id\n")
             .expect("vault id");
@@ -597,6 +608,11 @@ mod baseline_tests {
             "RIFF-fake-wav-bytes",
         )
         .expect("recording");
+        std::fs::write(
+            vault.join("records").join("11111111-2222-3332-4444-555555555555.enc.json"),
+            "{\"ciphertext\":\"baseline-record\"}",
+        )
+        .expect("vault record");
         std::fs::write(
             vault.join("config").join("manifest.json"),
             "{\"previous\":\"baseline\"}",
@@ -643,6 +659,7 @@ mod baseline_tests {
         for fragment in [
             "/locks/",
             "/recordings/",
+            "/records/",
             "manifest.json",
             "accessibility.json",
         ] {
@@ -675,6 +692,16 @@ mod baseline_tests {
             "new RIFF bytes",
         )
         .expect("new recording");
+        // A later memory/harness write appends a NEW vault record — exactly
+        // the 2026-10-01 live sequence (baseline 2026-09-12 vs. records
+        // written through 2026-10-01) that failed "Security & Manifest".
+        std::fs::write(
+            root.join("VAULT")
+                .join("records")
+                .join("99999999-8888-3777-6666-555555555555.enc.json"),
+            "{\"ciphertext\":\"appended-later\"}",
+        )
+        .expect("appended record");
         let report = manager.verify_manifest(&manifest).expect("verify runs");
         assert!(
             report.entries_failed == 0 && report.manifest_valid,

@@ -60,6 +60,13 @@ function App() {
   const [currentView, setCurrentView] = useState<ViewId>('chat');
   const [vaultId, setVaultId] = useState<string>('');
   const [vaultRoot, setVaultRoot] = useState<string>('');
+  // Root detected while the unlock screen is still showing. The model
+  // weights live on the pen drive as public assets (MODELS/, not the
+  // encrypted vault), so the model server can begin loading the moment the
+  // drive is detected instead of after the user types the password. This
+  // is what turns "unlock then wait for the model" into "unlock and the
+  // model is nearly there". Only vault data stays behind the unlock.
+  const [preUnlockRoot, setPreUnlockRoot] = useState<string>('');
   const [autoLockMs, setAutoLockMs] = useState<number>(300000); // default 5 min
   const [bootError, setBootError] = useState('');
   const [startupPhase, setStartupPhase] = useState<StartupPhase>('STARTING');
@@ -94,13 +101,39 @@ function App() {
     });
   }, [screen, vaultId, vaultRoot]);
 
-  // The Pocket AI pen drive owns the runtime and model. After unlock, start
-  // only the manifest-verified bundled llama-server. The backend alone moves
-  // the state to READY after model identity and health verification.
+  // Detect the pen drive as soon as the app launches. This is the
+  // pre-unlock half of the early-boot optimisation: the unlock screen
+  // already displays this root, and the boot effect below uses it to
+  // start the model server while the password is still being typed.
+  // Deliberately runs only on mount: after a manual lock the model must
+  // stay unloaded (handleLock's teardown stands), and a replug launches a
+  // fresh process which re-runs this effect.
   useEffect(() => {
-    if (screen !== 'main' || !vaultRoot) return;
-    if (bootstrappedRoot.current === vaultRoot) return;
-    bootstrappedRoot.current = vaultRoot;
+    let active = true;
+    tauriApi.detectVault()
+      .then(info => {
+        if (active && info?.detected && info?.vault_root) {
+          setPreUnlockRoot(info.vault_root);
+        }
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  // The Pocket AI pen drive owns the runtime and model. Boot the model
+  // server as soon as the drive root is known — even while the unlock
+  // screen is still up (preUnlockRoot) — because the weights are public
+  // drive assets, not vault data. This overlaps the multi-second model
+  // load with the password typing instead of starting it after unlock.
+  // After unlock the root is unchanged, so the same boot continues; only
+  // vault reads wait for the real unlock. The backend alone moves the
+  // state to READY after model identity and health verification.
+  useEffect(() => {
+    const bootRoot = vaultRoot || preUnlockRoot;
+    if (!bootRoot) return;
+    if (screen !== 'unlock' && screen !== 'main') return;
+    if (bootstrappedRoot.current === bootRoot) return;
+    bootstrappedRoot.current = bootRoot;
     let cancelled = false;
     void (async () => {
       try {
@@ -127,7 +160,7 @@ function App() {
         }
         if (cancelled) return;
         await tauriApi.getHardwareProfile();
-        const models = await tauriApi.listModels(vaultRoot);
+        const models = await tauriApi.listModels(bootRoot);
         const desktopModel = models.find(model =>
           model.available && model.model_type.toLowerCase().includes('12b')
         );
@@ -143,7 +176,7 @@ function App() {
         // copy falls back to the drive path.
         let bootModelPath = desktopModel.path;
         try {
-          const cacheStatus = await tauriApi.modelCacheStatus(desktopModel.path, vaultRoot);
+          const cacheStatus = await tauriApi.modelCacheStatus(desktopModel.path, bootRoot);
           if (cacheStatus.staged && cacheStatus.cached_path) {
             bootModelPath = cacheStatus.cached_path;
           }
@@ -154,7 +187,7 @@ function App() {
           ...config,
           model_path: bootModelPath,
           mmproj_path: desktopModel.mmproj_path,
-        }, vaultRoot);
+        }, bootRoot);
         const health = await tauriApi.checkModelHealth();
         if (!health.model_id) {
           throw new Error('The model server responded without a verified model identity.');
@@ -168,7 +201,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [screen, vaultRoot]);
+  }, [screen, vaultRoot, preUnlockRoot]);
 
   useEffect(() => {
     if (screen !== 'main') return;

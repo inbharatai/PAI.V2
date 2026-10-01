@@ -2089,7 +2089,7 @@ pub fn list_models(vault_root: String) -> Result<Vec<ModelInfo>, String> {
 pub fn detect_acceleration(
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Vec<AccelerationBackend> {
-    startup.set_phase(crate::startup::StartupPhase::SelectingBackend);
+    startup.set_phase_if_booting(crate::startup::StartupPhase::SelectingBackend);
     let manager = ModelManager::new();
     manager.detect_backends()
 }

@@ -76,6 +76,31 @@ impl StartupCoordinator {
         }
     }
 
+    /// Variant for idempotent host probes (backend/hardware detection): the
+    /// probe may announce its phase only while the boot sequence is still
+    /// running. A later re-probe — e.g. the Model panel listing acceleration
+    /// backends while the model is already serving — must never regress
+    /// READY/LIMITED back to SELECTING BACKEND, which sticks the startup
+    /// pill on a false "selecting backend" forever (no code path restores
+    /// READY after boot: only check_model_health does, and it runs once).
+    pub fn set_phase_if_booting(&self, phase: StartupPhase) {
+        if let Ok(mut current) = self.phase.lock() {
+            if matches!(
+                *current,
+                StartupPhase::Starting
+                    | StartupPhase::WaitingForPai
+                    | StartupPhase::ValidatingPai
+                    | StartupPhase::PaiConnected
+                    | StartupPhase::CheckingAssets
+                    | StartupPhase::WaitingForUnlock
+                    | StartupPhase::Unlocking
+                    | StartupPhase::ScanningHost
+            ) {
+                *current = phase;
+            }
+        }
+    }
+
     pub fn connect(&self, package: &ValidatedPackage) {
         if let Ok(mut root) = self.connected_root.lock() {
             *root = Some(package.root.clone());
@@ -253,4 +278,63 @@ fn parse_vault_root(args: &[String]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod set_phase_if_booting_tests {
+    use super::*;
+
+    fn coordinator_at(phase: StartupPhase) -> StartupCoordinator {
+        let c = StartupCoordinator {
+            phase: Mutex::new(phase),
+            supplied_root: Mutex::new(None),
+            connected_root: Mutex::new(None),
+            vault_id: Mutex::new(None),
+            validation_failures: Mutex::new(Vec::new()),
+        };
+        c
+    }
+
+    fn phase_of(c: &StartupCoordinator) -> StartupPhase {
+        c.phase.lock().map(|p| *p).unwrap_or(StartupPhase::Error)
+    }
+
+    // Live-caught regression (2026-10-01): opening the Model panel re-ran
+    // detect_acceleration, whose set_phase knocked a READY boot all the way
+    // back to SELECTING_BACKEND with no path to recover.
+    #[test]
+    fn probe_never_regresses_ready_or_limited() {
+        for finished in [StartupPhase::Ready, StartupPhase::LimitedMode] {
+            let c = coordinator_at(finished);
+            c.set_phase_if_booting(StartupPhase::SelectingBackend);
+            assert_eq!(phase_of(&c), finished);
+        }
+    }
+
+    #[test]
+    fn probe_announces_phase_only_while_booting() {
+        // Early boot phases: the probe still drives the pill forward.
+        for booting in [
+            StartupPhase::Starting,
+            StartupPhase::ScanningHost,
+            StartupPhase::Unlocking,
+        ] {
+            let c = coordinator_at(booting);
+            c.set_phase_if_booting(StartupPhase::SelectingBackend);
+            assert_eq!(phase_of(&c), StartupPhase::SelectingBackend);
+        }
+
+        // Already past backend selection (server starting/verifying) or
+        // disconnected: the probe stays silent so it cannot overwrite a
+        // more advanced boot state.
+        for advanced in [
+            StartupPhase::StartingModel,
+            StartupPhase::VerifyingModel,
+            StartupPhase::Disconnected,
+        ] {
+            let c = coordinator_at(advanced);
+            c.set_phase_if_booting(StartupPhase::SelectingBackend);
+            assert_eq!(phase_of(&c), advanced);
+        }
+    }
 }
