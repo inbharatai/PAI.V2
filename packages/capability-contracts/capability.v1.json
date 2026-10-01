@@ -1,0 +1,213 @@
+{
+  "schema": "inbharat.pai.capability.v1",
+  "description": "Shared capability record contracts for PAI V2. Five versioned record kinds cover the universal capability layer: perception observations (camera/screen/OCR/model description with truthful distance semantics), bounded MK-style environment learning (observations vs hypotheses vs corrections vs verified facts, with provenance), procedure outcomes (preconditions/postconditions/verification/promotion), audio backend status (honest backend identity, never synthetic-labeled production), and device capability manifests (discovery evidence + verification state; control requires a verified adapter). Enforced invariants live in the Rust crate (packages/capability-contracts) and are restated here per record.",
+  "records": {
+    "perception_observation": {
+      "description": "One structured perception result from a camera frame, screen capture, OCR pass, or model image description. Detector labels and model descriptions are DISTINCT: a description is a hypothesis with provenance, never a detector class.",
+      "fields": {
+        "schema": "constant: inbharat.pai.perception.v1",
+        "source": "camera | screen | ocr | model_description",
+        "timestamp_ms": "epoch millis at capture",
+        "model_identity": "deterministic model identity, e.g. efficientdet-lite2-int8 (asset sha256-pinned) or gemma-4-12b@mmproj; null for raw sensor data",
+        "labels": "array of {label, confidence: 0..1, box: {x,y,width,height} normalized 0..1, track_id?, track_uncertain?}",
+        "ocr_text": "optional OCR text — kept distinct from detection labels",
+        "description": "optional free-text model description (hypothesis; requires provenance)",
+        "distance": "optional {kind: apparent_size_cue | calibrated_meters, value, evidence} — apparent_size_cue is NEVER metres; calibrated_meters requires a supported, calibrated sensor named in evidence",
+        "provenance": "{platform: android | desktop, device_id, model, artifact_sha256?}"
+      },
+      "invariants": [
+        "distance.kind=calibrated_meters requires non-empty evidence naming the sensor",
+        "description requires provenance; a description is never a verified detector class",
+        "normalized boxes stay within 0..1",
+        "track_uncertain defaults true after occlusion or long gaps (detector-based tracking only)"
+      ],
+      "example": {
+        "schema": "inbharat.pai.perception.v1",
+        "source": "camera",
+        "timestamp_ms": 1760000000000,
+        "model_identity": "efficientdet-lite2-int8",
+        "labels": [
+          {
+            "label": "person",
+            "confidence": 0.61,
+            "box": {
+              "x": 0.22,
+              "y": 0.18,
+              "width": 0.4,
+              "height": 0.55
+            },
+            "track_id": "t-3",
+            "track_uncertain": false
+          }
+        ],
+        "ocr_text": null,
+        "description": null,
+        "distance": {
+          "kind": "apparent_size_cue",
+          "value": 0.31,
+          "evidence": "bounding-box fill ratio of the frame; not calibrated distance"
+        },
+        "provenance": {
+          "platform": "android",
+          "device_id": "vault-device-uuid",
+          "model": "efficientdet-lite2-int8",
+          "artifact_sha256": null,
+          "source": "blind-aid-detector"
+        }
+      }
+    },
+    "environment_observation": {
+      "description": "One learned environment fact about a device, scene, or host capability. The epistemic status is mandatory: observations require provenance, hypotheses are never trusted for control, corrections override prior records, verified facts require verification evidence.",
+      "fields": {
+        "schema": "constant: inbharat.pai.envobs.v1",
+        "subject": "device/scene identity fingerprint (stable per device or scene)",
+        "observed_capability": "short capability statement, e.g. 'usb-vault-attach' or 'has-camera'",
+        "evidence": "the measured evidence behind this record (never appearance-only inference)",
+        "confidence": "low | medium | high",
+        "scope": "device | user | project (scopes stay isolated; one scope never leaks into another)",
+        "epistemic_status": "observation | hypothesis | correction | verified_fact",
+        "provenance": "{platform, device_id, source: which sensor/adapter/service produced it}",
+        "timestamp_ms": "epoch millis",
+        "verification_ref": "required when epistemic_status=verified_fact: reference to the verification evidence (procedure outcome id, adapter check, measurement)"
+      },
+      "invariants": [
+        "verified_fact requires non-empty verification_ref",
+        "hypothesis records are never promoted to device-control authority",
+        "correction records supersede earlier records on the same subject+capability",
+        "evidence must be measured, not inferred from appearance alone"
+      ],
+      "example": {
+        "schema": "inbharat.pai.envobs.v1",
+        "subject": "vault-drive-<fingerprint>",
+        "observed_capability": "usb-vault-attach",
+        "evidence": "Windows removable-drive enumeration reports a validated UNOONE package; manifest PackageIdentity check passed",
+        "confidence": "high",
+        "scope": "device",
+        "epistemic_status": "verified_fact",
+        "provenance": {
+          "platform": "desktop",
+          "device_id": "unoone-power",
+          "source": "usb-manifest-validator"
+        },
+        "timestamp_ms": 1760000000000,
+        "verification_ref": "usb-validate-package:PackageIdentity"
+      }
+    },
+    "procedure_outcome": {
+      "description": "One bounded record of a procedure attempt (tool call or skill execution) with preconditions, postconditions, verification evidence, risk class, and promotion status. This is the MK-style learning record: repeatable low-risk procedures with verified postconditions become promotion candidates, never automatically promoted.",
+      "fields": {
+        "schema": "constant: inbharat.pai.procedure.v1",
+        "procedure_id": "canonical tool id (tools.v1.json) or skill signature",
+        "bounded_arguments": "bounded summary of the arguments (no unbounded payloads)",
+        "preconditions": "what had to hold before the call",
+        "postconditions": "the expected observable postcondition",
+        "result": "success | failure | partial | cancelled",
+        "failure_reason": "optional failure explanation",
+        "verification": "{verified: bool, evidence: what was actually observed after the action}",
+        "risk_class": "DIRECT | CONFIRM | STRONG_CONFIRM | BLOCK (matches the tool contract)",
+        "promotion": "{status: none | suggested | approved | rejected, policy_version, requirements: the gates that must ALL hold}",
+        "timestamp_ms": "epoch millis",
+        "provenance": "{platform, device_id}"
+      },
+      "invariants": [
+        "promotion.status=approved requires ALL requirements: bounded_arguments, repeatable_success, verified_postconditions, low risk class, no_contradictory_evidence, explicit_approval",
+        "risk_class=BLOCK procedures are never promotable",
+        "result=success without verification.verified is NOT promotion evidence",
+        "promotion.status=suggested never auto-executes; approval is explicit user or policy action"
+      ],
+      "example": {
+        "schema": "inbharat.pai.procedure.v1",
+        "procedure_id": "open_calendar",
+        "bounded_arguments": "none",
+        "preconditions": "calendar app installed",
+        "postconditions": "calendar app is the foreground activity",
+        "result": "success",
+        "failure_reason": null,
+        "verification": {
+          "verified": true,
+          "evidence": "ActionVerifier: foreground package == default calendar provider"
+        },
+        "risk_class": "DIRECT",
+        "promotion": {
+          "status": "suggested",
+          "policy_version": "skill-learning-policy-v1",
+          "requirements": {
+            "bounded_arguments": true,
+            "repeatable_success": true,
+            "verified_postconditions": true,
+            "low_risk_class": true,
+            "no_contradictory_evidence": true,
+            "explicit_approval": false
+          }
+        },
+        "timestamp_ms": 1760000000000,
+        "provenance": {
+          "platform": "android",
+          "device_id": "vault-device-uuid",
+          "source": "agent-orchestrator"
+        }
+      }
+    },
+    "audio_backend_status": {
+      "description": "Honest audio backend identity per capability. Reference/scaffold engines must be labeled as such — never presented as production ASR/TTS. Backend identity, readiness, streaming class, and offline status are the cross-platform contract fields.",
+      "fields": {
+        "schema": "constant: inbharat.pai.audio.v1",
+        "capability": "asr | tts | vad",
+        "backend": "sherpa-onnx | inbharat-audio | whisper-cpp | piper | android-system-tts | reference | unavailable",
+        "ready": "bool",
+        "streaming_class": "stateful-streaming | segment-chunked | buffered-final | none",
+        "offline": "bool — true only when the backend runs fully offline",
+        "reason": "why if not ready"
+      },
+      "invariants": [
+        "backend=reference is scaffold/reference output and must never be reported as production ASR/TTS",
+        "backend=android-system-tts or android-system-stt is online-ish emergency fallback: offline=false",
+        "ready=false plus reason is the fail-closed contract — never silently fall back"
+      ],
+      "example": {
+        "schema": "inbharat.pai.audio.v1",
+        "capability": "tts",
+        "backend": "sherpa-onnx",
+        "ready": true,
+        "streaming_class": "buffered-final",
+        "offline": true,
+        "reason": null
+      }
+    },
+    "device_capability": {
+      "description": "Host-side device adapter manifest entry: what PAI can actually discover and support. USB presence alone grants nothing; control operations require a verified adapter.",
+      "fields": {
+        "schema": "constant: inbharat.pai.device.v1",
+        "device_identity": "fingerprint from the host OS",
+        "host": "android | desktop",
+        "connection": "usb | built-in | attached",
+        "supported_operations": "array of operation names the ADAPTER implements",
+        "permission_state": "granted | denied | not_requested | unavailable",
+        "verification": "verified | observed | unverified",
+        "verification_evidence": "required when verification=verified",
+        "discovery_evidence": "how the device was discovered",
+        "timestamp_ms": "epoch millis"
+      },
+      "invariants": [
+        "verification=verified requires non-empty verification_evidence",
+        "unverified/observed devices expose read-only identity inspection only — no control operations",
+        "supported_operations may only contain operations with an implemented adapter on this host"
+      ],
+      "example": {
+        "schema": "inbharat.pai.device.v1",
+        "device_identity": "camera-front",
+        "host": "android",
+        "connection": "built-in",
+        "supported_operations": [
+          "photo_capture",
+          "blind_aid_analysis"
+        ],
+        "permission_state": "granted",
+        "verification": "verified",
+        "verification_evidence": "CameraX binds the device; BlindAidManager runs the EfficientDet-Lite2 detector on live frames",
+        "discovery_evidence": "CameraX camera selector enumerates the front camera",
+        "timestamp_ms": 1760000000000
+      }
+    }
+  }
+}

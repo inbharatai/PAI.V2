@@ -10,6 +10,7 @@ members = [
     "packages/pai-harness-adapter",
     "packages/speech-contracts",
     "packages/tool-contracts",
+    "packages/capability-contracts",
     "apps/desktop/src-tauri",
     "apps/dock/windows",
     "apps/starter/windows",

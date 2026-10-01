@@ -5386,6 +5386,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "unoone-capability-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "unoone-dock-windows"
 version = "0.1.0"
 dependencies = [
