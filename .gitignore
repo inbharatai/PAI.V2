@@ -67,3 +67,7 @@ screenshots/
 *.local.png
 # Claude Code session scratch space (fixtures, candidates)
 .claude-scratch/
+
+# Playwright local run artifacts
+web-runtime/page-agent-unoone/test-results/
+web-runtime/page-agent-unoone/playwright-report/

@@ -16,7 +16,7 @@ use inbharat_harness_core::jobs::{run_scoped_subagent, SubagentProvider};
 use inbharat_harness_core::providers::{EnforcementQuality, SandboxGrant, SandboxRequest};
 use inbharat_harness_core::{
     tools::{ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool},
-    AttachmentMetadata, BudgetLimits, CancellationToken, Capability, CapabilitySet,
+    AttachmentMetadata, BudgetLimits, CancelCause, CancellationToken, Capability, CapabilitySet,
     ConfirmationMode, ConfirmationOutcome, Determinism, ErrorCode, ExecutionLevel, Failure,
     FailureClass, HarnessBuilder, HarnessResult, LocalExecutionBroker, MemoryOptions,
     PermissionDecision, PermissionProvider, RootedFs, RunOptions, SandboxProvider, SideEffect,
@@ -26,7 +26,7 @@ use inbharat_harness_core::{
 use pai_harness_adapter::{
     PaiLlamaLocalProvider, PaiVaultMemoryProvider, PaiVaultMemoryProviderConfig,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -2159,9 +2159,78 @@ impl Tool for AgentSpawnTool {
 /// live-caught 2026-09-14: the chat's full-access label showed a literal
 /// unexpanded "%USERPROFILE%\UnoOneAgent" and the agent's answers said only
 /// "in your workspace" — the user could not find the files the tool built).
+/// Live harness chat runs, keyed by conversation id, so the UI's Stop control
+/// can interrupt an in-flight agent loop. One live run per conversation: a
+/// newer request supersedes (and cancels) the previous one — the newest
+/// request owns the conversation.
+///
+/// The harness loop checks its token between steps (`cancel.check` at every
+/// tool stage), so a stop takes effect at the next step boundary; the loop
+/// then returns with `Failure::Cancelled`, which the UI shows as an honest
+/// "stopped" state rather than a fabricated result.
+#[derive(Default)]
+pub struct HarnessRunRegistry {
+    runs: Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl HarnessRunRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers `token` as the live run for `conversation_id`. A previous
+    /// still-registered run is cancelled with `CancelCause::Parent`
+    /// (superseded); first-cause-wins means its own loop stops at the next
+    /// step boundary and reports the supersede honestly.
+    pub fn register(&self, conversation_id: &str, token: CancellationToken) {
+        let Ok(mut runs) = self.runs.lock() else {
+            return; // poisoned lock: refuse to track, never block the chat
+        };
+        if let Some(previous) = runs.insert(conversation_id.to_owned(), token) {
+            previous.cancel(CancelCause::Parent);
+        }
+    }
+
+    /// User stop: cancels the live run for `conversation_id`. True only when
+    /// a live run existed and this call was the first to cancel it.
+    pub fn stop(&self, conversation_id: &str) -> bool {
+        let Ok(runs) = self.runs.lock() else {
+            return false;
+        };
+        match runs.get(conversation_id) {
+            Some(token) => token.cancel(CancelCause::User),
+            None => false,
+        }
+    }
+
+    /// Removes the finished (or crashed) run WITHOUT cancelling: a late Stop
+    /// after the loop already ended must not report a phantom cancellation.
+    pub fn finish(&self, conversation_id: &str) {
+        if let Ok(mut runs) = self.runs.lock() {
+            runs.remove(conversation_id);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn get_workspace_root() -> Result<String, String> {
     workspace_root().map(|path| path.to_string_lossy().into_owned())
+}
+
+/// User stop for an in-flight harness chat run. Cancels the live loop for
+/// `conversation_id`; the run itself returns with a cancellation failure the
+/// UI renders as an honest "stopped by you" state. Idempotent: a second
+/// click reports `false` (nothing left to stop).
+#[tauri::command]
+pub async fn harness_stop_run(
+    conversation_id: String,
+    run_registry: tauri::State<'_, HarnessRunRegistry>,
+) -> Result<bool, String> {
+    let conversation_id = conversation_id.trim();
+    if conversation_id.is_empty() || conversation_id.len() > 128 {
+        return Err("conversation_id must be 1-128 characters".to_owned());
+    }
+    Ok(run_registry.stop(conversation_id))
 }
 
 #[tauri::command]
@@ -2177,6 +2246,7 @@ pub async fn harness_chat(
     model_state: tauri::State<'_, ModelManagerState>,
     vault_state: tauri::State<'_, DesktopVaultState>,
     safety_state: tauri::State<'_, SafetyGuardState>,
+    run_registry: tauri::State<'_, HarnessRunRegistry>,
 ) -> Result<HarnessChatResult, String> {
     let message = message.trim().to_owned();
     if message.is_empty() || message.len() > 256 * 1024 {
@@ -2295,13 +2365,21 @@ pub async fn harness_chat(
     }
     let browser = Arc::clone(browser_state.inner());
     let (attachment_metadata, attachment_bytes) = attachments;
+    // Stop control (2026-10-01): this run's cancellation token is registered
+    // before the worker starts so `harness_stop_run` can interrupt the loop
+    // mid-run; the registry slot is cleared on every exit path after the
+    // await below. One live run per conversation — registering supersedes
+    // (cancels) any previous run still in flight for this conversation.
+    let stop_conversation_id = conversation_id.clone();
+    let cancel = CancellationToken::new();
+    run_registry.register(&stop_conversation_id, cancel.clone());
     // Gap 1 (2026-09-16): live token tap for the chat UI. Tool-free model
     // turns stream their answer token-by-token as `chat-token` events; the
     // adapter keeps tool-bearing (agentic) turns buffered, so the event only
     // ever carries a plain answer being generated — never tool activity.
     let chat_token_app = app.clone();
 
-    tokio::task::spawn_blocking(move || {
+    let worker = tokio::task::spawn_blocking(move || {
         let mut model_builder = PaiLlamaLocalProvider::new(model_id.clone(), port)
             .map_err(|error| error.to_string())?;
         for (id, media_type, base64_bytes) in &attachment_bytes {
@@ -2483,7 +2561,8 @@ pub async fn harness_chat(
             options.explicit_level = Some(ExecutionLevel::L3);
             options.budget = Some(full_access_budget());
         }
-        let cancel = CancellationToken::new();
+        // `cancel` is the run token registered by the caller before this
+        // worker started — the UI Stop control cancels it from outside.
         let (outcome, _session) = harness
             .run(&harness_prompt, &options, &cancel)
             .map_err(|error| error.to_string())?;
@@ -2514,9 +2593,80 @@ pub async fn harness_chat(
             model_id,
             memory_namespace: conversation_namespace,
         })
-    })
-    .await
-    .map_err(|error| format!("Harness worker failed: {error}"))?
+    });
+    let worker_result = worker
+        .await
+        .map_err(|error| format!("Harness worker failed: {error}"));
+    // Every exit path — worker panic, run error, cancellation, or success —
+    // ends the run: clear the registry slot before returning so a late Stop
+    // reports false instead of cancelling a phantom run.
+    run_registry.finish(&stop_conversation_id);
+    worker_result?
+}
+
+#[cfg(test)]
+mod run_registry_tests {
+    use super::*;
+
+    #[test]
+    fn stop_cancels_the_registered_run_once() {
+        let registry = HarnessRunRegistry::new();
+        let token = CancellationToken::new();
+        registry.register("conv-1", token.clone());
+        // First stop wins and reports true; the token is genuinely cancelled.
+        assert!(registry.stop("conv-1"));
+        assert!(token.is_cancelled());
+        assert_eq!(token.cause(), Some(CancelCause::User));
+        // Second stop: nothing new to cancel (first-cause-wins) — honest false.
+        assert!(!registry.stop("conv-1"));
+    }
+
+    #[test]
+    fn stop_for_unknown_conversation_is_false() {
+        let registry = HarnessRunRegistry::new();
+        assert!(!registry.stop("never-started"));
+    }
+
+    #[test]
+    fn finish_removes_the_run_without_cancelling() {
+        let registry = HarnessRunRegistry::new();
+        let token = CancellationToken::new();
+        registry.register("conv-2", token.clone());
+        // The run completed normally: finish() must clear the slot but never
+        // touch the token (a completed run cannot be "stopped" retroactively).
+        registry.finish("conv-2");
+        assert!(!token.is_cancelled());
+        // A late Stop after the run ended reports false — no phantom stop.
+        assert!(!registry.stop("conv-2"));
+    }
+
+    #[test]
+    fn registering_a_new_run_supersedes_the_previous_one() {
+        let registry = HarnessRunRegistry::new();
+        let first = CancellationToken::new();
+        registry.register("conv-3", first.clone());
+        let second = CancellationToken::new();
+        registry.register("conv-3", second.clone());
+        // The superseded run is cancelled by the newer registration…
+        assert!(first.is_cancelled());
+        assert_eq!(first.cause(), Some(CancelCause::Parent));
+        // …the new run is live and still cancellable by the user.
+        assert!(!second.is_cancelled());
+        assert!(registry.stop("conv-3"));
+        assert_eq!(second.cause(), Some(CancelCause::User));
+    }
+
+    #[test]
+    fn conversations_are_independent() {
+        let registry = HarnessRunRegistry::new();
+        let a = CancellationToken::new();
+        let b = CancellationToken::new();
+        registry.register("conv-a", a.clone());
+        registry.register("conv-b", b.clone());
+        assert!(registry.stop("conv-a"));
+        assert!(a.is_cancelled());
+        assert!(!b.is_cancelled());
+    }
 }
 
 #[cfg(test)]

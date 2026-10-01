@@ -503,6 +503,12 @@ export const tauriApi = {
       allow_workspace_goal: allowWorkspaceGoal,
       images: images ?? null,
     }),
+  // Stop control: cancels the in-flight run for this conversation. The run
+  // unwinds at the next loop step boundary and returns a cancellation error
+  // the chat renders as an honest "stopped by you" state. true = a live run
+  // was cancelled by this call; false = nothing was running (idempotent).
+  harnessStopRun: (conversationId: string) =>
+    invoke<boolean>('harness_stop_run', { conversation_id: conversationId }),
   // InBharat Audio adapter — production_ready is true only when the real
   // audio.cpp CLI passes its hash-bound readiness + acceptance gate.
   getBharatAudioStatus: (vaultRoot: string) =>

@@ -71,6 +71,10 @@ export function ChatView() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  // Stop control: true after the user clicks Stop until the cancelled run
+  // unwinds (the loop checks its token at the next step boundary, so the
+  // in-flight tool call finishes first — never a hard mid-action kill).
+  const [stopRequested, setStopRequested] = useState(false);
   // 'loading' = the model server is provably on its way up (startup phase
   // still inside the pre-Ready model path). check_model_health rejects with
   // "manager not initialized" during that whole window, so a plain failure
@@ -544,6 +548,7 @@ export function ChatView() {
     streamedAnswerRef.current = '';
     setStreamedAnswer('');
     setServerError('');
+    setStopRequested(false);
 
     try {
       const conversationHistory: TauriConversationTurn[] = messages
@@ -588,7 +593,28 @@ export function ChatView() {
         };
       } catch (harnessErr) {
         const harnessMsg = harnessErr instanceof Error ? harnessErr.message : String(harnessErr);
-        if (fullAccess) {
+        // User stop (or this run being superseded by a newer message): the
+        // harness surfaces Failure::Cancelled as "cancelled:<operation>: user|parent".
+        // Never an error, and never the legacy fallback — that would RE-RUN
+        // the work the user just stopped. Honest stopped bubble carrying the
+        // tool activity recorded so far.
+        if (/^cancelled:/.test(harnessMsg)) {
+          const cause = /: user$/.test(harnessMsg)
+            ? 'you stopped it'
+            : 'a newer request superseded it';
+          const progressSteps: AgentStep[] = liveProgressRef.current.map(ev =>
+            ev.phase === 'call'
+              ? { type: 'ToolCall', tool: ev.tool, text: ev.detail, at: ev.at }
+              : { type: 'ToolResult', tool: ev.tool, result: ev.detail, at: ev.at }
+          );
+          assistantMessage = {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: `⏹ Stopped — ${cause}. The step that was running finished, then the loop stopped; nothing further ran.`,
+            timestamp: Date.now(),
+            steps: progressSteps.length > 0 ? progressSteps : undefined,
+          };
+        } else if (fullAccess) {
           // Defect #32 (live-caught 2026-09-14): with full access on, the
           // silent fallback to the read-only legacy agent made the model
           // TRUTHFULLY refuse the task ("As an AI assistant, I do not have
@@ -601,25 +627,26 @@ export function ChatView() {
           throw new Error(
             `Agent pipeline stopped: ${harnessMsg}. The task was NOT run — no files were written and no commands were executed. Retry once the model is back (its state is in the Model Manager, or reload the app).`
           );
+        } else {
+          // Rollback to the legacy ReAct agent — read-only lane only. This
+          // lane change must never be silent: the legacy agent has a smaller,
+          // vault-read-only toolset, so an answer produced here can truthfully
+          // describe fewer abilities than the enabled session. Surface the
+          // fallback and its reason as a step the user can read.
+          console.warn('Harness bridge fell back to legacy agent:', harnessMsg);
+          const result = await tauriApi.agentChat(composedPrompt, conversationHistory);
+          const fallbackStep = {
+            type: 'Thinking' as const,
+            text: `Fell back to the read-only legacy agent (the primary agent pipeline stopped: ${harnessMsg}). This fallback can only read vault records — its answers may understate what this session can do.`,
+          };
+          assistantMessage = {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: result.final_text,
+            timestamp: Date.now(),
+            steps: [fallbackStep, ...(result.steps ?? [])],
+          };
         }
-        // Rollback to the legacy ReAct agent — read-only lane only. This
-        // lane change must never be silent: the legacy agent has a smaller,
-        // vault-read-only toolset, so an answer produced here can truthfully
-        // describe fewer abilities than the enabled session. Surface the
-        // fallback and its reason as a step the user can read.
-        console.warn('Harness bridge fell back to legacy agent:', harnessMsg);
-        const result = await tauriApi.agentChat(composedPrompt, conversationHistory);
-        const fallbackStep = {
-          type: 'Thinking' as const,
-          text: `Fell back to the read-only legacy agent (the primary agent pipeline stopped: ${harnessMsg}). This fallback can only read vault records — its answers may understate what this session can do.`,
-        };
-        assistantMessage = {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: result.final_text,
-          timestamp: Date.now(),
-          steps: [fallbackStep, ...(result.steps ?? [])],
-        };
       }
       setMessages(prev => [...prev, assistantMessage]);
       // STS out: with auto-speak on, the reply is voiced as it lands.
@@ -638,6 +665,18 @@ export function ChatView() {
       streamedAnswerRef.current = '';
       setStreamedAnswer('');
     }
+  };
+
+  // Stop control: cancel the in-flight run for this conversation. The
+  // harness loop checks its cancellation token at every tool-stage boundary,
+  // so the step currently executing finishes first — honest cooperative
+  // stop, never a hard kill that could leave a half-written file with a
+  // success message. The run unwinds into the "⏹ Stopped" bubble; this
+  // button is disabled until then (idempotent backend: a second call
+  // returns false because the registry slot is gone).
+  const handleStop = () => {
+    setStopRequested(true);
+    void tauriApi.harnessStopRun(conversationIdRef.current || 'default');
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -843,15 +882,55 @@ export function ChatView() {
               {liveProgress.length === 0 && !streamedAnswer ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span className="spinner" />
-                  <span style={{ fontSize: '13px', color: 'var(--text-muted, #666)' }}>Thinking…</span>
+                  <span style={{ fontSize: '13px', color: 'var(--text-muted, #666)' }}>
+                    {stopRequested ? 'Stopping…' : 'Thinking…'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleStop}
+                    disabled={stopRequested}
+                    style={{
+                      marginLeft: 'auto',
+                      padding: '2px 12px',
+                      fontSize: '12px',
+                      borderRadius: '6px',
+                      border: '1px solid var(--border, #333)',
+                      background: 'transparent',
+                      color: 'var(--text-primary, #eee)',
+                      cursor: stopRequested ? 'default' : 'pointer',
+                    }}
+                  >
+                    ■ Stop
+                  </button>
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
                     <span className="spinner" />
                     <span style={{ fontSize: '13px', color: 'var(--text-secondary, #888)' }}>
-                      {streamedAnswer ? 'Answering…' : 'Working…'}
+                      {stopRequested
+                        ? 'Stopping… (finishing the current step)'
+                        : streamedAnswer
+                          ? 'Answering…'
+                          : 'Working…'}
                     </span>
+                    <button
+                      type="button"
+                      onClick={handleStop}
+                      disabled={stopRequested}
+                      style={{
+                        marginLeft: 'auto',
+                        padding: '2px 12px',
+                        fontSize: '12px',
+                        borderRadius: '6px',
+                        border: '1px solid var(--border, #333)',
+                        background: 'transparent',
+                        color: 'var(--text-primary, #eee)',
+                        cursor: stopRequested ? 'default' : 'pointer',
+                      }}
+                    >
+                      ■ Stop
+                    </button>
                   </div>
                   {liveProgress.slice(-8).map((ev, i) => (
                     <div key={i} style={{ fontSize: '12px', color: 'var(--text-secondary, #888)' }}>
