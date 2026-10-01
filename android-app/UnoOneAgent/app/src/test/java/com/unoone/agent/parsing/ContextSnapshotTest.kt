@@ -90,6 +90,8 @@ class ContextSnapshotTest {
         override suspend fun deleteByQuery(query: String): Int = 0
         override suspend fun deleteAll(): Int = 0
         override suspend fun deleteOlderThan(cutoff: Long): Int = 0
+        override suspend fun deleteOlderThanSynced(cutoff: Long): Int = 0
+        override suspend fun deleteSynced(): Int = 0
         // Vault-link members (unused by the context snapshot; inert stubs).
         override suspend fun setVaultRecordId(id: Long, vaultRecordId: String): Int = 0
         override suspend fun notSynced(): List<NoteEntity> = emptyList()

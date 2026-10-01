@@ -14,10 +14,15 @@ import kotlinx.coroutines.flow.Flow
  * not a vault dependency — keeps this module free of vault coupling. Planner
  * telemetry (storeOutcome) deliberately never fires it: that is device-local
  * cache, not canonical user memory.
+ * @param onUserMemoryDeleted invoked with the full entity being deleted, so
+ * the app layer can tombstone the vault record (if the row ever reached the
+ * vault). Same decoupling as [onUserMemoryChanged]: the vault side decides
+ * what a null `vaultRecordId` means (nothing to tombstone).
  */
 class MemoryModule(
     private val memoryDao: MemoryDao,
     private val onUserMemoryChanged: suspend (Long) -> Unit = {},
+    private val onUserMemoryDeleted: suspend (MemoryEntity) -> Unit = {},
 ) {
 
     val allMemories: Flow<List<MemoryEntity>> = memoryDao.getAll()
@@ -141,6 +146,7 @@ class MemoryModule(
     }
 
     suspend fun deleteMemory(memory: MemoryEntity) {
+        onUserMemoryDeleted(memory)
         memoryDao.delete(memory)
     }
 }

@@ -44,9 +44,27 @@ interface NoteDao {
     @Query("DELETE FROM notes")
     suspend fun deleteAll(): Int
 
+    /**
+     * Vault-disconnect cleanup that can never lose data: deletes only rows
+     * that already reached the vault. Unsynchronized rows are the ONLY copy
+     * in existence and must survive the vault going away — used by
+     * [com.unoone.agent.storage.cache.VaultCacheLifecycle.clearOnVaultDisconnect].
+     */
+    @Query("DELETE FROM notes WHERE vaultRecordId IS NOT NULL")
+    suspend fun deleteSynced(): Int
+
     /** Cache eviction: deletes notes older than [cutoff] epoch millis. Returns rows deleted. */
     @Query("DELETE FROM notes WHERE createdAt < :cutoff")
     suspend fun deleteOlderThan(cutoff: Long): Int
+
+    /**
+     * Cache eviction that can never lose data: deletes only rows that already
+     * reached the vault (`vaultRecordId` set). Unsynchronized rows are the
+     * ONLY copy in existence and are deliberately excluded — used by
+     * [com.unoone.agent.storage.cache.VaultCacheLifecycle.evictExpired].
+     */
+    @Query("DELETE FROM notes WHERE createdAt < :cutoff AND vaultRecordId IS NOT NULL")
+    suspend fun deleteOlderThanSynced(cutoff: Long): Int
 
     /** Link a cache row to the vault record it was written to. */
     @Query("UPDATE notes SET vaultRecordId = :vaultRecordId WHERE id = :id")

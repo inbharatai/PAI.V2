@@ -175,4 +175,35 @@ class VaultMirrorTest {
         val syncedTypes = db.memoryDao().notSynced()
         assertTrue("preference should be synced away", syncedTypes.none { it.type == "preference" })
     }
+
+    @Test
+    fun `memory deletion of a synced row tombstones the vault record`() = runBlocking {
+        // A preference that already reached the vault.
+        writer.online = true
+        val id = db.memoryDao().insert(MemoryEntity(key = "wake_word", value = "namaste", type = "preference"))
+        mirror().onMemoryUpserted(id)
+        val vid = db.memoryDao().getByIdOnce(id)!!.vaultRecordId!!
+
+        // deleteMemory fires the vault-notification callback with the FULL
+        // entity (vaultRecordId included) BEFORE the local row is gone —
+        // exactly as MemoryModule.deleteMemory + the orchestrator wiring do.
+        val entity = db.memoryDao().getByIdOnce(id)!!
+        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.MEMORY)
+        db.memoryDao().delete(entity)
+
+        assertEquals("the vault record must be tombstoned, not orphaned", listOf(vid), writer.tombstoned)
+        assertNull("the local cache row is gone", db.memoryDao().getByKey("wake_word"))
+    }
+
+    @Test
+    fun `memory deletion of an unsynced row has nothing to tombstone`() = runBlocking {
+        val id = db.memoryDao().insert(MemoryEntity(key = "local_pref", value = "v", type = "preference"))
+        val entity = db.memoryDao().getByIdOnce(id)!!
+
+        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.MEMORY)
+        db.memoryDao().delete(entity)
+
+        assertTrue("purely local deletion must not touch the vault", writer.tombstoned.isEmpty())
+        assertTrue(db.pendingTombstoneDao().getAll().isEmpty())
+    }
 }

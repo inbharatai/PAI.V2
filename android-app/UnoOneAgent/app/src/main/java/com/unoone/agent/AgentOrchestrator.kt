@@ -49,6 +49,7 @@ import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.NoteDao
 import com.unoone.agent.storage.dao.SkillDao
 import com.unoone.agent.storage.entity.ActionLogEntity
+import com.unoone.agent.vault.VaultSyncPlanner
 import com.unoone.agent.voice.VoiceLanguage
 import com.unoone.agent.voice.VoiceAgentRuntime
 import com.unoone.agent.voice.VoiceAgentState
@@ -169,10 +170,13 @@ class AgentOrchestrator(
 
     // Extracted components — Phase 1A: God object split
     // User memories (preferences/corrections) mirror to the drive vault via
-    // the callback; planner telemetry never fires it (see MemoryModule).
+    // the callbacks; planner telemetry never fires them. Deletions tombstone
+    // through the same mirror so a deleted memory stays deleted on every
+    // host (a null vaultRecordId means it never reached the vault — no-op).
     private val memoryModule = com.unoone.agent.memory.MemoryModule(
         memoryDao,
-        onUserMemoryChanged = { id -> vaultMirror?.onMemoryUpserted(id) }
+        onUserMemoryChanged = { id -> vaultMirror?.onMemoryUpserted(id) },
+        onUserMemoryDeleted = { m -> vaultMirror?.onRowDeleted(m.vaultRecordId, VaultSyncPlanner.Kind.MEMORY) },
     )
     // One OcrControl shared by the parser (OCR fallback for the context snapshot) and the
     // executor (read_screen / ocr_screen), so MediaProjection is initialized at most once.

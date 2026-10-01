@@ -13,8 +13,20 @@ import com.unoone.agent.storage.db.UnoOneDatabase
  * top — bounded lifetime + clear-on-disconnect — so vault-mirrored rows do
  * not outlive their welcome even as ciphertext.
  *
- * `model_metadata` is deliberately excluded: it tracks models installed on
- * THIS device, which is device-local state, not a mirror of vault data.
+ * Two data-safety carve-outs are load-bearing:
+ *
+ * 1. UNSYNCED ROWS SURVIVE BOTH PATHS. A row whose `vaultRecordId` is null
+ *    has never reached the vault — Room is the ONLY copy in existence.
+ *    Evicting or clearing it would be silent data loss, so both
+ *    [evictExpired] and [clearOnVaultDisconnect] delete *synced rows only*
+ *    (`vaultRecordId IS NOT NULL`).
+ *
+ * 2. DEVICE-LOCAL TABLES ARE EXEMPT from both paths. `skills`,
+ *    `model_metadata` and unsynced telemetry memories (`outcome`,
+ *    `skill_usage` — which never mirror) are device-local state, not a cache
+ *    of vault data; wiping them would destroy the only copy. `action_logs`
+ *    stay in both paths on purpose: they never mirror, and the disconnect
+ *    wipe is a privacy wipe of device-local audit data.
  */
 object VaultCacheLifecycle {
 
@@ -22,7 +34,8 @@ object VaultCacheLifecycle {
     const val DEFAULT_TTL_MILLIS: Long = 24L * 60 * 60 * 1000 // 24 hours
 
     /**
-     * Evict vault-mirror rows whose lifetime has expired.
+     * Evict vault-mirror rows whose lifetime has expired. Never touches
+     * unsynced rows (only copy) or device-local skills.
      * @return total rows deleted across all vault-mirror tables.
      */
     suspend fun evictExpired(
@@ -31,9 +44,8 @@ object VaultCacheLifecycle {
         nowMillis: Long = System.currentTimeMillis()
     ): Int {
         val cutoff = nowMillis - ttlMillis
-        return db.noteDao().deleteOlderThan(cutoff) +
-            db.skillDao().deleteOlderThan(cutoff) +
-            db.memoryDao().deleteOlderThan(cutoff) +
+        return db.noteDao().deleteOlderThanSynced(cutoff) +
+            db.memoryDao().deleteOlderThanSynced(cutoff) +
             db.actionLogDao().deleteOlderThan(cutoff)
     }
 
@@ -43,13 +55,15 @@ object VaultCacheLifecycle {
 
     /**
      * Vault disconnect: the vault is gone, so the plaintext cache MUST NOT
-     * keep a readable copy of vault-mirrored data behind.
+     * keep a readable copy of vault-mirrored data behind. Only rows that
+     * actually reached the vault are deleted — unsynced rows survive (they
+     * exist nowhere else); skills survive (device-local, Room is their only
+     * store); action logs are fully cleared (privacy wipe, they never mirror).
      * @return total rows deleted.
      */
     suspend fun clearOnVaultDisconnect(db: UnoOneDatabase): Int {
-        return db.noteDao().deleteAll() +
-            db.skillDao().deleteAll() +
-            db.memoryDao().deleteAll() +
+        return db.noteDao().deleteSynced() +
+            db.memoryDao().deleteSynced() +
             db.actionLogDao().clearAll()
     }
 }

@@ -69,6 +69,14 @@ with the mission's capability/memory/vision/audio/environment-learning scope.
 - **P6 — Evidence + docs.** Matrix runs, acceptance doc 119+, README/ARCHITECTURE/STATUS corrections,
   upgrade/rollback steps preserving vault data.
 
+## Host coverage (asked 2026-10-01: "also for google phones")
+
+- **Google Pixel (and every Android handset): already covered.** UnoOneAgent
+  is a generic Android app — the tool contract, vault mirror, durability
+  fixes and all lanes apply to any modern Android device (Xiaomi 14 was the
+  validation handset). No separate platform exists to add; Pixel needs only
+  the same on-phone physical gate as any other phone.
+
 ## Physical-device gates (cannot be honest without hardware)
 
 - On-phone speech matrix + blind-aid lanes (no device attached 2026-10-01; adb present).
