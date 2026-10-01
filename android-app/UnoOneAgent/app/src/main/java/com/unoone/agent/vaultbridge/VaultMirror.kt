@@ -4,6 +4,7 @@ import com.unoone.agent.core.util.Logger
 import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.NoteDao
 import com.unoone.agent.storage.dao.PendingTombstoneDao
+import com.unoone.agent.storage.dao.SkillDao
 import com.unoone.agent.storage.entity.PendingTombstoneEntity
 import com.unoone.agent.vault.VaultRecordFactory
 import com.unoone.agent.vault.VaultRecordWriter
@@ -12,7 +13,7 @@ import java.time.Instant
 import java.util.UUID
 
 /**
- * Routes note/memory cache writes through to the shared drive vault, making
+ * Routes note/memory/skill cache writes through to the shared drive vault, making
  * the vault the canonical store while Room stays the (encrypted) cache/index.
  *
  * Online (vault attached + unlocked): a create is written straight through and
@@ -32,6 +33,7 @@ class VaultMirror(
     private val tombstoneDao: PendingTombstoneDao,
     private val writerProvider: () -> VaultRecordWriter?,
     private val deviceId: String,
+    private val skillDao: SkillDao? = null,
     private val idGen: () -> String = { UUID.randomUUID().toString() },
     private val isoNow: () -> String = { Instant.now().toString() },
     private val isoOf: (Long) -> String = { Instant.ofEpochMilli(it).toString() },
@@ -123,6 +125,42 @@ class VaultMirror(
         }
     }
 
+    // ---- skill write-through ---------------------------------------------
+
+    /**
+     * A skill was saved or updated locally (row [localId]); mirror it if we
+     * can. Skills upsert by name, so a save rewrites the SAME vault record
+     * with revision+1 — the same honest versioning memories use. No-op when
+     * the mirror was built without a skillDao (older call sites).
+     */
+    suspend fun onSkillUpserted(localId: Long) {
+        val dao = skillDao ?: return
+        try {
+            val writer = writerProvider() ?: return
+            val skill = dao.getById(localId) ?: return
+            val isRewrite = skill.vaultRecordId != null
+            val recordId = skill.vaultRecordId ?: idGen()
+            val revision = if (isRewrite) skill.vaultRevision + 1 else 1
+            val mapped = VaultRecordFactory.forSkill(
+                recordId = recordId,
+                transactionId = idGen(),
+                deviceId = deviceId,
+                name = skill.name,
+                triggerPhrases = skill.triggerPhrases,
+                stepsJson = skill.stepsJson,
+                riskLevel = skill.riskLevel,
+                enabled = skill.enabled,
+                createdAtIso = isoOf(skill.createdAt),
+                updatedAtIso = isoOf(skill.updatedAt),
+                revision = revision,
+            )
+            writer.writeRecord(mapped.fields, mapped.content)
+            dao.setVaultLink(localId, recordId, revision)
+        } catch (e: Exception) {
+            Logger.w("VaultMirror.onSkillUpserted non-fatal: ${e.message}")
+        }
+    }
+
     // ---- backlog flush --------------------------------------------------
 
     /** Flush everything that accumulated while locked/detached. Call on unlock. */
@@ -136,6 +174,9 @@ class VaultMirror(
             memoryDao.notSynced().forEach {
                 writes.add(VaultSyncPlanner.PendingWrite(it.id, VaultSyncPlanner.Kind.MEMORY))
             }
+            skillDao?.notSynced()?.forEach {
+                writes.add(VaultSyncPlanner.PendingWrite(it.id, VaultSyncPlanner.Kind.SKILL))
+            }
             val tombstones = tombstoneDao.getAll()
                 .map { VaultSyncPlanner.PendingTombstone(it.vaultRecordId, it.deletedAtIso) }
 
@@ -144,6 +185,7 @@ class VaultMirror(
                     is VaultSyncPlanner.Op.Write -> when (op.kind) {
                         VaultSyncPlanner.Kind.NOTE -> onNoteCreated(op.localId)
                         VaultSyncPlanner.Kind.MEMORY -> onMemoryUpserted(op.localId)
+                        VaultSyncPlanner.Kind.SKILL -> onSkillUpserted(op.localId)
                     }
                     is VaultSyncPlanner.Op.Tombstone -> {
                         writer.tombstone(op.vaultRecordId, op.deletedAtIso)

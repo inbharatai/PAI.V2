@@ -19,5 +19,14 @@ data class SkillEntity(
     val riskLevel: Int = 0,
     val enabled: Boolean = true,
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    /**
+     * Record id in the shared drive vault once this skill has been mirrored
+     * there as a DOCUMENT {kind:"skill"} record, or null while it lives only
+     * in the local cache (created offline, pending flush on the next unlock).
+     * Mirrors the note/memory cache→vault link columns.
+     */
+    val vaultRecordId: String? = null,
+    /** Revision of the vault record this row last wrote (upsert = revision+1). */
+    val vaultRevision: Int = 1
 )

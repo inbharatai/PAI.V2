@@ -1,6 +1,8 @@
 package com.unoone.agent.vault
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -105,6 +107,35 @@ class VaultRecordFactoryTest {
         assertEquals("Trip", obj["title"]!!.jsonPrimitive.content)
         assertEquals("book flights", obj["content"]!!.jsonPrimitive.content)
         assertEquals("travel", obj["tags"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `skill maps to a DOCUMENT record with the kind skill envelope`() {
+        val m = VaultRecordFactory.forSkill(
+            recordId = "55555555-5555-4555-8555-555555555555",
+            transactionId = "66666666-6666-4666-8666-666666666666",
+            deviceId = "test-device",
+            name = "morning briefing",
+            triggerPhrases = "brief me,morning update",
+            stepsJson = "[\"read_screen\",\"speak_response\"]",
+            riskLevel = 1,
+            enabled = true,
+            createdAtIso = "2026-10-01T10:00:00+00:00",
+            updatedAtIso = "2026-10-01T10:00:00+00:00",
+            revision = 2,
+        )
+        assertEquals(allFields.toSet(), m.fields.keys)
+        assertEquals("DOCUMENT", m.fields["record_type"])
+        assertEquals(2, m.fields["revision"])
+        assertEquals(VaultCrypto.sha256Hex(m.content), m.fields["content_hash"])
+
+        val obj = Json.parseToJsonElement(String(m.content, Charsets.UTF_8)).jsonObject
+        assertEquals("skill", obj["kind"]!!.jsonPrimitive.content)
+        assertEquals("morning briefing", obj["name"]!!.jsonPrimitive.content)
+        assertEquals("brief me,morning update", obj["triggerPhrases"]!!.jsonPrimitive.content)
+        assertEquals("[\"read_screen\",\"speak_response\"]", obj["stepsJson"]!!.jsonPrimitive.content)
+        assertEquals(1, obj["riskLevel"]!!.jsonPrimitive.intOrNull)
+        assertEquals(true, obj["enabled"]!!.jsonPrimitive.booleanOrNull)
     }
 
     private fun assertArrayEqualsMsg(a: ByteArray, b: ByteArray) {

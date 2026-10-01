@@ -26,7 +26,7 @@ import com.unoone.agent.storage.entity.SkillEntity
         ModelMetadataEntity::class,
         PendingTombstoneEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class UnoOneDatabase : RoomDatabase() {
@@ -85,6 +85,20 @@ abstract class UnoOneDatabase : RoomDatabase() {
                         "deletedAtIso TEXT NOT NULL, " +
                         "createdAt INTEGER NOT NULL)"
                 )
+            }
+        }
+
+        /**
+         * v3 → v4: skills learn their cache→vault link, so they mirror to the
+         * shared drive as DOCUMENT {kind:"skill"} records exactly like notes
+         * and memories, and vault-authored skills can hydrate back. Adding
+         * nullable + defaulted columns is non-destructive; existing rows are
+         * preserved (they read as local-only, pending first flush).
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE skills ADD COLUMN vaultRecordId TEXT")
+                db.execSQL("ALTER TABLE skills ADD COLUMN vaultRevision INTEGER NOT NULL DEFAULT 1")
             }
         }
     }

@@ -214,7 +214,15 @@ class AgentOrchestrator(
         safetyGuard = com.unoone.agent.safetyguard.SafetyGuard()
     )
 
-    val skillsModule = SkillsModule(skillDao, memoryDao)
+    // Skills mirror to the drive vault as DOCUMENT {kind:"skill"} records; a
+    // save/update rewrites the same record (revision+1) and a delete tombstones
+    // it — the same honest lifecycle notes and memories follow.
+    val skillsModule = SkillsModule(
+        skillDao,
+        memoryDao,
+        onSkillSaved = { skill -> vaultMirror?.onSkillUpserted(skill.id) },
+        onSkillDeleted = { skill -> vaultMirror?.onRowDeleted(skill.vaultRecordId, VaultSyncPlanner.Kind.SKILL) },
+    )
 
     // Wire ActionExecutor callbacks to orchestrator state
     init {

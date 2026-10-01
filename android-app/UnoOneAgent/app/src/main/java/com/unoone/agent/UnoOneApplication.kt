@@ -49,6 +49,7 @@ class UnoOneApplication : Application(), AgentRuntimeController {
      * Used by the orchestrator/executor and by MainActivity's ViewModels.
      */
     lateinit var vaultMirror: com.unoone.agent.vaultbridge.VaultMirror
+    lateinit var vaultHydrator: com.unoone.agent.vaultbridge.VaultHydrator
         private set
 
     lateinit var sharedVoiceModule: VoiceModule
@@ -125,6 +126,15 @@ class UnoOneApplication : Application(), AgentRuntimeController {
             tombstoneDao = db.pendingTombstoneDao(),
             writerProvider = { com.unoone.agent.vaultbridge.VaultConnection.writer() },
             deviceId = com.unoone.agent.vaultbridge.VaultDeviceId.getOrCreate(this),
+            skillDao = db.skillDao(),
+        )
+
+        // The pull half of the shared vault: hydrates records authored on
+        // other hosts (Power, another phone) into the cache on unlock.
+        vaultHydrator = com.unoone.agent.vaultbridge.VaultHydrator(
+            memoryDao = db.memoryDao(),
+            skillDao = db.skillDao(),
+            readerProvider = { com.unoone.agent.vaultbridge.VaultConnection.reader() },
         )
 
         orchestrator = AgentOrchestrator(

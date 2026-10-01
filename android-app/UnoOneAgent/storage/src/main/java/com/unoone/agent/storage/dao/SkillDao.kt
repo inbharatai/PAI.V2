@@ -28,6 +28,18 @@ interface SkillDao {
     @Query("SELECT * FROM skills WHERE id = :id")
     suspend fun getById(id: Long): SkillEntity?
 
+    /** Every skill, one-shot — used by vault hydration to dedupe already-known records. */
+    @Query("SELECT * FROM skills")
+    suspend fun allOnce(): List<SkillEntity>
+
+    /** Rows not yet mirrored to the vault (created while detached/locked). */
+    @Query("SELECT * FROM skills WHERE vaultRecordId IS NULL ORDER BY id ASC")
+    suspend fun notSynced(): List<SkillEntity>
+
+    /** Link a cache row to the vault record + revision it last wrote. */
+    @Query("UPDATE skills SET vaultRecordId = :vaultRecordId, vaultRevision = :vaultRevision WHERE id = :id")
+    suspend fun setVaultLink(id: Long, vaultRecordId: String, vaultRevision: Int): Int
+
     /** Cache eviction: deletes skills older than [cutoff] epoch millis. Returns rows deleted. */
     @Query("DELETE FROM skills WHERE createdAt < :cutoff")
     suspend fun deleteOlderThan(cutoff: Long): Int

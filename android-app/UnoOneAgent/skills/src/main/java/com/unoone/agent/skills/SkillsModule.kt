@@ -11,9 +11,20 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.serializer
 
+/**
+ * @param onSkillSaved invoked with the FULL saved/updated entity so the app
+ * layer can mirror it to the shared drive vault (a suspend callback keeps
+ * this module free of vault coupling, like MemoryModule). Built-in seeding
+ * and learned suggestions fire it too — a skill the user approved is user
+ * data and belongs in the canonical store.
+ * @param onSkillDeleted invoked before the local row is deleted (the vault
+ * link is unrecoverable afterwards) so the vault record can be tombstoned.
+ */
 class SkillsModule(
     private val skillDao: SkillDao,
-    private val memoryDao: MemoryDao
+    private val memoryDao: MemoryDao,
+    private val onSkillSaved: suspend (SkillEntity) -> Unit = {},
+    private val onSkillDeleted: suspend (SkillEntity) -> Unit = {},
 ) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -38,7 +49,7 @@ class SkillsModule(
         require(cleanSteps.all { it.length <= 500 }) { "A skill step is too long" }
 
         Logger.d("Expert: Saving new skill '$name'")
-        skillDao.insert(
+        val rowId = skillDao.insert(
             SkillEntity(
                 name = cleanName,
                 triggerPhrases = cleanTriggers.joinToString(","),
@@ -47,6 +58,7 @@ class SkillsModule(
                 enabled = enabled
             )
         )
+        skillDao.getById(rowId)?.let { onSkillSaved(it) }
     }
 
     /** Idempotently installs a minimal set of immediately useful, fully safety-routed routines. */
@@ -99,18 +111,22 @@ class SkillsModule(
 
     suspend fun updateSkill(skill: SkillEntity) {
         skillDao.update(skill)
+        onSkillSaved(skill)
     }
 
     suspend fun disableSkill(skill: SkillEntity) {
         skillDao.update(skill.copy(enabled = false))
+        onSkillSaved(skill.copy(enabled = false))
     }
 
     suspend fun enableSkill(skill: SkillEntity) {
         skillDao.update(skill.copy(enabled = true))
+        onSkillSaved(skill.copy(enabled = true))
     }
 
     suspend fun deleteSkill(skill: SkillEntity) {
         Logger.d("Deleting skill: ${skill.name}")
+        onSkillDeleted(skill) // BEFORE the row is gone — the vault link is unrecoverable after
         skillDao.delete(skill)
     }
 

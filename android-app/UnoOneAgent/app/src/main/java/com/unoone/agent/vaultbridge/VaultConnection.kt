@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import com.unoone.agent.vault.MobileVaultRepository
 import com.unoone.agent.vault.SafVaultIO
+import com.unoone.agent.vault.VaultRecordReader
 import com.unoone.agent.vault.VaultRecordWriter
 import com.unoone.agent.vault.VaultSession
 
@@ -61,6 +62,14 @@ object VaultConnection {
         return SessionVaultRecordWriter(repo, active)
     }
 
+    /** A reader bound to the current session, or null when locked/detached. */
+    @Synchronized
+    fun reader(): VaultRecordReader? {
+        val repo = repository ?: return null
+        val active = session ?: return null
+        return SessionVaultRecordReader(repo, active)
+    }
+
     /** USB detach: drop the tree and zeroize the master key. */
     @Synchronized
     fun detach() {
@@ -86,4 +95,17 @@ private class SessionVaultRecordWriter(
     override fun tombstone(vaultRecordId: String, deletedAtIso: String) {
         repository.tombstoneRecord(session, vaultRecordId, deletedAtIso)
     }
+}
+
+/** Binds the narrow [VaultRecordReader] surface to an unlocked session. */
+private class SessionVaultRecordReader(
+    private val repository: MobileVaultRepository,
+    private val session: VaultSession,
+) : VaultRecordReader {
+
+    override fun listRecordMetadata(): List<Map<String, Any?>> =
+        repository.listRecordMetadata(session)
+
+    override fun readRecord(recordId: String): Pair<Map<String, Any?>, ByteArray> =
+        repository.readRecord(session, recordId)
 }

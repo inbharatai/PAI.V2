@@ -74,4 +74,8 @@ interface MemoryDao {
      */
     @Query("SELECT * FROM memories WHERE vaultRecordId IS NULL AND type != 'outcome' ORDER BY id ASC")
     suspend fun notSynced(): List<MemoryEntity>
+
+    /** Every memory, one-shot — used by vault hydration to dedupe known records. */
+    @Query("SELECT * FROM memories")
+    suspend fun allOnce(): List<MemoryEntity>
 }

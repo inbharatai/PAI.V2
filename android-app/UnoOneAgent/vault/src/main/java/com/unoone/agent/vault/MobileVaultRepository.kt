@@ -170,6 +170,37 @@ class MobileVaultRepository(private val io: VaultIO) {
     // Records
     // ------------------------------------------------------------------
 
+    /**
+     * One metadata map per record, read from the PLAINTEXT envelope metadata
+     * (no decrypt — same fact the desktop's scan_record_metadata relies on).
+     * Unparseable envelopes are skipped, never fatal. Caller must hold a
+     * session only to guarantee an attached vault; metadata itself is not
+     * secret (the ciphertext is).
+     */
+    fun listRecordMetadata(session: VaultSession): List<Map<String, Any?>> {
+        val names = try {
+            io.list(RECORDS_DIR)
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        val out = ArrayList<Map<String, Any?>>(names.size)
+        for (name in names) {
+            if (!name.endsWith(".enc.json")) continue
+            try {
+                val envelope =
+                    Json.parseToJsonElement(String(io.read("$RECORDS_DIR/$name"), Charsets.UTF_8))
+                        .jsonObject
+                val metadata = envelope.getValue("metadata").jsonObject
+                out.add(metadata.entries.associate { (k, v) -> k to jsonValueToKotlin(v) })
+            } catch (_: Exception) {
+                // Foreign/corrupt envelope — skipped, never fatal. The vault
+                // module has no logging dependency by design; the hydrator
+                // counts and surfaces what it actually pulled.
+            }
+        }
+        return out
+    }
+
     /** Read + decrypt a record. Verifies canonical AAD before decrypting. */
     fun readRecord(session: VaultSession, recordId: String): Pair<Map<String, Any?>, ByteArray> {
         val path = "$RECORDS_DIR/$recordId.enc.json"

@@ -85,7 +85,8 @@ class MainActivity : ComponentActivity() {
     /**
      * Unlock the shared vault with the user's password. Argon2id at spec
      * params is slow, so the work runs on IO; success drains the offline
-     * backlog (notes/memories written while locked reach the drive).
+     * backlog (notes/memories/skills written while locked reach the drive)
+     * and then pulls records authored on other hosts into the cache.
      */
     private fun requestVaultUnlock(password: String) {
         if (password.isEmpty()) {
@@ -96,7 +97,16 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val ok = VaultConnection.unlock(password.toByteArray(Charsets.UTF_8))
             if (ok) {
-                (application as UnoOneApplication).vaultMirror.drainBacklog()
+                val app = application as UnoOneApplication
+                app.vaultMirror.drainBacklog()
+                val hydrated = app.vaultHydrator.hydrateFromVault()
+                if (hydrated.total > 0) {
+                    android.util.Log.i(
+                        "UnoOneMain",
+                        "Vault hydration: ${hydrated.memoriesAdded}+${hydrated.memoriesUpdated} memory, " +
+                            "${hydrated.skillsAdded}+${hydrated.skillsUpdated} skill change(s) pulled"
+                    )
+                }
             }
             mutableVaultUnlockUi.value =
                 if (ok) VaultUnlockUi(unlocked = true)

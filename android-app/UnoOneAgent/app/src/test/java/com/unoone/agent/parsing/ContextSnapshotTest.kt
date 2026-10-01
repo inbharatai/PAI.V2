@@ -107,5 +107,9 @@ class ContextSnapshotTest {
         override suspend fun getById(id: Long): SkillEntity? = enabled.firstOrNull { it.id == id }
         override suspend fun deleteOlderThan(cutoff: Long): Int = 0
         override suspend fun deleteAll(): Int = 0
+        // Vault-link surface: inert in this suite (context snapshots do not mirror).
+        override suspend fun allOnce(): List<SkillEntity> = enabled
+        override suspend fun notSynced(): List<SkillEntity> = emptyList()
+        override suspend fun setVaultLink(id: Long, vaultRecordId: String, vaultRevision: Int): Int = 0
     }
 }

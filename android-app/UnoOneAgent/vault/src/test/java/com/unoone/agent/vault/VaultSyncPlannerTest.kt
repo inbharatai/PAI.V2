@@ -58,4 +58,25 @@ class VaultSyncPlannerTest {
     fun `empty backlog yields no ops`() {
         assertTrue(VaultSyncPlanner.plan(emptyList(), emptyList()).isEmpty())
     }
+
+    @Test
+    fun `skill writes plan in the same id order as notes and memories`() {
+        val ops = VaultSyncPlanner.plan(
+            writes = listOf(
+                VaultSyncPlanner.PendingWrite(9, Kind.SKILL),
+                VaultSyncPlanner.PendingWrite(2, Kind.SKILL),
+                VaultSyncPlanner.PendingWrite(5, Kind.MEMORY),
+            ),
+            tombstones = listOf(VaultSyncPlanner.PendingTombstone("rec-s", "t")),
+        )
+        assertEquals(
+            listOf(
+                VaultSyncPlanner.Op.Write(2, Kind.SKILL),
+                VaultSyncPlanner.Op.Write(5, Kind.MEMORY),
+                VaultSyncPlanner.Op.Write(9, Kind.SKILL),
+                VaultSyncPlanner.Op.Tombstone("rec-s", "t"),
+            ),
+            ops,
+        )
+    }
 }

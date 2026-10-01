@@ -47,6 +47,16 @@ object VaultRecordFactory {
         val type: String,
     )
 
+    @Serializable
+    data class SkillContent(
+        val kind: String = "skill",
+        val name: String,
+        val triggerPhrases: String,
+        val stepsJson: String,
+        val riskLevel: Int,
+        val enabled: Boolean,
+    )
+
     fun forNote(
         recordId: String,
         transactionId: String,
@@ -92,6 +102,49 @@ object VaultRecordFactory {
             baseFields(
                 recordId = recordId,
                 recordType = "MEMORY",
+                transactionId = transactionId,
+                deviceId = deviceId,
+                createdAtIso = createdAtIso,
+                updatedAtIso = updatedAtIso,
+                content = payload,
+                revision = revision,
+            ),
+            payload,
+        )
+    }
+
+    /**
+     * A skill mirrors as a DOCUMENT record carrying the {kind:"skill"} envelope —
+     * the same convention notes use, so every host can tell record types apart
+     * without decrypt-dependent side tables. Skills upsert by name, so a save
+     * rewrites the SAME record with revision+1 (see [VaultMirror.onSkillUpserted]).
+     */
+    fun forSkill(
+        recordId: String,
+        transactionId: String,
+        deviceId: String,
+        name: String,
+        triggerPhrases: String,
+        stepsJson: String,
+        riskLevel: Int,
+        enabled: Boolean,
+        createdAtIso: String,
+        updatedAtIso: String,
+        revision: Int = 1,
+    ): Mapped {
+        val payload = json.encodeToString(
+            SkillContent(
+                name = name,
+                triggerPhrases = triggerPhrases,
+                stepsJson = stepsJson,
+                riskLevel = riskLevel,
+                enabled = enabled,
+            ),
+        ).toByteArray(Charsets.UTF_8)
+        return Mapped(
+            baseFields(
+                recordId = recordId,
+                recordType = "DOCUMENT",
                 transactionId = transactionId,
                 deviceId = deviceId,
                 createdAtIso = createdAtIso,
