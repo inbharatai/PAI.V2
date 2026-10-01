@@ -138,6 +138,32 @@ class VaultRecordFactoryTest {
         assertEquals(true, obj["enabled"]!!.jsonPrimitive.booleanOrNull)
     }
 
+    @Test
+    fun `turn maps to a TRANSCRIPT record with the kind transcript envelope`() {
+        val m = VaultRecordFactory.forTurn(
+            recordId = "77777777-7777-4777-8777-777777777777",
+            transactionId = "88888888-8888-4888-8888-888888888888",
+            deviceId = "test-device",
+            sessionId = "sess-1",
+            role = "user",
+            content = "what is the weather",
+            inputType = "voice",
+            createdAtIso = "2026-10-01T10:00:00+00:00",
+            updatedAtIso = "2026-10-01T10:00:00+00:00",
+        )
+        assertEquals(allFields.toSet(), m.fields.keys)
+        assertEquals("TRANSCRIPT", m.fields["record_type"])
+        assertEquals(1, m.fields["revision"])
+        assertEquals(VaultCrypto.sha256Hex(m.content), m.fields["content_hash"])
+
+        val obj = Json.parseToJsonElement(String(m.content, Charsets.UTF_8)).jsonObject
+        assertEquals("transcript", obj["kind"]!!.jsonPrimitive.content)
+        assertEquals("sess-1", obj["sessionId"]!!.jsonPrimitive.content)
+        assertEquals("user", obj["role"]!!.jsonPrimitive.content)
+        assertEquals("what is the weather", obj["content"]!!.jsonPrimitive.content)
+        assertEquals("voice", obj["inputType"]!!.jsonPrimitive.content)
+    }
+
     private fun assertArrayEqualsMsg(a: ByteArray, b: ByteArray) {
         assertTrue("canonicalAad must be deterministic", a.contentEquals(b))
     }

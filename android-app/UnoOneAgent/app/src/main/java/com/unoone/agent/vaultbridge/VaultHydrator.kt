@@ -1,8 +1,10 @@
 package com.unoone.agent.vaultbridge
 
 import com.unoone.agent.core.util.Logger
+import com.unoone.agent.storage.dao.ConversationTurnDao
 import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.SkillDao
+import com.unoone.agent.storage.entity.ConversationTurnEntity
 import com.unoone.agent.storage.entity.MemoryEntity
 import com.unoone.agent.storage.entity.SkillEntity
 import com.unoone.agent.vault.VaultRecordReader
@@ -18,9 +20,10 @@ import java.time.Instant
  * touched resolves to the vault's own revision numbering).
  *
  * Bounded and honest by construction:
- * - Only records carrying the shared {kind:"memory"} / {kind:"skill"} JSON
- *   envelope hydrate. Anything else (e.g. desktop-migrated raw text) is
- *   skipped — never structured into a fake memory.
+ * - Only records carrying the shared {kind:"memory"} / {kind:"skill"} /
+ * {kind:"transcript"} JSON envelope hydrate. Anything else (e.g.
+ * desktop-migrated raw text, or desktop voice-recording transcripts) is
+ * skipped — never structured into a fake memory or turn.
  * - Tombstoned records are skipped: deleted on any host, stays deleted.
  * - Records the cache already has at the latest revision are skipped without
  *   a decrypt; a known record is re-read only when the vault metadata shows a
@@ -34,6 +37,7 @@ import java.time.Instant
 class VaultHydrator(
     private val memoryDao: MemoryDao,
     private val skillDao: SkillDao,
+    private val turnDao: ConversationTurnDao? = null,
     private val readerProvider: () -> VaultRecordReader?,
 ) {
 
@@ -43,15 +47,18 @@ class VaultHydrator(
         val memoriesUpdated: Int = 0,
         val skillsAdded: Int = 0,
         val skillsUpdated: Int = 0,
+        val turnsAdded: Int = 0,
         val skippedUnknown: Int = 0,
     ) {
-        val total: Int get() = memoriesAdded + memoriesUpdated + skillsAdded + skillsUpdated
+        val total: Int
+            get() = memoriesAdded + memoriesUpdated + skillsAdded + skillsUpdated + turnsAdded
 
         operator fun plus(other: Result) = Result(
             memoriesAdded = memoriesAdded + other.memoriesAdded,
             memoriesUpdated = memoriesUpdated + other.memoriesUpdated,
             skillsAdded = skillsAdded + other.skillsAdded,
             skillsUpdated = skillsUpdated + other.skillsUpdated,
+            turnsAdded = turnsAdded + other.turnsAdded,
             skippedUnknown = skippedUnknown + other.skippedUnknown,
         )
     }
@@ -78,6 +85,7 @@ class VaultHydrator(
         val knownRevisions = HashMap<String, Int>()
         memoryDao.allOnce().forEach { it.vaultRecordId?.let { id -> knownRevisions[id] = it.vaultRevision } }
         skillDao.allOnce().forEach { it.vaultRecordId?.let { id -> knownRevisions[id] = it.vaultRevision } }
+        turnDao?.allOnce()?.forEach { it.vaultRecordId?.let { id -> knownRevisions[id] = it.vaultRevision } }
         val metadata = try {
             reader.listRecordMetadata()
         } catch (e: Exception) {
@@ -91,7 +99,7 @@ class VaultHydrator(
             val vaultRevision = (fields["revision"] as? Int) ?: 0
             val knownRevision = knownRevisions[recordId]
             if (knownRevision != null && vaultRevision <= knownRevision) continue // already current
-            if (type != "MEMORY" && type != "DOCUMENT") continue
+            if (type != "MEMORY" && type != "DOCUMENT" && type != "TRANSCRIPT") continue
 
             val payload = try {
                 reader.readRecord(recordId).second
@@ -114,9 +122,10 @@ class VaultHydrator(
             result += when (kind) {
                 "memory" -> hydrateMemory(recordId, fields, envelope)
                 "skill" -> hydrateSkill(recordId, fields, envelope)
+                "transcript" -> hydrateTurn(recordId, fields, envelope)
                 else -> {
                     // A foreign JSON payload — never structured into a fake
-                    // memory/skill.
+                    // memory/skill/turn.
                     Result(skippedUnknown = 1)
                 }
             }
@@ -260,5 +269,38 @@ class VaultHydrator(
             return Result(skillsUpdated = 1)
         }
         return Result() // already current
+    }
+
+    /**
+     * A conversation turn authored on another host. Turns are append-only —
+     * there is no rewrite path — so hydration is insert-only; the
+     * revision-aware skip above already covers the (impossible today) case
+     * of a same-id newer revision. Unknown fields never become fake turns.
+     */
+    private suspend fun hydrateTurn(
+        recordId: String,
+        fields: Map<String, Any?>,
+        envelope: kotlinx.serialization.json.JsonObject,
+    ): Result {
+        val dao = turnDao ?: return Result(skippedUnknown = 1)
+        val sessionId = fieldString(envelope, "sessionId")?.takeIf { it.isNotBlank() }
+            ?: return Result(skippedUnknown = 1)
+        val role = fieldString(envelope, "role")?.takeIf { it.isNotBlank() }
+            ?: return Result(skippedUnknown = 1)
+        val content = fieldString(envelope, "content") ?: return Result(skippedUnknown = 1)
+        val inputType = fieldString(envelope, "inputType")?.takeIf { it.isNotBlank() } ?: "unknown"
+        val revision = (fields["revision"] as? Int) ?: 1
+        dao.insert(
+            ConversationTurnEntity(
+                sessionId = sessionId,
+                role = role,
+                content = content,
+                inputType = inputType,
+                createdAt = epochOf(fields["created_at"] as? String, System.currentTimeMillis()),
+                vaultRecordId = recordId,
+                vaultRevision = revision,
+            ),
+        )
+        return Result(turnsAdded = 1)
     }
 }

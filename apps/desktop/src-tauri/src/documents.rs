@@ -1014,10 +1014,13 @@ fn legacy_ids_for_parents(
 
 /// An Android-authored record payload envelope, written by the phone's
 /// `VaultRecordFactory`: `{"kind":"note",title,content,tags}` inside DOCUMENT
-/// records and `{"kind":"memory",key,value,type}` inside MEMORY records.
+/// records, `{"kind":"memory",key,value,type}` inside MEMORY records,
+/// `{"kind":"skill",...}` inside DOCUMENT records (skills mirror as
+/// documents) and `{"kind":"transcript",sessionId,role,content,inputType}`
+/// inside TRANSCRIPT records (the universal conversation history).
 /// Read-compat only — the desktop never re-writes these records in the
-/// Android format; it reads them so a shared drive shows the same notes and
-/// memories on every host.
+/// Android format; it reads them so a shared drive shows the same notes,
+/// memories, skills and conversations on every host.
 struct AndroidEnvelope {
     kind: String,
     title_or_key: String,
@@ -1057,16 +1060,42 @@ fn parse_android_envelope(bytes: &[u8]) -> Option<AndroidEnvelope> {
                 .to_string(),
             tags: Vec::new(),
         }),
+        "skill" => Some(AndroidEnvelope {
+            kind,
+            title_or_key: value.get("name")?.as_str()?.to_string(),
+            body: value
+                .get("stepsJson")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            tags: vec!["skill".to_string()],
+        }),
+        "transcript" => {
+            let session = value.get("sessionId")?.as_str()?;
+            let role = value.get("role")?.as_str()?;
+            Some(AndroidEnvelope {
+                kind,
+                title_or_key: format!("Conversation {} — {}", session, role),
+                body: value
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                tags: vec!["transcript".to_string()],
+            })
+        }
         _ => None,
     }
 }
 
 /// List documents whose originals live as encrypted records (parentless
-/// Document originals). Metadata is honest even locked; size bytes are
-/// unknown without decrypt and are reported as None-equivalent zero with a
-/// derived title. When the vault is unlocked, an Android-authored note
-/// envelope yields the REAL title and tags; otherwise the title falls back
-/// to the record id (truthful, if ugly) — never an invented title.
+/// Document originals, plus the Android-authored skills and conversation
+/// turns that mirror as parentless DOCUMENT/TRANSCRIPT records). Metadata is
+/// honest even locked; size bytes are unknown without decrypt and are
+/// reported as None-equivalent zero with a derived title. When the vault is
+/// unlocked, an Android-authored note/skill/transcript envelope yields the
+/// REAL title and tags; otherwise the title falls back to the record id
+/// (truthful, if ugly) — never an invented title.
 pub fn list_migrated_documents(vault_root: &str, vault: Option<&Vault>) -> Vec<DocumentMetadata> {
     let root = PathBuf::from(vault_root);
     let records = scan_record_metadata(&root);
@@ -1074,7 +1103,12 @@ pub fn list_migrated_documents(vault_root: &str, vault: Option<&Vault>) -> Vec<D
     records
         .iter()
         .filter(|e| {
-            !e.tombstone && e.record_type == RecordType::Document && e.parent_record_id.is_none()
+            !e.tombstone
+                && e.parent_record_id.is_none()
+                && matches!(
+                    e.record_type,
+                    RecordType::Document | RecordType::Transcript
+                )
         })
         .map(|e| {
             // Prefer the decrypted Android envelope when we can read it.
@@ -1082,7 +1116,9 @@ pub fn list_migrated_documents(vault_root: &str, vault: Option<&Vault>) -> Vec<D
                 v.read_record(&e.record_id)
                     .ok()
                     .and_then(|(_, bytes)| parse_android_envelope(&bytes))
-                    .filter(|env| env.kind == "note")
+                    .filter(|env| {
+                        matches!(env.kind.as_str(), "note" | "skill" | "transcript")
+                    })
             });
             let (title, _rel) = legacy
                 .get(&e.record_id)
@@ -1254,7 +1290,11 @@ pub fn search_migrated_contents(
                     .iter()
                     .any(|par| par.record_id == *p && par.record_type == RecordType::Document)
             });
-        if !is_memory && !is_document_transcript {
+        // Android conversation turns mirror as parentless TRANSCRIPT records —
+        // the universal usage history, searchable like any other memory.
+        let is_android_turn =
+            entry.record_type == RecordType::Transcript && entry.parent_record_id.is_none();
+        if !is_memory && !is_document_transcript && !is_android_turn {
             continue;
         }
         let Ok((_, bytes)) = vault.read_record(&entry.record_id) else {
@@ -1284,6 +1324,27 @@ pub fn search_migrated_contents(
                 "memory".to_string(),
                 entry.updated_at.clone(),
             ));
+        } else if is_android_turn {
+            // A conversation turn authored on any host. With the shared
+            // envelope it searches as "Conversation <session> — <role>" and
+            // is typed "transcript"; anything else is raw text searched
+            // verbatim under the same honest type.
+            let (title, content) = match parse_android_envelope(&bytes) {
+                Some(env) if env.kind == "transcript" => (env.title_or_key, env.body),
+                _ => {
+                    let Ok(raw) = String::from_utf8(bytes) else {
+                        continue; // binary content honestly excluded from text search
+                    };
+                    (entry.record_id.clone(), raw)
+                }
+            };
+            contents.push((
+                entry.record_id.clone(),
+                title,
+                content,
+                "transcript".to_string(),
+                entry.updated_at.clone(),
+            ));
         } else {
             let content = match String::from_utf8(bytes) {
                 Ok(c) => c,
@@ -1305,8 +1366,9 @@ pub fn search_migrated_contents(
         }
     }
     // Keep type names compatible with the agent's memory_types filter
-    // (["note","document","memory"]) — starts_with matching applies, so the
-    // provenance must stay "" (a "migrated" label here would be filtered out).
+    // (["note","document","memory","transcript"] — see agent.rs search_notes)
+    // — starts_with matching applies, so the provenance must stay "" (a
+    // "migrated" label here would be filtered out).
     score_with_tfidf(query, contents, "")
 }
 
@@ -1322,10 +1384,12 @@ pub fn read_migrated_document_content(
 ) -> Option<Vec<u8>> {
     let root = PathBuf::from(vault_root);
     let records = scan_record_metadata(&root);
-    // Direct record-id match first (no decrypt needed to resolve).
+    // Direct record-id match first (no decrypt needed to resolve). Android
+    // conversation turns surface their record id too, so they read back the
+    // same way notes do.
     if let Some(direct) = records.iter().find(|e| {
         !e.tombstone
-            && e.record_type == RecordType::Document
+            && matches!(e.record_type, RecordType::Document | RecordType::Transcript)
             && e.parent_record_id.is_none()
             && e.record_id == id
     }) {
@@ -1684,6 +1748,76 @@ mod migrated_readpath_tests {
             "a deleted memory must not come back on the desktop"
         );
         assert!(read_migrated_document_content(&root, &note_id, &vault).is_none());
+    }
+
+    #[test]
+    fn android_transcript_turn_lists_searches_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        let payload = r#"{"kind":"transcript","sessionId":"sess-42","role":"user","content":"call ravi please","inputType":"voice"}"#;
+        let turn_id = write_android_record(&mut vault, RecordType::Transcript, payload);
+
+        // Listing: real conversation title, transcript tag.
+        let listed = list_migrated_documents(&root, Some(&vault));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "Conversation sess-42 — user");
+        assert_eq!(listed[0].tags, vec!["transcript".to_string()]);
+
+        // Search: the conversation is retrievable and typed "transcript".
+        let query = MemorySearchQuery {
+            query: "ravi".to_string(),
+            memory_types: vec![],
+            limit: 10,
+            min_relevance: 0.0,
+        };
+        let found = search_migrated_contents(&query, &root, Some(&vault));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].memory_type, "transcript");
+        assert!(found[0].preview.contains("call ravi please"));
+
+        // The agent's memory_types filter matches "transcript" (agent.rs).
+        let typed = MemorySearchQuery {
+            query: "ravi".to_string(),
+            memory_types: vec!["transcript".to_string()],
+            limit: 10,
+            min_relevance: 0.0,
+        };
+        assert_eq!(search_migrated_contents(&typed, &root, Some(&vault)).len(), 1);
+
+        // Read back through the same id the listing surfaced.
+        let bytes = read_migrated_document_content(&root, &turn_id, &vault)
+            .expect("Android conversation turn must be readable by its record id");
+        assert!(String::from_utf8(bytes).unwrap().contains("call ravi please"));
+    }
+
+    #[test]
+    fn locked_listing_of_android_turn_falls_back_to_record_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        let payload = r#"{"kind":"transcript","sessionId":"s1","role":"assistant","content":"Done.","inputType":"voice"}"#;
+        let turn_id = write_android_record(&mut vault, RecordType::Transcript, payload);
+        drop(vault);
+
+        // Locked: no decrypt, so the title is the record id — honest, never invented.
+        let listed = list_migrated_documents(&root, None);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, turn_id);
+    }
+
+    #[test]
+    fn android_skill_lists_with_its_real_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        let payload = r#"{"kind":"skill","name":"morning briefing","triggerPhrases":"brief me","stepsJson":"[\"read_screen\"]","riskLevel":0,"enabled":true}"#;
+        write_android_record(&mut vault, RecordType::Document, payload);
+
+        let listed = list_migrated_documents(&root, Some(&vault));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].title, "morning briefing",
+            "a mirrored skill must show its real name, not the record id"
+        );
+        assert_eq!(listed[0].tags, vec!["skill".to_string()]);
     }
 }
 

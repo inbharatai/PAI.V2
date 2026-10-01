@@ -4,6 +4,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.unoone.agent.storage.cache.VaultCacheLifecycle
 import com.unoone.agent.storage.db.UnoOneDatabase
+import com.unoone.agent.storage.entity.ConversationTurnEntity
 import com.unoone.agent.storage.entity.MemoryEntity
 import com.unoone.agent.storage.entity.NoteEntity
 import com.unoone.agent.storage.entity.SkillEntity
@@ -88,6 +89,24 @@ class VaultCacheLifecycleTest {
         assertNotNull("skill must survive vault disconnect (Room is its only store)", db.skillDao().getById(skillId))
     }
 
+    @Test
+    fun `disconnect keeps unsynced conversation turns and wipes synced ones`() = runBlocking {
+        val unsynced = db.conversationTurnDao().insert(
+            ConversationTurnEntity(sessionId = "s1", role = "user", content = "offline question", inputType = "voice"),
+        )
+        db.conversationTurnDao().insert(
+            ConversationTurnEntity(sessionId = "s2", role = "user", content = "synced question", inputType = "voice", vaultRecordId = "rec-t1"),
+        )
+
+        VaultCacheLifecycle.clearOnVaultDisconnect(db)
+
+        assertNotNull("unsynced turn is the only copy in existence", db.conversationTurnDao().getById(unsynced))
+        assertTrue(
+            "synced turn (copy in vault) must be wiped from the plaintext cache",
+            db.conversationTurnDao().allOnce().none { it.sessionId == "s2" },
+        )
+    }
+
     // ---- TTL eviction --------------------------------------------------------
 
     @Test
@@ -131,5 +150,24 @@ class VaultCacheLifecycleTest {
         VaultCacheLifecycle.evictExpired(db)
 
         assertNotNull("expired skill must survive TTL (Room is its only store)", db.skillDao().getById(skillId))
+    }
+
+    @Test
+    fun `TTL eviction keeps expired unsynced turns and removes expired synced ones`() = runBlocking {
+        val stale = System.currentTimeMillis() - VaultCacheLifecycle.DEFAULT_TTL_MILLIS - 1
+        val unsynced = db.conversationTurnDao().insert(
+            ConversationTurnEntity(sessionId = "s1", role = "user", content = "only copy", inputType = "voice", createdAt = stale),
+        )
+        db.conversationTurnDao().insert(
+            ConversationTurnEntity(sessionId = "s2", role = "assistant", content = "vault has it", inputType = "voice", createdAt = stale, vaultRecordId = "rec-t2"),
+        )
+
+        VaultCacheLifecycle.evictExpired(db)
+
+        assertNotNull("expired unsynced turn is the only copy in existence", db.conversationTurnDao().getById(unsynced))
+        assertTrue(
+            "expired synced turn (copy in vault) must be evicted",
+            db.conversationTurnDao().allOnce().none { it.sessionId == "s2" },
+        )
     }
 }

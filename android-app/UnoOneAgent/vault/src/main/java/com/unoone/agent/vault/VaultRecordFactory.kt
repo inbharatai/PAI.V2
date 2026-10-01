@@ -57,6 +57,22 @@ object VaultRecordFactory {
         val enabled: Boolean,
     )
 
+    /**
+     * One conversation turn. The vault is the ONE universal usage history:
+     * every user command and every spoken agent response lands here as a
+     * TRANSCRIPT record, whatever host the conversation happened on.
+     * sessionId groups the turns of one command invocation; role is
+     * "user" or "assistant".
+     */
+    @Serializable
+    data class TurnContent(
+        val kind: String = "transcript",
+        val sessionId: String,
+        val role: String,
+        val content: String,
+        val inputType: String,
+    )
+
     fun forNote(
         recordId: String,
         transactionId: String,
@@ -157,7 +173,42 @@ object VaultRecordFactory {
     }
 
     /**
-     * The 16 canonical fields in the exact types [VaultCrypto.canonicalAad]
+     * A conversation turn mirrors as a TRANSCRIPT record — the record type the
+     * desktop already uses for its voice-recording transcripts, so the whole
+     * usage history from every host lives in one record space. Turns are
+     * append-only: no rewrite path exists, revision stays 1.
+     */
+    fun forTurn(
+        recordId: String,
+        transactionId: String,
+        deviceId: String,
+        sessionId: String,
+        role: String,
+        content: String,
+        inputType: String,
+        createdAtIso: String,
+        updatedAtIso: String,
+        revision: Int = 1,
+    ): Mapped {
+        val payload = json.encodeToString(
+            TurnContent(sessionId = sessionId, role = role, content = content, inputType = inputType),
+        ).toByteArray(Charsets.UTF_8)
+        return Mapped(
+            baseFields(
+                recordId = recordId,
+                recordType = "TRANSCRIPT",
+                transactionId = transactionId,
+                deviceId = deviceId,
+                createdAtIso = createdAtIso,
+                updatedAtIso = updatedAtIso,
+                content = payload,
+                revision = revision,
+            ),
+            payload,
+        )
+    }
+
+    /**
      * accepts (String / Int / Boolean / List<String> / null), matching the
      * Rust `Record` schema. `LinkedHashMap` preserves declaration order for
      * readability; canonicalAad re-orders by its own pinned list regardless.

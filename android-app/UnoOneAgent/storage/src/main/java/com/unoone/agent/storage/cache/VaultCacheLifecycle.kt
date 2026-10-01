@@ -46,6 +46,7 @@ object VaultCacheLifecycle {
         val cutoff = nowMillis - ttlMillis
         return db.noteDao().deleteOlderThanSynced(cutoff) +
             db.memoryDao().deleteOlderThanSynced(cutoff) +
+            db.conversationTurnDao().deleteOlderThanSynced(cutoff) +
             db.actionLogDao().deleteOlderThan(cutoff)
     }
 
@@ -64,6 +65,7 @@ object VaultCacheLifecycle {
     suspend fun clearOnVaultDisconnect(db: UnoOneDatabase): Int {
         return db.noteDao().deleteSynced() +
             db.memoryDao().deleteSynced() +
+            db.conversationTurnDao().deleteSynced() +
             db.actionLogDao().clearAll()
     }
 }

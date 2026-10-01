@@ -136,7 +136,14 @@ class AgentOrchestrator(
      * attached + unlocked (null in tests keeps cache-only behaviour). The
      * vault is the canonical store; Room is the encrypted cache.
      */
-    private val vaultMirror: com.unoone.agent.vaultbridge.VaultMirror? = null
+    private val vaultMirror: com.unoone.agent.vaultbridge.VaultMirror? = null,
+    /**
+     * The universal conversation store: every user command and every spoken
+     * agent response is recorded as a turn (null in tests keeps cache-only
+     * behaviour) and mirrored to the vault as a TRANSCRIPT record, so the
+     * usage history from every host lives in ONE source.
+     */
+    private val conversationDao: com.unoone.agent.storage.dao.ConversationTurnDao? = null
 ) {
     // 0C-12: Use Dispatchers.Default for CPU-bound orchestration work.
     // DB writes use Dispatchers.IO via withContext. StateFlow.value setter is thread-safe.
@@ -691,6 +698,11 @@ class AgentOrchestrator(
             // instead of discarding the requested action after changing the preference.
             sanitizedText = remaining
         }
+
+        // The universal transcript starts here: this command invocation gets a
+        // session, and the user's (sanitized) command is its first turn. Every
+        // spoken response below lands in the same session.
+        beginConversationSession(sanitizedText)
 
         // A microphone check or greeting is a local protocol response, not an agent task. Keep this
         // ahead of brain self-healing, skills and planning so it remains instant even while Gemma is
@@ -1669,11 +1681,49 @@ class AgentOrchestrator(
      */
     private suspend fun speakAnswer(text: String) {
         if (text.isBlank()) return
+        // The universal transcript: what the assistant actually said to the
+        // user lands in the vault-backed conversation store (best-effort —
+        // a recording failure never blocks the answer).
+        recordTurn("assistant", text)
         speakMutex.withLock {
             voiceModule.speakAwait(text)
                 .onError { msg: String, _: Throwable? -> Logger.e("Orchestrator: answer speak failed: $msg") }
         }
     }
+
+    // ---- universal conversation store ---------------------------------------------------------
+    // One sessionId per processCommand invocation; every recorded turn mirrors
+    // to the shared vault as a TRANSCRIPT record (write-through when unlocked,
+    // backlog otherwise), so the usage history from every host lives in ONE
+    // source: the drive vault. Best-effort by design — a store failure is
+    // logged and never blocks the command pipeline.
+    private val currentSessionId = java.util.concurrent.atomic.AtomicReference<String?>(null)
+
+    /** Start a new conversation session and record the user's (sanitized) command. */
+    private suspend fun beginConversationSession(userText: String) {
+        currentSessionId.set(java.util.UUID.randomUUID().toString())
+        recordTurn("user", userText)
+    }
+
+    private suspend fun recordTurn(role: String, content: String) {
+        val dao = conversationDao ?: return
+        val sessionId = currentSessionId.get() ?: return
+        if (content.isBlank()) return
+        try {
+            val id = dao.insert(
+                com.unoone.agent.storage.entity.ConversationTurnEntity(
+                    sessionId = sessionId,
+                    role = role,
+                    content = content,
+                    inputType = currentInputType.name.lowercase(),
+                ),
+            )
+            vaultMirror?.onTurnRecorded(id)
+        } catch (e: Exception) {
+            Logger.w("Orchestrator: turn recording non-fatal: ${e.message}")
+        }
+    }
+    // -------------------------------------------------------------------------------------------
 
     /**
      * Updates the most recent timeline step's detail to [detail] (used to evolve the single

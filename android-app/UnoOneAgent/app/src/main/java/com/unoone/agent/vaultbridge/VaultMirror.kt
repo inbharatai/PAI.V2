@@ -3,6 +3,7 @@ package com.unoone.agent.vaultbridge
 import com.unoone.agent.core.util.Logger
 import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.NoteDao
+import com.unoone.agent.storage.dao.ConversationTurnDao
 import com.unoone.agent.storage.dao.PendingTombstoneDao
 import com.unoone.agent.storage.dao.SkillDao
 import com.unoone.agent.storage.entity.PendingTombstoneEntity
@@ -13,8 +14,9 @@ import java.time.Instant
 import java.util.UUID
 
 /**
- * Routes note/memory/skill cache writes through to the shared drive vault, making
- * the vault the canonical store while Room stays the (encrypted) cache/index.
+ * Routes note/memory/skill/conversation-turn cache writes through to the shared
+ * drive vault, making the vault the canonical store while Room stays the
+ * (encrypted) cache/index.
  *
  * Online (vault attached + unlocked): a create is written straight through and
  * the returned record id is stamped onto the cache row. Offline: the row keeps
@@ -34,6 +36,7 @@ class VaultMirror(
     private val writerProvider: () -> VaultRecordWriter?,
     private val deviceId: String,
     private val skillDao: SkillDao? = null,
+    private val turnDao: ConversationTurnDao? = null,
     private val idGen: () -> String = { UUID.randomUUID().toString() },
     private val isoNow: () -> String = { Instant.now().toString() },
     private val isoOf: (Long) -> String = { Instant.ofEpochMilli(it).toString() },
@@ -161,6 +164,38 @@ class VaultMirror(
         }
     }
 
+    // ---- transcript write-through ---------------------------------------
+
+    /**
+     * A conversation turn was recorded locally (row [localId]); mirror it if
+     * we can, so the vault holds the whole usage history from every host as
+     * ONE source. Turns are append-only: there is no rewrite path, revision
+     * stays 1. No-op when the mirror was built without a turn dao.
+     */
+    suspend fun onTurnRecorded(localId: Long) {
+        val dao = turnDao ?: return
+        try {
+            val writer = writerProvider() ?: return
+            val turn = dao.getById(localId) ?: return
+            if (turn.vaultRecordId != null) return // already mirrored
+            val mapped = VaultRecordFactory.forTurn(
+                recordId = idGen(),
+                transactionId = idGen(),
+                deviceId = deviceId,
+                sessionId = turn.sessionId,
+                role = turn.role,
+                content = turn.content,
+                inputType = turn.inputType,
+                createdAtIso = isoOf(turn.createdAt),
+                updatedAtIso = isoOf(turn.createdAt),
+            )
+            val vid = writer.writeRecord(mapped.fields, mapped.content)
+            dao.setVaultLink(localId, vid, 1)
+        } catch (e: Exception) {
+            Logger.w("VaultMirror.onTurnRecorded non-fatal: ${e.message}")
+        }
+    }
+
     // ---- backlog flush --------------------------------------------------
 
     /** Flush everything that accumulated while locked/detached. Call on unlock. */
@@ -177,6 +212,9 @@ class VaultMirror(
             skillDao?.notSynced()?.forEach {
                 writes.add(VaultSyncPlanner.PendingWrite(it.id, VaultSyncPlanner.Kind.SKILL))
             }
+            turnDao?.notSynced()?.forEach {
+                writes.add(VaultSyncPlanner.PendingWrite(it.id, VaultSyncPlanner.Kind.TRANSCRIPT))
+            }
             val tombstones = tombstoneDao.getAll()
                 .map { VaultSyncPlanner.PendingTombstone(it.vaultRecordId, it.deletedAtIso) }
 
@@ -186,6 +224,7 @@ class VaultMirror(
                         VaultSyncPlanner.Kind.NOTE -> onNoteCreated(op.localId)
                         VaultSyncPlanner.Kind.MEMORY -> onMemoryUpserted(op.localId)
                         VaultSyncPlanner.Kind.SKILL -> onSkillUpserted(op.localId)
+                        VaultSyncPlanner.Kind.TRANSCRIPT -> onTurnRecorded(op.localId)
                     }
                     is VaultSyncPlanner.Op.Tombstone -> {
                         writer.tombstone(op.vaultRecordId, op.deletedAtIso)

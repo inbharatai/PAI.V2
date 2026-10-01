@@ -52,6 +52,24 @@ with the mission's capability/memory/vision/audio/environment-learning scope.
   device-local telemetry + vault-mirrored user-facing facts) and by desktop harness runs; explicit
   promotion gate: bounded args + repeatable success + verified postconditions + low-risk class +
   no contradictory evidence + explicit user/policy approval. Hypotheses can never execute.
+- **P1-D — Universal transcript lane (asked 2026-10-01: "the memory which is universal should
+  store every usage or conversation, be it phone or laptop/desktop, as one source").** The vault
+  already owns notes/memories/skills; conversations are the missing class. Android gains a
+  persisted conversation store (Room, SQLCipher-encrypted at rest like the other caches) and
+  mirrors every completed agent turn (user command + agent response) to the vault as
+  `TRANSCRIPT {kind:"transcript"}` records — write-through when unlocked, drain backlog when not,
+  same as notes. The hydrator reads them back so any host sees the whole history from the one
+  source. Desktop already writes `Transcript` records for voice recordings; conversation-history
+  transcripts from both hosts land in the same record space. Offline-first unchanged: nothing
+  syncs without the vault attached and unlocked, and unsynced turns are never evicted.
+- **P2-A — Android auto-launch (asked 2026-10-01: "auto launch in androids just like it does in
+  my laptop").** The laptop auto-launches through the dock/tray USB-insert watcher; the honest
+  Android equivalent is a `BOOT_COMPLETED`/`LOCKED_BOOT_COMPLETED` receiver that starts the
+  voice service, gated on an explicit user-visible toggle (persisted, default off until first
+  enable — never hidden autostart). USB attach cannot auto-start an Android app (no autorun
+  support in the platform — the same reason the dock mechanism exists on Windows), so boot is
+  the reliable plane. On-device behaviour (FGS type + OEM battery whitelisting) is a device
+  gate to verify honestly, not a flag to flip from a unit test.
 - **P2 — One harness.** Desktop already proves Rust-trait embedding. Android adoption = U1 contract +
   a narrow Kotlin boundary (JNI to the harness core over an extended size-tagged ABI v2 that can
   register model providers/tools/memory/permission/audit — the current ABI v1 registers nothing).

@@ -87,6 +87,7 @@ impl<'a> ToolExecutor<'a> {
                 "note".to_string(),
                 "document".to_string(),
                 "memory".to_string(),
+                "transcript".to_string(),
             ],
             limit: limit.unwrap_or(10) as u32,
             min_relevance: 0.1,

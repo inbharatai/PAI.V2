@@ -127,6 +127,7 @@ class UnoOneApplication : Application(), AgentRuntimeController {
             writerProvider = { com.unoone.agent.vaultbridge.VaultConnection.writer() },
             deviceId = com.unoone.agent.vaultbridge.VaultDeviceId.getOrCreate(this),
             skillDao = db.skillDao(),
+            turnDao = db.conversationTurnDao(),
         )
 
         // The pull half of the shared vault: hydrates records authored on
@@ -134,6 +135,7 @@ class UnoOneApplication : Application(), AgentRuntimeController {
         vaultHydrator = com.unoone.agent.vaultbridge.VaultHydrator(
             memoryDao = db.memoryDao(),
             skillDao = db.skillDao(),
+            turnDao = db.conversationTurnDao(),
             readerProvider = { com.unoone.agent.vaultbridge.VaultConnection.reader() },
         )
 
@@ -143,7 +145,8 @@ class UnoOneApplication : Application(), AgentRuntimeController {
             db.actionLogDao(),
             db.memoryDao(),
             db.skillDao(),
-            vaultMirror = vaultMirror
+            vaultMirror = vaultMirror,
+            conversationDao = db.conversationTurnDao()
         )
         orchestrator.setVoiceModule(sharedVoiceModule)
         if (persistedEnabled) {

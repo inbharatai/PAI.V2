@@ -61,6 +61,11 @@ class VaultHydratorTest {
             records[id] = baseMeta(id, "DOCUMENT", revision) to payload.toByteArray()
         }
 
+        fun addTurn(id: String, sessionId: String, role: String, content: String, inputType: String = "voice") {
+            val payload = """{"kind":"transcript","sessionId":"$sessionId","role":"$role","content":"$content","inputType":"$inputType"}"""
+            records[id] = baseMeta(id, "TRANSCRIPT", 1) to payload.toByteArray()
+        }
+
         fun addRawText(id: String, type: String = "MEMORY") {
             records[id] = baseMeta(id, type, 1) to "just some migrated plaintext".toByteArray()
         }
@@ -84,6 +89,7 @@ class VaultHydratorTest {
     private fun hydrator() = VaultHydrator(
         memoryDao = db.memoryDao(),
         skillDao = db.skillDao(),
+        turnDao = db.conversationTurnDao(),
         readerProvider = { reader },
     )
 
@@ -225,9 +231,50 @@ class VaultHydratorTest {
         val locked = VaultHydrator(
             memoryDao = db.memoryDao(),
             skillDao = db.skillDao(),
+            turnDao = db.conversationTurnDao(),
             readerProvider = { null },
         )
         assertEquals(0, locked.hydrateFromVault().total)
         assertNull(db.memoryDao().getByKey("anything"))
+    }
+
+    @Test
+    fun `transcript record authored on another host hydrates as a turn`() = runBlocking {
+        reader.addTurn("rec-t1", "sess-power-1", "user", "open my notes")
+        reader.addTurn("rec-t2", "sess-power-1", "assistant", "Notes opened.")
+
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(2, result.turnsAdded)
+        val session = db.conversationTurnDao().getSession("sess-power-1")
+        assertEquals(listOf("user", "assistant"), session.map { it.role })
+        assertEquals("open my notes", session[0].content)
+        assertEquals("rec-t1", session[0].vaultRecordId)
+        assertTrue(db.conversationTurnDao().notSynced().isEmpty()) // linked rows never re-mirror
+    }
+
+    @Test
+    fun `hydrated transcript record never re-pulls or re-mirrors`() = runBlocking {
+        reader.addTurn("rec-t1", "sess-power-1", "user", "hello")
+        hydrator().hydrateFromVault()
+        val readBefore = reader.readAttempts
+
+        val second = hydrator().hydrateFromVault()
+
+        assertEquals(0, second.total)
+        assertEquals("known transcript needs no decrypt", readBefore, reader.readAttempts)
+        assertEquals(1, db.conversationTurnDao().getSession("sess-power-1").size)
+    }
+
+    @Test
+    fun `foreign transcript payload without the shared envelope is skipped`() = runBlocking {
+        // A desktop voice-recording transcript: raw text content, no envelope.
+        reader.addRawText("rec-voice", type = "TRANSCRIPT")
+
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(0, result.total)
+        assertEquals(1, result.skippedUnknown)
+        assertTrue(db.conversationTurnDao().allOnce().isEmpty())
     }
 }

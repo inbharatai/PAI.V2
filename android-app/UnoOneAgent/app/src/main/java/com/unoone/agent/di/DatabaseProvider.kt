@@ -62,7 +62,7 @@ object DatabaseProvider {
         // resolves to the same file the plaintext build used.
         return Room.databaseBuilder(context, UnoOneDatabase::class.java, dbFile.absolutePath)
             .openHelperFactory(SupportOpenHelperFactory(key.passphrase))
-            .addMigrations(UnoOneDatabase.MIGRATION_1_2, UnoOneDatabase.MIGRATION_2_3, UnoOneDatabase.MIGRATION_3_4)
+            .addMigrations(UnoOneDatabase.MIGRATION_1_2, UnoOneDatabase.MIGRATION_2_3, UnoOneDatabase.MIGRATION_3_4, UnoOneDatabase.MIGRATION_4_5)
             .build()
     }
 }

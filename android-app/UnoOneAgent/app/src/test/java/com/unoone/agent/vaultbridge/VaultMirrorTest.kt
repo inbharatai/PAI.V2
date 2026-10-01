@@ -3,6 +3,7 @@ package com.unoone.agent.vaultbridge
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.unoone.agent.storage.db.UnoOneDatabase
+import com.unoone.agent.storage.entity.ConversationTurnEntity
 import com.unoone.agent.storage.entity.MemoryEntity
 import com.unoone.agent.storage.entity.NoteEntity
 import com.unoone.agent.storage.entity.SkillEntity
@@ -59,6 +60,7 @@ class VaultMirrorTest {
         writerProvider = { if (writer.online) writer else null },
         deviceId = "test-device",
         skillDao = db.skillDao(),
+        turnDao = db.conversationTurnDao(),
     )
 
     @Before
@@ -302,5 +304,61 @@ class VaultMirrorTest {
         db.skillDao().delete(local)
         assertTrue(writer.tombstoned.isEmpty())
         assertTrue(db.pendingTombstoneDao().getAll().isEmpty())
+    }
+
+    @Test
+    fun `online turn record writes through and stamps the vault record id`() = runBlocking {
+        writer.online = true
+        val id = db.conversationTurnDao().insert(
+            ConversationTurnEntity(sessionId = "sess-1", role = "user", content = "what's on my screen", inputType = "voice"),
+        )
+        mirror().onTurnRecorded(id)
+
+        assertEquals(1, writer.written.size)
+        val fields = writer.writtenFields.single()
+        assertEquals("conversation turns canonicalize as TRANSCRIPT records", "TRANSCRIPT", fields["record_type"])
+        assertEquals("turns are append-only", 1, fields["revision"])
+        val body = String(writer.written.single().second, Charsets.UTF_8)
+        assertTrue(body.contains("\"kind\":\"transcript\""))
+        assertTrue(body.contains("what's on my screen"))
+        assertEquals(writer.written.single().first, db.conversationTurnDao().getById(id)!!.vaultRecordId)
+        assertTrue("no turns should remain unsynced", db.conversationTurnDao().notSynced().isEmpty())
+    }
+
+    @Test
+    fun `offline turns accumulate then flush in backlog order`() = runBlocking {
+        writer.online = false
+        val u1 = db.conversationTurnDao().insert(
+            ConversationTurnEntity(sessionId = "sess-1", role = "user", content = "call ravi", inputType = "voice"),
+        )
+        val a1 = db.conversationTurnDao().insert(
+            ConversationTurnEntity(sessionId = "sess-1", role = "assistant", content = "Calling Ravi.", inputType = "voice"),
+        )
+        mirror().onTurnRecorded(u1)
+        mirror().onTurnRecorded(a1)
+
+        assertTrue("nothing written while locked", writer.written.isEmpty())
+        assertEquals(2, db.conversationTurnDao().notSynced().size)
+
+        // Unlock: drainBacklog flushes the turns in id order.
+        writer.online = true
+        mirror().drainBacklog()
+
+        assertEquals(2, writer.written.size)
+        assertTrue(db.conversationTurnDao().notSynced().isEmpty())
+        assertEquals("turn order preserved", "call ravi", String(writer.written[0].second).substringAfter("\"content\":\"").substringBefore('"'))
+    }
+
+    @Test
+    fun `already-mirrored turn is never mirrored twice`() = runBlocking {
+        writer.online = true
+        val id = db.conversationTurnDao().insert(
+            ConversationTurnEntity(sessionId = "sess-1", role = "assistant", content = "Done.", inputType = "text"),
+        )
+        mirror().onTurnRecorded(id)
+        // A duplicate notification (e.g. retried) must not create a second record.
+        mirror().onTurnRecorded(id)
+
+        assertEquals(1, writer.written.size)
     }
 }

@@ -5,12 +5,14 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.unoone.agent.storage.dao.ActionLogDao
+import com.unoone.agent.storage.dao.ConversationTurnDao
 import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.ModelMetadataDao
 import com.unoone.agent.storage.dao.NoteDao
 import com.unoone.agent.storage.dao.PendingTombstoneDao
 import com.unoone.agent.storage.dao.SkillDao
 import com.unoone.agent.storage.entity.ActionLogEntity
+import com.unoone.agent.storage.entity.ConversationTurnEntity
 import com.unoone.agent.storage.entity.MemoryEntity
 import com.unoone.agent.storage.entity.ModelMetadataEntity
 import com.unoone.agent.storage.entity.NoteEntity
@@ -24,9 +26,10 @@ import com.unoone.agent.storage.entity.SkillEntity
         MemoryEntity::class,
         ActionLogEntity::class,
         ModelMetadataEntity::class,
-        PendingTombstoneEntity::class
+        PendingTombstoneEntity::class,
+        ConversationTurnEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class UnoOneDatabase : RoomDatabase() {
@@ -36,6 +39,7 @@ abstract class UnoOneDatabase : RoomDatabase() {
     abstract fun actionLogDao(): ActionLogDao
     abstract fun modelMetadataDao(): ModelMetadataDao
     abstract fun pendingTombstoneDao(): PendingTombstoneDao
+    abstract fun conversationTurnDao(): ConversationTurnDao
 
     companion object {
         /**
@@ -99,6 +103,31 @@ abstract class UnoOneDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE skills ADD COLUMN vaultRecordId TEXT")
                 db.execSQL("ALTER TABLE skills ADD COLUMN vaultRevision INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+
+        /**
+         * v4 → v5: the conversation store. Every user command and every
+         * spoken agent response is persisted as a turn and mirrored to the
+         * shared drive as a TRANSCRIPT record, so the vault holds the whole
+         * usage history from every host as ONE source. Creating a new table
+         * is non-destructive; existing data is untouched.
+         */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS conversation_turns (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "sessionId TEXT NOT NULL, " +
+                        "role TEXT NOT NULL, " +
+                        "content TEXT NOT NULL, " +
+                        "inputType TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL, " +
+                        "vaultRecordId TEXT, " +
+                        "vaultRevision INTEGER NOT NULL DEFAULT 1)"
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_conversation_turns_sessionId ON conversation_turns (sessionId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_conversation_turns_vaultRecordId ON conversation_turns (vaultRecordId)")
             }
         }
     }
