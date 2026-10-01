@@ -44,6 +44,14 @@ interface SkillDao {
     @Query("DELETE FROM skills WHERE createdAt < :cutoff")
     suspend fun deleteOlderThan(cutoff: Long): Int
 
+    /**
+     * The cached skill linked to one vault record — used by vault hydration
+     * to propagate a tombstone: a skill deleted on another host must not stay
+     * enabled here.
+     */
+    @Query("SELECT * FROM skills WHERE vaultRecordId = :vaultRecordId LIMIT 1")
+    suspend fun getByVaultRecordId(vaultRecordId: String): SkillEntity?
+
     /** Deletes every cached skill (vault disconnect cleanup). Returns rows deleted. */
     @Query("DELETE FROM skills")
     suspend fun deleteAll(): Int

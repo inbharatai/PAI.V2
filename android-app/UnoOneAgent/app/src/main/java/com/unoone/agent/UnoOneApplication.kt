@@ -126,6 +126,7 @@ class UnoOneApplication : Application(), AgentRuntimeController {
             tombstoneDao = db.pendingTombstoneDao(),
             writerProvider = { com.unoone.agent.vaultbridge.VaultConnection.writer() },
             deviceId = com.unoone.agent.vaultbridge.VaultDeviceId.getOrCreate(this),
+            pendingWriteDao = db.pendingWriteDao(),
             skillDao = db.skillDao(),
             turnDao = db.conversationTurnDao(),
         )

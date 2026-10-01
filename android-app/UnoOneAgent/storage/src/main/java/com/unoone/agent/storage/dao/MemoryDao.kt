@@ -81,4 +81,11 @@ interface MemoryDao {
     /** Every memory, one-shot — used by vault hydration to dedupe known records. */
     @Query("SELECT * FROM memories")
     suspend fun allOnce(): List<MemoryEntity>
+
+    /**
+     * The cached row linked to one vault record — used by vault hydration to
+     * propagate a tombstone: deleted on any host, stays deleted everywhere.
+     */
+    @Query("SELECT * FROM memories WHERE vaultRecordId = :vaultRecordId LIMIT 1")
+    suspend fun getByVaultRecordId(vaultRecordId: String): MemoryEntity?
 }

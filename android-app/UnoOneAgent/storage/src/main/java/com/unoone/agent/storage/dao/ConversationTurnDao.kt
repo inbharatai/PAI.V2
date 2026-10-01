@@ -46,6 +46,17 @@ interface ConversationTurnDao {
     @Query("DELETE FROM conversation_turns WHERE vaultRecordId IS NOT NULL")
     suspend fun deleteSynced(): Int
 
+    /**
+     * The cached turn linked to one vault record — used by vault hydration to
+     * propagate a tombstone authored on another host.
+     */
+    @Query("SELECT * FROM conversation_turns WHERE vaultRecordId = :vaultRecordId LIMIT 1")
+    suspend fun getByVaultRecordId(vaultRecordId: String): ConversationTurnEntity?
+
+    /** Deletes one cached turn (vault-tombstone propagation). */
+    @Query("DELETE FROM conversation_turns WHERE id = :id")
+    suspend fun deleteById(id: Long): Int
+
     /** Deletes every cached turn. Returns rows deleted. */
     @Query("DELETE FROM conversation_turns")
     suspend fun deleteAll(): Int

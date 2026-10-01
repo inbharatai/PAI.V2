@@ -1517,6 +1517,10 @@ class AgentOrchestrator(
                 recorder.recordProcedureOutcome(
                     command = sanitizedText,
                     tool = toolCall.tool,
+                    // The ACTUAL serialized arguments of this execution, so
+                    // boundedArguments reflects what the tool was really
+                    // handed — never just the command signature.
+                    argumentsJson = toolCall.args.toString(),
                     success = result is Result.Success,
                     verified = verifiedResult.verified && verifiedResult.status ==
                         com.unoone.agent.core.model.ActionResult.Status.SUCCESS,

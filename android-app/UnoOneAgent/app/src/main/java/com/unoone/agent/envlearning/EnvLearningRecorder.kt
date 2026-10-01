@@ -68,6 +68,8 @@ class EnvLearningRecorder(
         private const val PROCEDURE_TYPE = "procedure_outcome"
         private const val HYPOTHESIS_TYPE = "envobs_hypo"
         private const val FACT_TYPE = "envobs"
+        /** Declared evidence bound: the actual serialized arguments must fit within this to count as bounded. */
+        const val MAX_ARG_EVIDENCE = 400
     }
 
     // ---- procedure records ------------------------------------------------
@@ -80,11 +82,15 @@ class EnvLearningRecorder(
      *
      * [verified] and [verificationEvidence] come from the REAL ActionVerifier
      * verdict for this execution — never assumed true because the executor
-     * said so.
+     * said so. [argumentsJson] is the ACTUAL serialized arguments of this
+     * execution: boundedArguments is true ONLY when they were captured and
+     * fit within the declared [MAX_ARG_EVIDENCE] char bound — the signature
+     * alone proves nothing about what the tool was handed.
      */
     suspend fun recordProcedureOutcome(
         command: String,
         tool: String,
+        argumentsJson: String?,
         success: Boolean,
         verified: Boolean,
         verificationEvidence: String,
@@ -101,8 +107,16 @@ class EnvLearningRecorder(
             } else 0
             upsertRow(streakKey, streak.toString(), PROCEDURE_TYPE, now)
 
+            val args = argumentsJson?.trim().orEmpty()
+            val boundedArgs = args.isNotBlank() && args.length <= MAX_ARG_EVIDENCE
+            val boundedEvidence = when {
+                args.isBlank() -> "arguments not captured for this execution — boundedness unproven"
+                boundedArgs -> "arguments: $args (serialized within ${MAX_ARG_EVIDENCE}-char bound)"
+                else -> "serialized arguments exceed the ${MAX_ARG_EVIDENCE}-char bound (length ${args.length}) — not bounded"
+            }
+
             val requirements = PromotionRequirements(
-                boundedArguments = true, // signature + tool id only — no raw content
+                boundedArguments = boundedArgs,
                 repeatableSuccess = success && streak >= REPEATABLE_STREAK,
                 verifiedPostconditions = success && verified,
                 lowRiskClass = riskLevel == RiskLevel.DIRECT,
@@ -117,7 +131,7 @@ class EnvLearningRecorder(
             val record = ProcedureOutcome(
                 schema = ContractSchemas.PROCEDURE,
                 procedureId = tool,
-                boundedArguments = "signature: $signature",
+                boundedArguments = "$boundedEvidence (signature: $signature)",
                 preconditions = "agent enabled; safety pipeline cleared at risk ${riskLevel.name}",
                 postconditions = "tool $tool completed its action on the device",
                 result = if (success) ProcedureResult.SUCCESS else ProcedureResult.FAILURE,

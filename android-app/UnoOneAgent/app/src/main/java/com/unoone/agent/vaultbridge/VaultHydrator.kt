@@ -21,17 +21,24 @@ import java.time.Instant
  *
  * Bounded and honest by construction:
  * - Only records carrying the shared {kind:"memory"} / {kind:"skill"} /
- * {kind:"transcript"} / {kind:"envobs"} JSON envelope hydrate. Anything else
- * (e.g. desktop-migrated raw text, or desktop voice-recording transcripts) is
- * skipped — never structured into a fake memory or turn.
- * - Tombstoned records are skipped: deleted on any host, stays deleted.
+ * {kind:"transcript"} / {kind:"envobs"} JSON envelope hydrate. The desktop
+ * harness's own envelope ({schema:1, harness_id, scope, namespace, content}
+ * — record types MESSAGE / PREFERENCE / CONTEXT_SNAPSHOT) hydrates too, as
+ * a typed "harness_memory" row. Anything else (e.g. desktop-migrated raw
+ * text, or desktop voice-recording transcripts) is skipped — never
+ * structured into a fake memory or turn.
+ * - Tombstoned records DELETE the linked cache row: deleted on any host,
+ * stays deleted everywhere — a Skill removed on another phone must not stay
+ * enabled here.
  * - Records the cache already has at the latest revision are skipped without
  *   a decrypt; a known record is re-read only when the vault metadata shows a
  *   strictly newer revision (another host rewrote it).
- * - Key/name conflicts: the row that already reached the vault wins; a
- *   local-only row (null link) is ADOPTED (updated + linked), never silently
- *   overwritten with a different vault record. Same-id updates apply only
- *   when the vault revision is strictly newer.
+ * - Key/name conflicts: the row that already reached the vault wins. A
+ *   local-only row (null link) is NEVER overwritten — it either pushes on
+ *   the next drain (drain runs before hydration, so push wins by ordering)
+ *   or it is device-local and the only copy in existence; adopting the
+ *   vault's value for the same key would silently drop local content.
+ *   Same-id updates apply only when the vault revision is strictly newer.
  * - Every failure is non-fatal (best-effort pull, like the mirror's push).
  */
 class VaultHydrator(
@@ -51,6 +58,10 @@ class VaultHydrator(
         val envFactsAdded: Int = 0,
         val envFactsUpdated: Int = 0,
         val skippedUnknown: Int = 0,
+        /** Cache rows removed because their vault record is tombstoned. */
+        val memoriesDeleted: Int = 0,
+        val skillsDeleted: Int = 0,
+        val turnsDeleted: Int = 0,
     ) {
         val total: Int
             get() = memoriesAdded + memoriesUpdated + skillsAdded + skillsUpdated + turnsAdded +
@@ -65,6 +76,9 @@ class VaultHydrator(
             envFactsAdded = envFactsAdded + other.envFactsAdded,
             envFactsUpdated = envFactsUpdated + other.envFactsUpdated,
             skippedUnknown = skippedUnknown + other.skippedUnknown,
+            memoriesDeleted = memoriesDeleted + other.memoriesDeleted,
+            skillsDeleted = skillsDeleted + other.skillsDeleted,
+            turnsDeleted = turnsDeleted + other.turnsDeleted,
         )
     }
 
@@ -98,13 +112,23 @@ class VaultHydrator(
         }
         var result = Result()
         for (fields in metadata) {
-            if (fields["tombstone"] == true) continue
             val recordId = fields["record_id"] as? String ?: continue
+            if (fields["tombstone"] == true) {
+                // Deleted on another host — propagate: remove the linked cache
+                // row so a tombstoned Skill/memory/turn cannot stay active here.
+                result += propagateTombstone(recordId)
+                continue
+            }
             val type = fields["record_type"] as? String ?: continue
             val vaultRevision = (fields["revision"] as? Int) ?: 0
             val knownRevision = knownRevisions[recordId]
             if (knownRevision != null && vaultRevision <= knownRevision) continue // already current
-            if (type != "MEMORY" && type != "DOCUMENT" && type != "TRANSCRIPT") continue
+            // Shared mobile envelopes are MEMORY/DOCUMENT/TRANSCRIPT; the
+            // desktop harness memory envelope writes MESSAGE / PREFERENCE /
+            // CONTEXT_SNAPSHOT — all payload-gated below.
+            if (type != "MEMORY" && type != "DOCUMENT" && type != "TRANSCRIPT" &&
+                type != "MESSAGE" && type != "PREFERENCE" && type != "CONTEXT_SNAPSHOT"
+            ) continue
 
             val payload = try {
                 reader.readRecord(recordId).second
@@ -129,12 +153,37 @@ class VaultHydrator(
                 "skill" -> hydrateSkill(recordId, fields, envelope)
                 "transcript" -> hydrateTurn(recordId, fields, envelope)
                 "envobs" -> hydrateEnvFact(recordId, fields, envelope)
+                null -> hydrateHarnessMemory(recordId, fields, envelope)
                 else -> {
                     // A foreign JSON payload — never structured into a fake
                     // memory/skill/turn.
                     Result(skippedUnknown = 1)
                 }
             }
+        }
+        return result
+    }
+
+    /**
+     * A tombstoned vault record: delete the cache row linked to it, if any.
+     * The vault metadata is the latest state of the record — tombstone=true
+     * means the last write was a deletion — so a linked local row is stale by
+     * definition and is removed. Unlinked local rows are never touched (they
+     * are either push-pending or device-local and the only copy in existence).
+     */
+    private suspend fun propagateTombstone(recordId: String): Result {
+        var result = Result()
+        memoryDao.getByVaultRecordId(recordId)?.let { row ->
+            memoryDao.delete(row)
+            result += Result(memoriesDeleted = 1)
+        }
+        skillDao.getByVaultRecordId(recordId)?.let { row ->
+            skillDao.delete(row)
+            result += Result(skillsDeleted = 1)
+        }
+        turnDao?.getByVaultRecordId(recordId)?.let { row ->
+            turnDao.deleteById(row.id)
+            result += Result(turnsDeleted = 1)
         }
         return result
     }
@@ -180,18 +229,12 @@ class VaultHydrator(
             return Result(memoriesAdded = 1)
         }
         if (local.vaultRecordId == null) {
-            // Local-only row for the same key: adopt the vault's version — the
-            // vault is canonical, and the row never reached it.
-            memoryDao.update(
-                local.copy(
-                    value = value,
-                    type = type,
-                    updatedAt = epochOf(fields["updated_at"] as? String, now),
-                    vaultRecordId = recordId,
-                    vaultRevision = revision,
-                ),
-            )
-            return Result(memoriesUpdated = 1)
+            // Local-only row for the same key: keep it. It pushes on the next
+            // drain (drain runs before hydration, so push-first ordering
+            // normally links it already); overwriting the only local copy
+            // with a vault record would be silent content loss.
+            Logger.i("VaultHydrator: keeping local unlinked memory '$key' (push pending)")
+            return Result(skippedUnknown = 1)
         }
         if (local.vaultRecordId != recordId) {
             // Both hosts minted their own record for this key; first writer
@@ -244,18 +287,11 @@ class VaultHydrator(
             return Result(skillsAdded = 1)
         }
         if (local.vaultRecordId == null) {
-            skillDao.update(
-                local.copy(
-                    triggerPhrases = triggerPhrases,
-                    stepsJson = stepsJson,
-                    riskLevel = riskLevel,
-                    enabled = enabled,
-                    updatedAt = epochOf(fields["updated_at"] as? String, now),
-                    vaultRecordId = recordId,
-                    vaultRevision = revision,
-                ),
-            )
-            return Result(skillsUpdated = 1)
+            // Local-only skill for the same name: keep it — it pushes on the
+            // next drain; adopting the vault copy would silently drop the
+            // local steps. The two-records rule resolves it after both push.
+            Logger.i("VaultHydrator: keeping local unlinked skill '$name' (push pending)")
+            return Result(skippedUnknown = 1)
         }
         if (local.vaultRecordId != recordId) {
             Logger.i("VaultHydrator: skill '$name' has two vault records; keeping local ${local.vaultRecordId}")
@@ -370,16 +406,10 @@ class VaultHydrator(
             return Result(envFactsAdded = 1)
         }
         if (local.vaultRecordId == null) {
-            // Local-only fact for the same subject: adopt the vault's version.
-            memoryDao.update(
-                local.copy(
-                    value = observationJson,
-                    updatedAt = epochOf(fields["updated_at"] as? String, now),
-                    vaultRecordId = recordId,
-                    vaultRevision = revision,
-                ),
-            )
-            return Result(envFactsUpdated = 1)
+            // Local-only fact for the same subject: keep it (push pending) —
+            // same keep-local rule as memories; no silent content loss.
+            Logger.i("VaultHydrator: keeping local unlinked env fact '$subject' (push pending)")
+            return Result(skippedUnknown = 1)
         }
         if (local.vaultRecordId != recordId) {
             Logger.i("VaultHydrator: env fact '$subject' has two vault records; keeping local ${local.vaultRecordId}")
@@ -394,6 +424,73 @@ class VaultHydrator(
                 ),
             )
             return Result(envFactsUpdated = 1)
+        }
+        return Result() // already current
+    }
+
+    /**
+     * A desktop Power-harness memory (record types MESSAGE / PREFERENCE /
+     * CONTEXT_SNAPSHOT): the envelope the harness adapter writes is
+     * {schema:1, harness_id, scope, namespace, content, attributes} — it
+     * carries no {kind} tag, so it lands here. It hydrates as a typed
+     * "harness_memory" row keyed "harness:{scope}:{namespace}:{harness_id}",
+     * so the phone can read what the desktop harness remembered — one memory,
+     * one source. The harness's internal index records
+     * (namespace "__pai_harness_internal__", {schema, scope, entries} — no
+     * content) never hydrate: they are bookkeeping, not memory. Same
+     * conflict rules as any other memory: keep-local for unlinked rows,
+     * strictly-newer revisions only, two-records logged.
+     */
+    private suspend fun hydrateHarnessMemory(
+        recordId: String,
+        fields: Map<String, Any?>,
+        envelope: kotlinx.serialization.json.JsonObject,
+    ): Result {
+        val schema = fieldInt(envelope, "schema") ?: return Result(skippedUnknown = 1)
+        if (schema != 1) return Result(skippedUnknown = 1) // unknown envelope version
+        val harnessId = fieldString(envelope, "harness_id")?.takeIf { it.isNotBlank() }
+            ?: return Result(skippedUnknown = 1)
+        val scope = fieldString(envelope, "scope")?.takeIf { it.isNotBlank() }
+            ?: return Result(skippedUnknown = 1)
+        val namespace = fieldString(envelope, "namespace") ?: return Result(skippedUnknown = 1)
+        if (namespace == "__pai_harness_internal__") return Result(skippedUnknown = 1)
+        val content = fieldString(envelope, "content")?.takeIf { it.isNotBlank() }
+            ?: return Result(skippedUnknown = 1) // also drops the index records (no content)
+        val revision = (fields["revision"] as? Int) ?: 1
+        val key = "harness:$scope:$namespace:$harnessId"
+        val local = memoryDao.getByKey(key)
+        val now = System.currentTimeMillis()
+        if (local == null) {
+            memoryDao.insert(
+                MemoryEntity(
+                    key = key,
+                    value = content,
+                    type = "harness_memory",
+                    createdAt = epochOf(fields["created_at"] as? String, now),
+                    updatedAt = epochOf(fields["updated_at"] as? String, now),
+                    vaultRecordId = recordId,
+                    vaultRevision = revision,
+                ),
+            )
+            return Result(memoriesAdded = 1)
+        }
+        if (local.vaultRecordId == null) {
+            Logger.i("VaultHydrator: keeping local unlinked harness memory '$key' (push pending)")
+            return Result(skippedUnknown = 1)
+        }
+        if (local.vaultRecordId != recordId) {
+            Logger.i("VaultHydrator: harness memory '$key' has two vault records; keeping local ${local.vaultRecordId}")
+            return Result(skippedUnknown = 1)
+        }
+        if (revision > local.vaultRevision) {
+            memoryDao.update(
+                local.copy(
+                    value = content,
+                    updatedAt = epochOf(fields["updated_at"] as? String, now),
+                    vaultRevision = revision,
+                ),
+            )
+            return Result(memoriesUpdated = 1)
         }
         return Result() // already current
     }

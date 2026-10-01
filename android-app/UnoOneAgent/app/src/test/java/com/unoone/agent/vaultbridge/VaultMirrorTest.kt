@@ -37,16 +37,24 @@ class VaultMirrorTest {
     /** Records every vault call; toggle [online] to simulate lock/unlock. */
     private class FakeWriter : VaultRecordWriter {
         var online = true
+        /** Fail the NEXT writeRecord call once (failure injection). */
+        var failNextWrite = false
+        var failTombstones = false
         val written = mutableListOf<Pair<String, ByteArray>>() // recordId, content
         val writtenFields = mutableListOf<Map<String, Any?>>()
         val tombstoned = mutableListOf<String>()
         override fun writeRecord(fields: Map<String, Any?>, content: ByteArray): String {
+            if (failNextWrite) {
+                failNextWrite = false
+                throw java.io.IOException("injected vault failure")
+            }
             val id = fields["record_id"] as String
             written.add(id to content)
             writtenFields.add(fields)
             return id
         }
         override fun tombstone(vaultRecordId: String, deletedAtIso: String) {
+            if (failTombstones) throw java.io.IOException("injected vault failure")
             tombstoned.add(vaultRecordId)
         }
     }
@@ -59,6 +67,7 @@ class VaultMirrorTest {
         tombstoneDao = db.pendingTombstoneDao(),
         writerProvider = { if (writer.online) writer else null },
         deviceId = "test-device",
+        pendingWriteDao = db.pendingWriteDao(),
         skillDao = db.skillDao(),
         turnDao = db.conversationTurnDao(),
     )
@@ -360,6 +369,81 @@ class VaultMirrorTest {
         mirror().onTurnRecorded(id)
 
         assertEquals(1, writer.written.size)
+    }
+
+    // ---- interrupted-write + drain-failure isolation ----------------------
+
+    @Test
+    fun `interrupted vault write reuses the SAME record id on retry - no duplicate`() = runBlocking {
+        // The vault write throws AFTER the record id was minted and persisted
+        // (crash between vault write and cache stamp).
+        writer.failNextWrite = true
+        val id = db.memoryDao().insert(MemoryEntity(key = "wake_word", value = "namaste", type = "preference"))
+        mirror().onMemoryUpserted(id)
+
+        assertTrue("the write failed, so nothing reached the vault", writer.written.isEmpty())
+        assertNull("the row stamp never happened", db.memoryDao().getByIdOnce(id)!!.vaultRecordId)
+        assertEquals("the minted id must be persisted BEFORE the write", 1, db.pendingWriteDao().getAll().size)
+        val minted = db.pendingWriteDao().getAll().single().recordId
+
+        // Retry (next unlock): the SAME record id must be reused — the vault
+        // write overwrites the same record file; a fresh id would duplicate it.
+        mirror().drainBacklog()
+        assertEquals(1, writer.written.size)
+        assertEquals("retry must reuse the persisted id", minted, writer.written.single().first)
+        assertEquals(minted, db.memoryDao().getByIdOnce(id)!!.vaultRecordId)
+        assertTrue("the pending id retires once the row is stamped", db.pendingWriteDao().getAll().isEmpty())
+    }
+
+    @Test
+    fun `a tombstone that throws is queued and retried on the next unlock`() = runBlocking {
+        // A memory that already reached the vault.
+        writer.online = true
+        val id = db.memoryDao().insert(MemoryEntity(key = "wake_word", value = "namaste", type = "preference"))
+        mirror().onMemoryUpserted(id)
+        val vid = db.memoryDao().getByIdOnce(id)!!.vaultRecordId!!
+        val entity = db.memoryDao().getByIdOnce(id)!!
+        db.memoryDao().delete(entity)
+
+        // The vault tombstone call throws — the deletion must not vanish with
+        // the already-deleted local row; it queues for retry.
+        writer.failTombstones = true
+        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.MEMORY)
+        assertTrue(writer.tombstoned.isEmpty())
+        assertEquals(
+            "failed tombstone must be queued, not dropped",
+            listOf(vid),
+            db.pendingTombstoneDao().getAll().map { it.vaultRecordId },
+        )
+
+        // Next unlock: the queued tombstone drains and the queue empties.
+        writer.failTombstones = false
+        mirror().drainBacklog()
+        assertEquals(listOf(vid), writer.tombstoned)
+        assertTrue(db.pendingTombstoneDao().getAll().isEmpty())
+    }
+
+    @Test
+    fun `one failed drain op never aborts the rest of the backlog`() = runBlocking {
+        writer.online = false
+        db.noteDao().insert(NoteEntity(title = "Note A", content = "a"))
+        db.memoryDao().insert(MemoryEntity(key = "k", value = "v", type = "preference"))
+
+        // Unlock: the FIRST write call throws; the rest of the batch must
+        // still flush (per-op isolation), and the failed op stays for the
+        // next unlock.
+        writer.online = true
+        writer.failNextWrite = true
+        mirror().drainBacklog()
+
+        assertEquals("the failed op must not stop the batch", 1, writer.written.size)
+        val stillUnsynced = db.noteDao().notSynced().size + db.memoryDao().notSynced().size
+        assertEquals("only the failed op remains unsynced", 1, stillUnsynced)
+
+        // And it flushes on the next drain.
+        mirror().drainBacklog()
+        assertEquals(2, writer.written.size)
+        assertEquals(0, db.noteDao().notSynced().size + db.memoryDao().notSynced().size)
     }
 
     // ---- env-learning facts (type "envobs") -------------------------------

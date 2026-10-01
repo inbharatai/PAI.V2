@@ -111,5 +111,6 @@ class ContextSnapshotTest {
         override suspend fun allOnce(): List<SkillEntity> = enabled
         override suspend fun notSynced(): List<SkillEntity> = emptyList()
         override suspend fun setVaultLink(id: Long, vaultRecordId: String, vaultRevision: Int): Int = 0
+        override suspend fun getByVaultRecordId(vaultRecordId: String): SkillEntity? = null
     }
 }

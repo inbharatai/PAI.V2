@@ -10,6 +10,7 @@ import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.ModelMetadataDao
 import com.unoone.agent.storage.dao.NoteDao
 import com.unoone.agent.storage.dao.PendingTombstoneDao
+import com.unoone.agent.storage.dao.PendingWriteDao
 import com.unoone.agent.storage.dao.SkillDao
 import com.unoone.agent.storage.entity.ActionLogEntity
 import com.unoone.agent.storage.entity.ConversationTurnEntity
@@ -17,6 +18,7 @@ import com.unoone.agent.storage.entity.MemoryEntity
 import com.unoone.agent.storage.entity.ModelMetadataEntity
 import com.unoone.agent.storage.entity.NoteEntity
 import com.unoone.agent.storage.entity.PendingTombstoneEntity
+import com.unoone.agent.storage.entity.PendingWriteEntity
 import com.unoone.agent.storage.entity.SkillEntity
 
 @Database(
@@ -27,9 +29,10 @@ import com.unoone.agent.storage.entity.SkillEntity
         ActionLogEntity::class,
         ModelMetadataEntity::class,
         PendingTombstoneEntity::class,
+        PendingWriteEntity::class,
         ConversationTurnEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = true
 )
 abstract class UnoOneDatabase : RoomDatabase() {
@@ -39,6 +42,7 @@ abstract class UnoOneDatabase : RoomDatabase() {
     abstract fun actionLogDao(): ActionLogDao
     abstract fun modelMetadataDao(): ModelMetadataDao
     abstract fun pendingTombstoneDao(): PendingTombstoneDao
+    abstract fun pendingWriteDao(): PendingWriteDao
     abstract fun conversationTurnDao(): ConversationTurnDao
 
     companion object {
@@ -128,6 +132,27 @@ abstract class UnoOneDatabase : RoomDatabase() {
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_conversation_turns_sessionId ON conversation_turns (sessionId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_conversation_turns_vaultRecordId ON conversation_turns (vaultRecordId)")
+            }
+        }
+
+        /**
+         * v5 → v6: interrupted-write protection. A vault record id is minted
+         * and persisted BEFORE the vault write, so a retry after a crash
+         * between the write and the cache-row stamp reuses the SAME record
+         * id instead of duplicating the record in the vault. Creating a new
+         * table is non-destructive; existing data is untouched.
+         */
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS pending_writes (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "recordKind TEXT NOT NULL, " +
+                        "localId INTEGER NOT NULL, " +
+                        "recordId TEXT NOT NULL, " +
+                        "createdAt INTEGER NOT NULL)"
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_pending_writes_recordKind_localId ON pending_writes (recordKind, localId)")
             }
         }
     }

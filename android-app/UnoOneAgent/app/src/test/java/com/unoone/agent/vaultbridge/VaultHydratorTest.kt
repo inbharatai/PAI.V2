@@ -23,12 +23,18 @@ import org.robolectric.annotation.Config
  * and a fake [VaultRecordReader] that plays records authored on other hosts.
  * Pins every safety/honesty rule the hydrator promises:
  *
- * - known record ids and tombstones pull nothing (no decrypt, no resurrect);
+ * - known record ids and tombstones pull nothing (no decrypt); a tombstone
+ *   authored on another host DELETES the linked cache row — a Skill deleted
+ *   there must not stay enabled here;
  * - only {kind:"memory"} / {kind:"skill"} envelopes hydrate — raw text and
- *   foreign payloads are skipped, never structured into fake data;
- * - local-only rows are ADOPTED (linked), synced rows update only on a
- *   strictly newer revision, and two different vault records for the same
- *   key/name never silently overwrite each other.
+ *   foreign payloads are skipped, never structured into fake data; the
+ *   desktop harness envelope ({schema:1, harness_id, scope, namespace,
+ *   content}) hydrates as a typed harness_memory row, its internal index
+ *   records never do;
+ * - local-only unlinked rows are KEPT (a failed push is never clobbered by
+ *   hydration), synced rows update only on a strictly newer revision, and two
+ *   different vault records for the same key/name never silently overwrite
+ *   each other.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -106,6 +112,28 @@ class VaultHydratorTest {
             records[id] = meta + mapOf("tombstone" to true) to content
         }
 
+        /** A desktop Power-harness memory (MESSAGE / PREFERENCE / CONTEXT_SNAPSHOT). */
+        fun addHarnessMemory(
+            id: String,
+            recordType: String = "MESSAGE",
+            scope: String = "Conversation",
+            namespace: String = "default",
+            harnessId: String = "h-mem-1",
+            content: String = "User prefers dark mode",
+            revision: Int = 1,
+        ) {
+            val payload =
+                """{"schema":1,"harness_id":"$harnessId","scope":"$scope","namespace":"$namespace","content":"$content"}"""
+            records[id] = baseMeta(id, recordType, revision) to payload.toByteArray()
+        }
+
+        /** The harness's internal index bookkeeping record — never a memory. */
+        fun addHarnessIndex(id: String) {
+            val payload =
+                """{"schema":1,"harness_id":"memory-index-v1","scope":"Conversation","namespace":"__pai_harness_internal__","entries":[]}"""
+            records[id] = baseMeta(id, "MEMORY", 1) to payload.toByteArray()
+        }
+
         override fun listRecordMetadata(): List<Map<String, Any?>> =
             records.values.map { it.first }
 
@@ -171,16 +199,107 @@ class VaultHydratorTest {
     }
 
     @Test
-    fun `local-only row for the same key is adopted - vault wins, link set`() = runBlocking {
+    fun `local unlinked row for the same key survives - failed push is never clobbered`() = runBlocking {
+        // Failure injection: this is the exact state after a FAILED backlog
+        // drain — the row never pushed, so it is still unlinked.
         db.memoryDao().insert(MemoryEntity(key = "wake_word", value = "old local value", type = "preference"))
         reader.addMemory("rec-m1", "wake_word", "vault value")
 
         val result = hydrator().hydrateFromVault()
 
-        assertEquals(1, result.memoriesUpdated)
+        assertEquals(1, result.skippedUnknown)
+        assertEquals(0, result.memoriesAdded + result.memoriesUpdated)
         val mem = db.memoryDao().getByKey("wake_word")!!
-        assertEquals("vault value", mem.value)
-        assertEquals("rec-m1", mem.vaultRecordId)
+        assertEquals("the only local copy must never be overwritten", "old local value", mem.value)
+        assertNull("keep-local: no adoption, no link steal", mem.vaultRecordId)
+    }
+
+    @Test
+    fun `tombstone removes a previously hydrated skill - deleted there stays deleted here`() = runBlocking {
+        reader.addSkill("rec-s1", "morning briefing")
+        hydrator().hydrateFromVault()
+        assertTrue(db.skillDao().allOnce().isNotEmpty())
+
+        // Deleted on another phone: the cached row must go too — a deleted
+        // Skill must not stay active on this one.
+        reader.tombstone("rec-s1")
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(1, result.skillsDeleted)
+        assertTrue("the cached skill row is gone", db.skillDao().allOnce().isEmpty())
+
+        // Safety: a tombstone only ever removes LINKED rows — a fresh local
+        // skill (push pending, unlinked) with the same name survives it.
+        db.skillDao().insert(
+            SkillEntity(name = "morning briefing", triggerPhrases = "brief me", stepsJson = "[]"),
+        )
+        val second = hydrator().hydrateFromVault()
+        assertEquals(0, second.skillsDeleted)
+        assertEquals(1, db.skillDao().allOnce().size)
+    }
+
+    @Test
+    fun `tombstone removes previously hydrated memory and turn rows`() = runBlocking {
+        reader.addMemory("rec-m1", "wake_word", "namaste")
+        reader.addTurn("rec-t1", "sess-1", "user", "hello")
+        hydrator().hydrateFromVault()
+        assertNotNull(db.memoryDao().getByKey("wake_word"))
+
+        reader.tombstone("rec-m1")
+        reader.tombstone("rec-t1")
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(1, result.memoriesDeleted)
+        assertEquals(1, result.turnsDeleted)
+        assertNull(db.memoryDao().getByKey("wake_word"))
+        assertTrue(db.conversationTurnDao().allOnce().isEmpty())
+    }
+
+    @Test
+    fun `desktop harness memory hydrates as a typed harness_memory row`() = runBlocking {
+        reader.addHarnessMemory("rec-h1", recordType = "MESSAGE", scope = "Conversation", harnessId = "abc123")
+        reader.addHarnessMemory("rec-h2", recordType = "PREFERENCE", scope = "Preferences", harnessId = "pref1", content = "Dark theme")
+
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(2, result.memoriesAdded)
+        val conversation = db.memoryDao().getByKey("harness:Conversation:default:abc123")!!
+        assertEquals("harness_memory", conversation.type)
+        assertEquals("User prefers dark mode", conversation.value)
+        assertEquals("rec-h1", conversation.vaultRecordId)
+        val preference = db.memoryDao().getByKey("harness:Preferences:default:pref1")!!
+        assertEquals("Dark theme", preference.value)
+        assertTrue(db.memoryDao().notSynced().isEmpty()) // linked rows never re-mirror
+    }
+
+    @Test
+    fun `harness internal index records never hydrate`() = runBlocking {
+        reader.addHarnessIndex("rec-idx")
+
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(0, result.total)
+        assertEquals(1, result.skippedUnknown)
+        assertTrue(db.memoryDao().allOnce().isEmpty())
+    }
+
+    @Test
+    fun `harness memory update applies only on strictly newer revision`() = runBlocking {
+        reader.addHarnessMemory("rec-h1", harnessId = "abc123")
+        hydrator().hydrateFromVault()
+        val readBefore = reader.readAttempts
+
+        reader.records["rec-h1"] = reader.records["rec-h1"]!!.let { (meta, _) ->
+            (meta + mapOf("revision" to 2)) to
+                """{"schema":1,"harness_id":"abc123","scope":"Conversation","namespace":"default","content":"Prefers light mode now"}"""
+                    .toByteArray()
+        }
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(1, result.memoriesUpdated)
+        assertTrue("the stale first pass must not have re-read the record", reader.readAttempts > readBefore)
+        assertEquals("Prefers light mode now", db.memoryDao().getByKey("harness:Conversation:default:abc123")!!.value)
+        assertEquals(2, db.memoryDao().getByKey("harness:Conversation:default:abc123")!!.vaultRevision)
     }
 
     @Test

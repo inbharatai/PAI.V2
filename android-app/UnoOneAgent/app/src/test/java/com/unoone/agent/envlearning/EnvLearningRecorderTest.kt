@@ -67,9 +67,11 @@ class EnvLearningRecorderTest {
         tool: String = "open_calendar",
         verified: Boolean = true,
         riskLevel: RiskLevel = RiskLevel.DIRECT,
+        argumentsJson: String? = """{"app":"com.google.android.calendar"}""",
     ) = recorder.recordProcedureOutcome(
         command = command,
         tool = tool,
+        argumentsJson = argumentsJson,
         success = true,
         verified = verified,
         verificationEvidence = "foregroundPackage=com.google.android.calendar",
@@ -108,6 +110,43 @@ class EnvLearningRecorderTest {
         assertFalse(record.promotion.requirements.explicitApproval)
     }
 
+    // ---- boundedArguments honesty -------------------------------------------
+
+    @Test
+    fun `captured bounded arguments set boundedArguments true with the actual args as evidence`() = runBlocking {
+        val r = recorder()
+        recordSuccess(r)
+
+        val record = procedureRow("open_calendar")
+        assertTrue(record.promotion.requirements.boundedArguments)
+        assertTrue(
+            "the evidence must carry the ACTUAL serialized arguments, not just a signature",
+            record.boundedArguments.contains("\"app\":\"com.google.android.calendar\""),
+        )
+    }
+
+    @Test
+    fun `missing arguments leave boundedArguments honestly false`() = runBlocking {
+        val r = recorder()
+        recordSuccess(r, argumentsJson = null)
+
+        val record = procedureRow("open_calendar")
+        assertFalse("no captured args means boundedness is UNPROVEN", record.promotion.requirements.boundedArguments)
+        assertTrue(record.boundedArguments.contains("arguments not captured"))
+        assertEquals(PromotionStatus.NONE, record.promotion.status)
+    }
+
+    @Test
+    fun `oversized arguments leave boundedArguments honestly false`() = runBlocking {
+        val r = recorder()
+        recordSuccess(r, argumentsJson = "x".repeat(EnvLearningRecorder.MAX_ARG_EVIDENCE + 1))
+
+        val record = procedureRow("open_calendar")
+        assertFalse(record.promotion.requirements.boundedArguments)
+        assertTrue(record.boundedArguments.contains("exceed the"))
+        assertEquals(PromotionStatus.NONE, record.promotion.status)
+    }
+
     @Test
     fun `three verified successes reach SUGGESTED but never APPROVED`() = runBlocking {
         val r = recorder()
@@ -128,6 +167,7 @@ class EnvLearningRecorderTest {
         r.recordProcedureOutcome(
             command = "open my calendar please",
             tool = "open_calendar",
+            argumentsJson = """{"app":"com.google.android.calendar"}""",
             success = false,
             verified = false,
             verificationEvidence = "",

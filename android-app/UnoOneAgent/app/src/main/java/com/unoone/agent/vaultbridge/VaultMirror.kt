@@ -6,8 +6,10 @@ import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.NoteDao
 import com.unoone.agent.storage.dao.ConversationTurnDao
 import com.unoone.agent.storage.dao.PendingTombstoneDao
+import com.unoone.agent.storage.dao.PendingWriteDao
 import com.unoone.agent.storage.dao.SkillDao
 import com.unoone.agent.storage.entity.PendingTombstoneEntity
+import com.unoone.agent.storage.entity.PendingWriteEntity
 import com.unoone.agent.vault.VaultRecordFactory
 import com.unoone.agent.vault.VaultRecordWriter
 import com.unoone.agent.vault.VaultSyncPlanner
@@ -26,6 +28,14 @@ import java.util.UUID
  * the same way. Flush order is decided by the pure, JVM-tested
  * [VaultSyncPlanner].
  *
+ * Interrupted writes can never duplicate a vault record: the record id for a
+ * row's first write is minted once and persisted in the [PendingWriteDao]
+ * queue BEFORE the vault write, so a crash between the write and the cache
+ * stamp makes the retry reuse the SAME id (the vault write itself is an
+ * idempotent overwrite of the same record file). A failed tombstone is the
+ * same: queued, retried on the next drain — a deletion is never silently
+ * dropped because one write threw.
+ *
  * Every vault interaction is best-effort and non-fatal: a vault error must
  * never break a local note/memory write. On failure the row simply stays
  * unsynced for the next drain, and the cause is logged.
@@ -36,12 +46,37 @@ class VaultMirror(
     private val tombstoneDao: PendingTombstoneDao,
     private val writerProvider: () -> VaultRecordWriter?,
     private val deviceId: String,
+    private val pendingWriteDao: PendingWriteDao,
     private val skillDao: SkillDao? = null,
     private val turnDao: ConversationTurnDao? = null,
     private val idGen: () -> String = { UUID.randomUUID().toString() },
     private val isoNow: () -> String = { Instant.now().toString() },
     private val isoOf: (Long) -> String = { Instant.ofEpochMilli(it).toString() },
 ) {
+
+    // ---- write identity ---------------------------------------------------
+
+    /**
+     * The record id for one cache row's first vault write. Minted once,
+     * persisted BEFORE the vault write and reused by every retry, so a crash
+     * between "record written" and "row stamped" can never mint a second
+     * record. Rewrites of an already-linked row reuse the row's own link.
+     */
+    private suspend fun recordIdFor(kind: VaultSyncPlanner.Kind, localId: Long, linkedRecordId: String?): String {
+        if (!linkedRecordId.isNullOrBlank()) return linkedRecordId
+        val existing = pendingWriteDao.get(kind.name, localId)
+        if (existing != null) return existing.recordId
+        val fresh = idGen()
+        pendingWriteDao.insert(
+            PendingWriteEntity(recordKind = kind.name, localId = localId, recordId = fresh),
+        )
+        return fresh
+    }
+
+    /** The vault write succeeded and the row is stamped — the pending id retires. */
+    private suspend fun writeCompleted(kind: VaultSyncPlanner.Kind, localId: Long) {
+        pendingWriteDao.deleteByRow(kind.name, localId)
+    }
 
     // ---- write-through --------------------------------------------------
 
@@ -51,8 +86,9 @@ class VaultMirror(
             val writer = writerProvider() ?: return
             val note = noteDao.getById(localId) ?: return
             if (note.vaultRecordId != null) return
+            val recordId = recordIdFor(VaultSyncPlanner.Kind.NOTE, localId, note.vaultRecordId)
             val mapped = VaultRecordFactory.forNote(
-                recordId = idGen(),
+                recordId = recordId,
                 transactionId = idGen(),
                 deviceId = deviceId,
                 title = note.title,
@@ -61,8 +97,9 @@ class VaultMirror(
                 createdAtIso = isoOf(note.createdAt),
                 updatedAtIso = isoOf(note.updatedAt),
             )
-            val vid = writer.writeRecord(mapped.fields, mapped.content)
-            noteDao.setVaultRecordId(localId, vid)
+            writer.writeRecord(mapped.fields, mapped.content)
+            noteDao.setVaultRecordId(localId, recordId)
+            writeCompleted(VaultSyncPlanner.Kind.NOTE, localId)
         } catch (e: Exception) {
             Logger.w("VaultMirror.onNoteCreated non-fatal: ${e.message}")
         }
@@ -82,10 +119,14 @@ class VaultMirror(
             val writer = writerProvider() ?: return
             val memory = memoryDao.getByIdOnce(localId) ?: return
             if (memory.type == "outcome" || memory.type == "procedure_outcome" ||
-                memory.type == "envobs_hypo" || memory.type == "envobs"
+                memory.type == "envobs_hypo" || memory.type == "envobs" ||
+                // Hydrated desktop-harness memories are read-only here: a
+                // phone rewrite would replace the harness's structured
+                // envelope with a mobile one — a silent format clobber.
+                memory.type == "harness_memory"
             ) return
             val isRewrite = memory.vaultRecordId != null
-            val recordId = memory.vaultRecordId ?: idGen()
+            val recordId = recordIdFor(VaultSyncPlanner.Kind.MEMORY, localId, memory.vaultRecordId)
             val revision = if (isRewrite) memory.vaultRevision + 1 else 1
             val mapped = VaultRecordFactory.forMemory(
                 recordId = recordId,
@@ -100,6 +141,7 @@ class VaultMirror(
             )
             writer.writeRecord(mapped.fields, mapped.content)
             memoryDao.setVaultLink(localId, recordId, revision)
+            writeCompleted(VaultSyncPlanner.Kind.MEMORY, localId)
         } catch (e: Exception) {
             Logger.w("VaultMirror.onMemoryUpserted non-fatal: ${e.message}")
         }
@@ -107,29 +149,40 @@ class VaultMirror(
 
     // ---- deletion -------------------------------------------------------
 
+    private suspend fun queueTombstone(vaultRecordId: String, kind: VaultSyncPlanner.Kind, deletedAtIso: String) {
+        tombstoneDao.insert(
+            PendingTombstoneEntity(
+                vaultRecordId = vaultRecordId,
+                recordKind = kind.name,
+                deletedAtIso = deletedAtIso,
+            ),
+        )
+    }
+
     /**
      * A vault-backed row was deleted locally. Tombstone in the vault now if
      * unlocked, else queue it. A null/blank [vaultRecordId] means the row never
-     * reached the vault — nothing to do.
+     * reached the vault — nothing to do. A tombstone that THROWS while the
+     * vault is attached is queued too: a deletion must survive a transient
+     * vault failure, never vanish with the local row already gone.
      */
     suspend fun onRowDeleted(vaultRecordId: String?, kind: VaultSyncPlanner.Kind) {
         if (vaultRecordId.isNullOrBlank()) return
+        val deletedAt = isoNow()
         try {
-            val deletedAt = isoNow()
             val writer = writerProvider()
             if (writer != null) {
                 writer.tombstone(vaultRecordId, deletedAt)
             } else {
-                tombstoneDao.insert(
-                    PendingTombstoneEntity(
-                        vaultRecordId = vaultRecordId,
-                        recordKind = kind.name,
-                        deletedAtIso = deletedAt,
-                    ),
-                )
+                queueTombstone(vaultRecordId, kind, deletedAt)
             }
         } catch (e: Exception) {
-            Logger.w("VaultMirror.onRowDeleted non-fatal: ${e.message}")
+            Logger.w("VaultMirror.onRowDeleted tombstone failed, queued for retry: ${e.message}")
+            try {
+                queueTombstone(vaultRecordId, kind, deletedAt)
+            } catch (queue: Exception) {
+                Logger.w("VaultMirror.onRowDeleted queue also failed — deletion lost: ${queue.message}")
+            }
         }
     }
 
@@ -147,7 +200,7 @@ class VaultMirror(
             val writer = writerProvider() ?: return
             val skill = dao.getById(localId) ?: return
             val isRewrite = skill.vaultRecordId != null
-            val recordId = skill.vaultRecordId ?: idGen()
+            val recordId = recordIdFor(VaultSyncPlanner.Kind.SKILL, localId, skill.vaultRecordId)
             val revision = if (isRewrite) skill.vaultRevision + 1 else 1
             val mapped = VaultRecordFactory.forSkill(
                 recordId = recordId,
@@ -164,6 +217,7 @@ class VaultMirror(
             )
             writer.writeRecord(mapped.fields, mapped.content)
             dao.setVaultLink(localId, recordId, revision)
+            writeCompleted(VaultSyncPlanner.Kind.SKILL, localId)
         } catch (e: Exception) {
             Logger.w("VaultMirror.onSkillUpserted non-fatal: ${e.message}")
         }
@@ -183,8 +237,9 @@ class VaultMirror(
             val writer = writerProvider() ?: return
             val turn = dao.getById(localId) ?: return
             if (turn.vaultRecordId != null) return // already mirrored
+            val recordId = recordIdFor(VaultSyncPlanner.Kind.TRANSCRIPT, localId, turn.vaultRecordId)
             val mapped = VaultRecordFactory.forTurn(
-                recordId = idGen(),
+                recordId = recordId,
                 transactionId = idGen(),
                 deviceId = deviceId,
                 sessionId = turn.sessionId,
@@ -196,6 +251,7 @@ class VaultMirror(
             )
             val vid = writer.writeRecord(mapped.fields, mapped.content)
             dao.setVaultLink(localId, vid, 1)
+            writeCompleted(VaultSyncPlanner.Kind.TRANSCRIPT, localId)
         } catch (e: Exception) {
             Logger.w("VaultMirror.onTurnRecorded non-fatal: ${e.message}")
         }
@@ -226,7 +282,7 @@ class VaultMirror(
                 null
             } ?: return // never mirror an unparseable fact — honesty over reach
             val isRewrite = fact.vaultRecordId != null
-            val recordId = fact.vaultRecordId ?: idGen()
+            val recordId = recordIdFor(VaultSyncPlanner.Kind.ENVOBS, localId, fact.vaultRecordId)
             val revision = if (isRewrite) fact.vaultRevision + 1 else 1
             val mapped = VaultRecordFactory.forEnvFact(
                 recordId = recordId,
@@ -243,6 +299,7 @@ class VaultMirror(
             )
             writer.writeRecord(mapped.fields, mapped.content)
             memoryDao.setVaultLink(localId, recordId, revision)
+            writeCompleted(VaultSyncPlanner.Kind.ENVOBS, localId)
         } catch (e: Exception) {
             Logger.w("VaultMirror.onEnvFactRecorded non-fatal: ${e.message}")
         }
@@ -275,18 +332,25 @@ class VaultMirror(
                 .map { VaultSyncPlanner.PendingTombstone(it.vaultRecordId, it.deletedAtIso) }
 
             for (op in VaultSyncPlanner.plan(writes, tombstones)) {
-                when (op) {
-                    is VaultSyncPlanner.Op.Write -> when (op.kind) {
-                        VaultSyncPlanner.Kind.NOTE -> onNoteCreated(op.localId)
-                        VaultSyncPlanner.Kind.MEMORY -> onMemoryUpserted(op.localId)
-                        VaultSyncPlanner.Kind.SKILL -> onSkillUpserted(op.localId)
-                        VaultSyncPlanner.Kind.TRANSCRIPT -> onTurnRecorded(op.localId)
-                        VaultSyncPlanner.Kind.ENVOBS -> onEnvFactRecorded(op.localId)
+                // One failed op never aborts the rest: a write that throws
+                // stays unsynced for the next drain, a tombstone that throws
+                // stays queued (deleteByVaultRecordId runs only on success).
+                try {
+                    when (op) {
+                        is VaultSyncPlanner.Op.Write -> when (op.kind) {
+                            VaultSyncPlanner.Kind.NOTE -> onNoteCreated(op.localId)
+                            VaultSyncPlanner.Kind.MEMORY -> onMemoryUpserted(op.localId)
+                            VaultSyncPlanner.Kind.SKILL -> onSkillUpserted(op.localId)
+                            VaultSyncPlanner.Kind.TRANSCRIPT -> onTurnRecorded(op.localId)
+                            VaultSyncPlanner.Kind.ENVOBS -> onEnvFactRecorded(op.localId)
+                        }
+                        is VaultSyncPlanner.Op.Tombstone -> {
+                            writer.tombstone(op.vaultRecordId, op.deletedAtIso)
+                            tombstoneDao.deleteByVaultRecordId(op.vaultRecordId)
+                        }
                     }
-                    is VaultSyncPlanner.Op.Tombstone -> {
-                        writer.tombstone(op.vaultRecordId, op.deletedAtIso)
-                        tombstoneDao.deleteByVaultRecordId(op.vaultRecordId)
-                    }
+                } catch (e: Exception) {
+                    Logger.w("VaultMirror.drain op non-fatal, retried next unlock: ${e.message}")
                 }
             }
         } catch (e: Exception) {
