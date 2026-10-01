@@ -87,6 +87,32 @@ with the mission's capability/memory/vision/audio/environment-learning scope.
 - **P6 — Evidence + docs.** Matrix runs, acceptance doc 119+, README/ARCHITECTURE/STATUS corrections,
   upgrade/rollback steps preserving vault data.
 
+## Registered mission directives (2026-10-01, user)
+
+Two standing product directives from the founder, recorded verbatim-intent; every phase below
+must be checked against them:
+
+1. **"All AI models should universally use the harness, audiocpp, and the memory as source of
+   truth."** Every model, on every host, executes through the one harness (P2 ABI v2 on Android,
+   harness bridge on desktop), speaks/listens through the one audiocpp speech plane, and treats
+   the shared vault memory as its single source of truth: previous context is READ from it, and
+   every current conversation turn is WRITTEN into it (P1-D transcript lane + harness memory
+   envelope from P1-E). No host keeps a private memory plane outside the vault.
+2. **"UnoOne should work beyond the drive: access the desktop or mobile apps with the
+   permission of the user."** The agent must be able to act on the host itself — desktop files,
+   desktop apps, and phone apps — never silently: every scope is an explicit, user-visible,
+   revocable grant, recorded and audited like every other tool call, through the same
+   SafetyGuard/permission/verification pipeline. Android already has app control via the
+   user-granted AccessibilityService; the open work is the desktop host plane (P7).
+
+- **P7 — Beyond-the-drive host access (user-granted).** Desktop agent lane grows from the fixed
+  workspace root to user-granted host scopes: an explicit in-UI grant flow (pick folders /
+  whole-desktop toggle), persisted allowlist, revocation, and audit-ledger entries on every
+  access; then a desktop automation plane (window enumeration + input) for driving host apps,
+  mirroring the Android accessibility tools under the same permission model. Blocked classes
+  (`shell_execute`, `file_delete_system`, registry, raw sockets) stay blocked. Each increment
+  ships with focused tests; host-UI acceptance on real desktop apps is a human gate.
+
 ## Host coverage (asked 2026-10-01: "also for google phones")
 
 - **Google Pixel (and every Android handset): already covered.** UnoOneAgent
@@ -117,6 +143,7 @@ Everything else is built and tested in-repo with the gates above marked **unveri
 | P2-A Android auto-launch | CLOSED | `4940f99` | policy tests 3/3 + full android gate; re-baseline `76f6dd1` |
 | P2 one harness: ABI v2 registration surface | CLOSED | (this commit) | ffi 15 tests (7 v2 registration incl. C-vtable L1 tool loop + hash-chained ledger, 5 ABI-manifest drift gates) + workspace 79 green + clippy clean; on-device Kotlin/JNI loop = device gate |
 | P1-E vault honesty hardening (source-review findings) | CLOSED | (this commit) | all four findings fixed: tombstoned-Skill/memory/turn deletion on hydrate (propagateTombstone via getByVaultRecordId), stable vault record ids (PendingWriteDao mint-persist-reuse) + queued tombstone retry, Power harness-memory envelope → Android (MESSAGE/PREFERENCE/CONTEXT_SNAPSHOT → harness_memory, internal index skipped), honest `boundedArguments` (actual args captured within 400-char bound, else false), keep-local hydration (failed push never clobbered) + drain per-op isolation; mirror 23 / hydrator 18 / recorder 13 tests green; CI e2e timeout drift fix (45s→150s, runner perf measured 1.1m→2.9m) |
+| P6 docs accuracy pass 1 (stale-docs sweep, finding #8) + APK manifest tracking | CLOSED | (this commit) | drive README's APK hash-compare instruction made real (New-UnoOneManifestV2.ps1 emits `mobile.apk` kind `MOBILE_APP`; usb-manifest gains the kind + kind-check, 16/16 tests, unknown-field tolerant for staged binaries — live re-verified on the drive, `--verify-only` 0 failures); dead `verify-mobile-untouched.{sh,py,ps1}` deleted (pinned a nonexistent tag, always exit 2) and `docs/MOBILE_GOLDEN_BASELINE.md` rewritten to the pointer mechanism; README: Physical-Pocket-AI row re-stated for the 2026-10-01 drive, CI gate state rewritten to the standing job set, Mobile Protection section points at `MOBILE_PROTECTED_TREE` = `bd97bee7…`, usb-manifest count 6→16, prohibition line un-tagged; ARCHITECTURE.md 26→42 tools (sync-checked by CI); STATUS.md demoted to a marked historical snapshot with the correct repo URL; both 2026-10-01 mission directives registered below (harness/audiocpp/memory universality; beyond-the-drive user-granted host access) |
 
 Physical gates still **unverified** (hardware): on-phone speech/blind-aid, LiteRT vision
 qualification, audiocpp device acceptance, phone↔drive↔Power round-trip (notes, memories,

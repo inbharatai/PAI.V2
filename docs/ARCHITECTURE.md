@@ -5,9 +5,10 @@ This is the consolidated architecture index. For the deep, module-by-module walk
 [`../PLAN-Gemma4-Migration.md`](../PLAN-Gemma4-Migration.md) (historical). Current (and only)
 runtime brain: **Gemma 4 E2B via LiteRT-LM**, device-verified on the primary Xiaomi 14 (Android 15 /
 API 35) on 2026-07-14 — loads on the CPU backend (GPU delegate fails on SM8650, safe CPU fallback),
-18/18 canonical tool-match. Legacy Gemma 3n and `gemma-local` paths are purged and kept out by
+18/18 canonical tool-match at that date. Legacy Gemma 3n and `gemma-local` paths are purged and kept out by
 `scripts/ci/check_repo_invariants.py`. Every model-proposed tool call is checked against a
-**CanonicalToolRegistry** of 26 tools (unknown tools rejected, required args validated) before
+**CanonicalToolRegistry** of 42 tools (unknown tools rejected, required args validated, byte-synced
+with `packages/tool-contracts` by `scripts/check_tool_contract_sync.py` in CI) before
 safety/execution.
 
 **Agentic loop + judge + eval (implemented; control JVM-tested; inference device-time).** After an

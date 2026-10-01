@@ -1,10 +1,19 @@
 # UnoOne Pocket AI — Status
 
-**Updated:** 2026-07-23  
-**Repository:** https://github.com/inbharatai/PAI  
-**Baseline tag:** `v0.4.0-alpha-v2-baseline`  
-**USB vault:** `D:\UNOONE\` (460 GB SanDisk)  
-**Release state:** **Alpha — All 12 phases code-complete, pendrive minimal-dependency 6-phase upgrade merged**
+> **This file is a dated historical snapshot (2026-07-23) and is not the
+> current status.** For the current status see:
+> - `README.md` → "Current Status" table and "CI gate state"
+> - `docs/UNIVERSAL_CAPABILITY_PLAN_2026-10-01.md` → phase status log (the
+>   implementation log every phase commit updates)
+>
+> Kept unedited below for the record.
+
+---
+
+**Snapshot date:** 2026-07-23
+**Repository:** https://github.com/inbharatai/PAI.V2
+**USB vault:** `D:\UNOONE\` (460 GB SanDisk)
+**Release state at snapshot:** Alpha — All 12 phases code-complete, pendrive minimal-dependency 6-phase upgrade merged
 
 ## Two-Platform Architecture
 

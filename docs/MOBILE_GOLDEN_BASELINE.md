@@ -1,67 +1,54 @@
-# UnoOne Mobile Golden Baseline — Protection and Status
+# UnoOne Mobile Protection — Policy and Status
 
-**Updated:** 2026-07-29
-**Tag:** `mobile-golden-baseline-v2`
-**Commit:** `8b66e3e0fa11d462e1676db6ea936ef00f745ada`
-**Protected path:** `android-app/UnoOneAgent/` (344 files)
-**Status:** FROZEN after the reviewed Pocket AI USB auto-open integration
+**Updated:** 2026-10-01
+**Protected path:** `android-app/UnoOneAgent/`
+**Mechanism:** committed tree-hash pointer + per-file blob hashes
 
-## Protection
+## How protection works today
 
-Two verification scripts exist:
+The historical `mobile-golden-baseline-v2` **tag** mechanism is retired — the
+tag no longer exists and the `verify-mobile-untouched.*` scripts that depended
+on it were deleted on 2026-10-01 (they exited 2 unconditionally once the tag
+was gone). Protection now rests on two committed files:
 
-- `scripts/verify-mobile-untouched.sh` — bash script for CI/terminal
-- `scripts/verify-mobile-untouched.py` — Python script for environments with Python 3
-- `scripts/verify-mobile-untouched.ps1` — PowerShell script for Windows
+- `scripts/MOBILE_PROTECTED_TREE` — the expected value of
+  `git rev-parse HEAD:android-app/UnoOneAgent` (a git **tree** hash: it pins
+  the committed state, not the working tree).
+- `scripts/MOBILE_GOLDEN_HASHES.txt` — the per-file git blob hashes of the
+  protected tree, so a re-baseline review can be audited file-by-file.
 
-All three compare the current state of `android-app/UnoOneAgent/` against the
-`mobile-golden-baseline-v2` tag. CI also verifies every protected file against
-`scripts/MOBILE_GOLDEN_HASHES.txt`.
+CI (`.github/workflows/mobile-protection.yml`, plus the mobile-protection job
+in `desktop-ci.yml`) fails any push where the actual tree hash differs from
+the pointer. Because the pointer is a committed file, re-baselining is an
+ordinary reviewable commit — never a workflow edit or a tag move.
 
-### CI Integration
+## Re-baselining (the ONLY way to change Android code)
 
-Add to any CI pipeline:
+1. Commit the Android changes first.
+2. Run `bash scripts/regen-mobile-golden-hashes.sh` — **after** the commit:
+   the script pins `HEAD:android-app/UnoOneAgent`, so running it before
+   committing baselines the OLD tree and CI fails with expected ≠ actual.
+3. Commit the updated `scripts/MOBILE_PROTECTED_TREE` +
+   `scripts/MOBILE_GOLDEN_HASHES.txt` together with (or immediately after)
+   the change commit.
 
-```yaml
-- name: Verify mobile untouched
-  run: bash scripts/verify-mobile-untouched.sh
-```
-
-Or:
-
-```yaml
-- name: Verify mobile untouched
-  run: python3 scripts/verify-mobile-untouched.py
-```
-
-### Pre-commit Hook (optional)
+Local check (same comparison CI makes):
 
 ```bash
-# .git/hooks/pre-commit
-bash scripts/verify-mobile-untouched.sh || exit 1
+test "$(cat scripts/MOBILE_PROTECTED_TREE)" = "$(git rev-parse HEAD:android-app/UnoOneAgent)" && echo PASS
 ```
 
 ## Pocket AI integration
 
-The existing UnoOne Android app now handles the physical prototype Pocket AI
-USB attachment. VID/PID is only an attachment hint; product identity still
-requires schema-v2 `manifest.json`, matching `VERSION`, and matching
+The UnoOne Android app handles the physical Pocket AI USB attachment.
+VID/PID is only an attachment hint; product identity still requires the
+schema-v2 `manifest.json`, matching `VERSION`, and matching
 `VAULT/identity/vault.id` through Android's Storage Access Framework.
-
-## Current Android Status
-
-- **Last verified commit:** `8b66e3e0fa11d462e1676db6ea936ef00f745ada`
-- **Build status:** app and vault module compile
-- **Tests:** vault unit tests and Android lint pass
-- **Changes since baseline:** ZERO (verified by `git diff`)
 
 ## What NOT to do
 
-- Do not edit any Kotlin file in android-app/
-- Do not modify Android Gradle files
-- Do not bypass manifest and vault identity validation
-- Do not refactor Android modules
-- Do not copy desktop code into Android
-- Do not change Android dependencies
-- Do not update Android documentation in a way that changes behavior
-- Do not apply formatting-only changes to Android code
+- Do not commit Android changes without re-baselining in the same push.
+- Do not bypass manifest and vault identity validation.
+- Do not hand-edit `MOBILE_PROTECTED_TREE` (regenerate it; the value must be
+  the real tree hash).
+- Do not reintroduce tag-based or hardcoded-commit pin protection.

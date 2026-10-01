@@ -118,11 +118,11 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 
 | Component | Status |
 |-----------|--------|
-| Physical Pocket AI | **INTEGRITY-VERIFIED PROTOTYPE** — integrity-verified 2026-09-15 (source staged from main `534cf6a`): Power `778C74A7…`, Dock `F60BC96D…`, Starter `AA843F75…`; strict 558/558 declared assets (size + SHA-256: 3 apps, 158 runtimes, 2 desktop models, 381 voice assets, 12 speech assets, 2 mobile models); starter `--verify-only` exit 0; manifest schema `2`, `pai_version 0.5.0-alpha`. Live acceptance 2026-09-14/15 (defects #6–#43 fixed + re-verified on the drive): `docs/verification/2026-09-14/` + `docs/verification/2026-09-15/` (docs 105–116) |
+| Physical Pocket AI | **INTEGRITY-VERIFIED PROTOTYPE — re-staged 2026-10-01** (Windows apps staged from the `c861bba` CI bundle: Power/Dock/Starter hash-verified; Android APK staged from the P1-E build (tree `8d0c2d0`, android-identical to main `37110f8`); `SOURCE/PAI.V2` = `git archive` of main `37110f8`): strict manifest sweep passes (`Start UnoOne.exe --verify-only` exit 0, 0 failures), manifest schema `2`, `pai_version 0.5.0-alpha`; live boot + baseline inference re-verified on the drive 2026-10-01 (starter → Power with correct drive-root args; llama-server loaded Gemma-12B in 42 s and answered a live prompt). Manifest now also records the Android APK (`mobile.apk`, kind `MOBILE_APP`) for tamper-evidence. Historical acceptance 2026-09-14/15: `docs/verification/2026-09-14/` + `docs/verification/2026-09-15/` (docs 105–116) |
 | Desktop frontend embedding | **VERIFIED** — root cause of the historic "localhost refused to connect" drive is fixed (`tauri/custom-protocol` default feature; without it `generate_context!` embeds zero assets). Byte-level gate passes in CI and on the staged drive binary |
 | Mobile app (Android) | V2 agent pipeline + Pocket AI USB auto-open; M1-M3 truthful fixes (USB detection reasons, Room TTL/clear-on-detach cache, unused permission removed). Compiles, lints, tests, and `assembleDebug` passes; **cross-platform vault contract proven bidirectionally in CI** (Kotlin↔Rust Argon2id + AES-GCM record layer AND XChaCha20 master-key wrap — `packages/vault-core/test-vectors/`, `VaultCryptoCrossPlatformTest`). Physical phone test pending |
 | Desktop frontend (React) | BUILDS — Vite build passes, oxlint clean, real Tauri API calls, no mock data |
-| Desktop backend (Rust) | BUILDS AND TESTS — fmt/check/test/clippy clean on **both windows-latest and macos-latest**; 70/70+ vault-core (Wave-1 regressions + cross-platform vectors), 20/20 recording-policy, 16/16 text-util, 6/6 usb-manifest, 9/9 document-migration, 13/13 browser-policy. The deferred dead-code sweep landed: `wait_for_exit()`, `get_backend()`, the never-read config/model_info fields and `is_confirmation_required()` are gone with clippy `-D warnings` still clean |
+| Desktop backend (Rust) | BUILDS AND TESTS — fmt/check/test/clippy clean on **both windows-latest and macos-latest**; 70/70+ vault-core (Wave-1 regressions + cross-platform vectors), 20/20 recording-policy, 16/16 text-util, 16/16 usb-manifest, 9/9 document-migration, 13/13 browser-policy. The deferred dead-code sweep landed: `wait_for_exit()`, `get_backend()`, the never-read config/model_info fields and `is_confirmation_required()` are gone with clippy `-D warnings` still clean |
 | Windows Dock / Starter | **INTEGRITY-VERIFIED ON DRIVE** — manifest-declared, hash-verified, native `--verify-only` exits 0; transactional staging with automatic rollback proven live |
 | Vault encryption (`packages/vault-core`) | IMPLEMENTED AND CORRECTNESS-HARDENED — Argon2id (256 MiB / t=3 / p=4) + AES-256-GCM for new records (legacy XChaCha20-Poly1305 stays readable, identified by nonce length) + HKDF-SHA-256 + BIP-39 recovery + write-ahead journal; transactional first-use setup refuses re-initialisation and preserves packaged `vault.id` bytes. Per-vault random salts on both the password and recovery paths. The KDF parameters are pinned as a cross-platform contract with the Kotlin `encrypted-vault` package (`SPEC_ARGON2_*` plus a `const` assertion that makes drift a compile error in release builds), because the test profile deliberately uses reduced parameters and would not catch a change that broke Android↔Windows unlock. **Wave 1** additionally fixed four release blockers: header slot selection now picks the newest committed generation (a password change written to the inactive slot used to be silently discarded on restart), record metadata is authenticated and re-verified on every read (privacy level, tombstone, type, revision and timestamps were previously editable on disk while content still decrypted), record writes are wrapped in real journal transactions with fsync-and-verify before promotion, and record IDs must be canonical UUID v4 before touching a path |
 | Model inference | Bundled llama.cpp only; direct runtime test verified (real answer, 127.0.0.1-only, clean stop) — see `docs/verification/2026-07-30/59_DIRECT_GEMMA.md` |
@@ -139,27 +139,31 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 | Security (vault writes) | IMPLEMENTED — vault_write_record Tauri command writes encrypted records; recording and document content encrypted end-to-end |
 | macOS | **NOT BUILT, NOT TESTED** |
 
-See `docs/verification/2026-07-30/` for the latest timestamped verification
-package (53 recovery … 73 executive report, incl. `72_RELEASE_MATRIX.csv`).
+See `docs/verification/2026-09-15/` + `docs/verification/2026-09-16/` for the latest timestamped verification
+packages (docs 105–118). `docs/verification/2026-07-30/` (53 recovery … 73 executive report,
+incl. `72_RELEASE_MATRIX.csv`) is retained as a dated historical snapshot.
 Older evidence documents are retained as dated historical snapshots and must
 be read with their dates; several of their claims were re-verified or
 corrected on 2026-07-30.
 
 ### CI gate state
 
-`main` was green across all four gates as of 2026-09-15 (`ed5aefc`, PRs
-#43–#48 all checks green before merge): Desktop CI, Mobile Protection,
-Android CI (`invariants=0 e2e=0 lint=0 tests=0 apk=0`),
-and Pocket AI Windows Bundle (incl. the recording-retention and frontend
-embedding gates). The speech-hardening branch extends the lanes (these are
-workflow changes; each lane's own run is the evidence, not this paragraph):
-Desktop CI gains an **ubuntu-latest** Rust lane (Linux was previously
-untested), a **speech language-table sync** gate
-(`scripts/check_speech_language_sync.py` — the Kotlin `VoiceLanguage` alias
-table must stay byte-identical to `packages/speech-contracts/languages.v1.json`),
-a **vendor ctest + ABI symbol** job against `vendor/Inbharat-audiocpp`
-(including `ibaudio_runtime_get_audio_cpp_status` in both ABI manifests), and
-the golden-hash mobile-protection pointer is re-baselined in the same branch.
+`main` is kept green across all gates; the standing set (each lane's own run is the
+evidence, not this paragraph):
+
+- **Desktop CI** — mobile protection, frontend build (Vite), speech
+  language-table sync (`scripts/check_speech_language_sync.py`), tool-contract
+  sync (`scripts/check_tool_contract_sync.py`), InBharat Audio Linux
+  ctest + ABI invariant job, Rust fmt/check/test/clippy on
+  **windows-latest, ubuntu-latest, and macos-latest**, secret scan, artifact
+  scan.
+- **Mobile Protection** (own workflow, runs on every push) — the committed
+  tree-hash pointer (`scripts/MOBILE_PROTECTED_TREE`) must equal
+  `git rev-parse HEAD:android-app/UnoOneAgent`.
+- **Android CI** — invariants, e2e Playwright suite, lint, unit tests, debug
+  APK assembly, on the `android-app/` and contract paths.
+- **Pocket AI Windows Bundle** — builds Power/Dock/Starter together, gates
+  frontend embedding and recording retention, publishes SHA-256 sums.
 
 The two historically red gates were fixed by design, not by weakening:
 
@@ -394,15 +398,15 @@ PAI/
 │   └── starter/windows/          # on-drive fallback launcher
 ├── packages/usb-manifest/        # shared strict schema-v2 validator
 ├── scripts/
-│   ├── verify-mobile-untouched.sh  # CI protection: zero changes to Android
-│   ├── verify-mobile-untouched.py  # Python equivalent
-│   └── verify-mobile-untouched.ps1 # PowerShell equivalent
+│   ├── regen-mobile-golden-hashes.sh  # re-baseline the Android protected tree
+│   ├── MOBILE_PROTECTED_TREE          # expected tree hash (CI compares HEAD:android-app/UnoOneAgent)
+│   └── MOBILE_GOLDEN_HASHES.txt        # per-file blob hashes of the protected tree
 ├── docs/
 │   ├── EVIDENCE_AUDIT.md         # Honest status of every feature
 │   └── MOBILE_GOLDEN_BASELINE.md  # Frozen mobile baseline documentation
 ├── .github/workflows/
 │   ├── android-ci.yml
-│   ├── desktop-ci.yml            # Rust CI: fmt, check, test, clippy (Win+macOS)
+│   ├── desktop-ci.yml            # Rust CI: fmt, check, test, clippy (Win+Linux+macOS)
 │   └── distribution-ci.yml
 ├── vendor/                       # Vendored InBharat universal planes (self-contained)
 │   ├── inbharat-harness/         # Universal Rust control/text plane (nested workspace)
@@ -520,7 +524,7 @@ cd android-app/UnoOneAgent && ./gradlew test
 
 # Desktop CI (GitHub Actions)
 # .github/workflows/desktop-ci.yml
-# - Mobile protection check (verify Android untouched)
+# - Mobile protection check (committed tree-hash pointer)
 # - Frontend build (Vite)
 # - Rust check/test/clippy on Windows + macOS
 # - Secret scan
@@ -608,18 +612,23 @@ Detailed evidence and honest boundaries are recorded in [Connected-device valida
 
 ## Mobile Protection
 
-The Android app is protected by CI golden-baseline and exact-file hash
-verification. The committed tree-hash pointer (`scripts/MOBILE_PROTECTED_TREE`)
-currently holds `a307716a9cf6535bad8d71133d2b762c6a908c02` (re-baselined with
-each reviewed Android change — e.g. the 48-alias voice-language mirror,
-2026-09-15). The original v1 tag remains historical and is not moved.
+The Android app is protected by a committed tree-hash pointer plus exact-file
+hash verification. `scripts/MOBILE_PROTECTED_TREE` holds the expected tree hash
+of `android-app/UnoOneAgent` (currently `bd97bee7…`, re-baselined with each
+reviewed Android change), and CI fails any push where
+`git rev-parse HEAD:android-app/UnoOneAgent` differs from the pointer.
+`scripts/MOBILE_GOLDEN_HASHES.txt` carries the per-file blob hashes so the
+protected tree can be audited file-by-file. Re-baselining is an ordinary
+reviewable commit via `scripts/regen-mobile-golden-hashes.sh` — run it AFTER
+committing the Android changes (the script pins the committed tree, not the
+working tree), then commit the two baseline files together.
 
 ```bash
-# Local check
-bash scripts/verify-mobile-untouched.sh
+# Local check (same comparison CI makes)
+test "$(cat scripts/MOBILE_PROTECTED_TREE)" = "$(git rev-parse HEAD:android-app/UnoOneAgent)" && echo PASS
 
 # CI check
-# .github/workflows/desktop-ci.yml — mobile-protection job
+# .github/workflows/mobile-protection.yml (and the mobile-protection job in desktop-ci.yml)
 ```
 
 See `docs/MOBILE_GOLDEN_BASELINE.md` for the full protection policy.
@@ -655,7 +664,7 @@ The installer PWA is implemented but intentionally keeps downloads locked when a
 - ❌ No weakening SafetyGuard or PageAgent
 - ❌ Host disk is not canonical — USB is the single source of truth
 - ❌ No mock data, no placeholder success states, no fake functionality
-- ❌ No Android changes after `mobile-golden-baseline-v2` without a reviewed baseline update
+- ❌ No Android changes without a reviewed golden-baseline re-baseline (`scripts/MOBILE_PROTECTED_TREE` + hashes, same push)
 - ❌ No hardcoded drive letters — discover USB via removable-drive scan + manifest validation
 - ❌ No claiming features work without test evidence (command, exit code, OS, hardware, date, commit)
 - ❌ No external runtimes — no Playwright, no Tesseract, no separate Gemma download
