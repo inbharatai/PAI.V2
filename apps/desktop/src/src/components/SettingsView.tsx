@@ -19,16 +19,26 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
   });
   const [appVersion, setAppVersion] = useState('v0.1.0');
   const [error, setError] = useState('');
+  // P7 — user-granted agent workspace root (full-access lane).
+  const [workspace, setWorkspace] = useState<{
+    effective_root: string;
+    user_granted: string | null;
+    default_root: string;
+  } | null>(null);
+  const [workspaceInput, setWorkspaceInput] = useState('');
+  const [workspaceMsg, setWorkspaceMsg] = useState('');
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
 
   // Load settings and version from backend on mount
   useEffect(() => {
     async function loadSettings() {
       try {
-        const [secLevel, vaultInfo, backendSettings, version] = await Promise.all([
+        const [secLevel, vaultInfo, backendSettings, version, workspaceInfo] = await Promise.all([
           tauriApi.getSecurityLevel(),
           tauriApi.detectVault(),
           tauriApi.getSettings(vaultRoot).catch(() => null),
           tauriApi.getVersion().catch(() => null),
+          tauriApi.getAgentWorkspaceInfo().catch(() => null),
         ]);
         setSettings(prev => ({
           ...prev,
@@ -40,12 +50,37 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
           } : {}),
         }));
         if (version) setAppVersion(version);
+        if (workspaceInfo) {
+          setWorkspace(workspaceInfo);
+          setWorkspaceInput(workspaceInfo.user_granted ?? '');
+        }
       } catch (e) {
         setError(`Failed to load settings: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
     loadSettings();
   }, [vaultRoot]);
+
+  // Grant a new workspace root (validated + audited by the backend) or
+  // revoke the grant and return to the default.
+  const applyWorkspace = async (root: string | null) => {
+    setWorkspaceBusy(true);
+    setWorkspaceMsg('');
+    try {
+      const info = await tauriApi.setAgentWorkspaceRoot(root);
+      setWorkspace(info);
+      setWorkspaceInput(info.user_granted ?? '');
+      setWorkspaceMsg(
+        root === null
+          ? 'Revoked — the agent builds in its default folder again.'
+          : 'Granted — the agent now builds and stores files in this folder.',
+      );
+    } catch (e) {
+      setWorkspaceMsg(`Rejected: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
 
   const handleChange = (key: string, value: string | number | boolean) => {
     setSettings(prev => ({ ...prev, [key]: value }));
@@ -209,6 +244,52 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
                     {settings.temperature.toFixed(1)}
                   </span>
                 </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Agent Workspace (P7 — user-granted) */}
+          <div className="settings-section">
+            <div className="settings-section-header">Agent Workspace</div>
+            <div className="settings-section-body">
+              <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '8px' }}>
+                <div>
+                  <div className="settings-row-label">Build Folder</div>
+                  <div className="settings-row-desc">
+                    Where the agent builds and stores its files in full-access mode. Grant a host folder
+                    (e.g. the Desktop) to have builds stored there; the grant is this-computer-only,
+                    recorded in the vault audit trail, and revocable at any time. The agent can never be
+                    granted a folder inside the encrypted Pocket AI drive.
+                  </div>
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                  Effective: {workspace ? workspace.effective_root : '…'}
+                  {workspace?.user_granted && ' (user-granted)'}
+                </div>
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <input
+                    type="text"
+                    placeholder={workspace?.default_root ? `e.g. C:\\Users\\reetu\\Desktop` : ''}
+                    value={workspaceInput}
+                    onChange={e => { setWorkspaceInput(e.target.value); setWorkspaceMsg(''); }}
+                    style={{ width: '340px' }}
+                  />
+                  <button
+                    disabled={workspaceBusy || !workspaceInput.trim()}
+                    onClick={() => void applyWorkspace(workspaceInput.trim())}
+                  >
+                    Grant
+                  </button>
+                  <button
+                    disabled={workspaceBusy || !workspace?.user_granted}
+                    onClick={() => void applyWorkspace(null)}
+                  >
+                    Revoke
+                  </button>
+                </div>
+                {workspaceMsg && (
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{workspaceMsg}</div>
+                )}
               </div>
             </div>
           </div>

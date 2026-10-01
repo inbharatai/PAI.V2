@@ -249,6 +249,9 @@ fn main() {
             harness_bridge::harness_chat,
             harness_bridge::harness_stop_run,
             harness_bridge::get_workspace_root,
+            // P7 (2026-10-01): user-granted agent workspace root (Settings UI).
+            harness_bridge::get_agent_workspace_info,
+            harness_bridge::set_agent_workspace_root,
             bharat_audio::get_bharat_audio_status,
         ])
         .setup(|app| {

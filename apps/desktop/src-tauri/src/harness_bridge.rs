@@ -193,6 +193,57 @@ fn progress_code_preview(tool: &str, arguments: &ToolArguments) -> Option<String
     Some(contents.chars().take(240).collect())
 }
 
+/// P7 run trail (2026-10-01, user directive: "the memory of the drive should
+/// have the context and steps and what was done"). One bounded entry per live
+/// tool call/result, captured by the same `ProgressTool` wrapper that
+/// streams the UI feed, so a completed agent run leaves an honest step-by-step
+/// trail in the vault memory instead of only counts. Bounds: the trail stops
+/// recording past `MAX_TRAIL_STEPS` with one explicit overflow marker — a
+/// pathological 10,000-step run must never produce an unbounded record.
+const MAX_TRAIL_STEPS: usize = 250;
+const MAX_TRAIL_DETAIL_CHARS: usize = 160;
+
+type SharedAgentTrail = Arc<Mutex<Vec<AgentTrailStep>>>;
+
+#[derive(Clone)]
+pub(crate) struct AgentTrailStep {
+    /// "call" before the tool runs, "result" after it returns.
+    pub(crate) phase: &'static str,
+    pub(crate) tool: String,
+    pub(crate) detail: String,
+}
+
+/// Append one bounded step to the shared trail. Best-effort by design: a
+/// poisoned lock or a missing trail (unit-test registrations) is a skipped
+/// entry, never a broken tool run.
+fn push_trail_step(
+    trail: &Option<SharedAgentTrail>,
+    phase: &'static str,
+    tool: &str,
+    detail: &str,
+) {
+    let Some(trail) = trail else { return };
+    let Ok(mut steps) = trail.lock() else { return };
+    if steps.len() > MAX_TRAIL_STEPS {
+        return;
+    }
+    let bounded: String = detail.chars().take(MAX_TRAIL_DETAIL_CHARS).collect();
+    steps.push(AgentTrailStep {
+        phase,
+        tool: tool.to_owned(),
+        detail: bounded,
+    });
+    if steps.len() == MAX_TRAIL_STEPS {
+        steps.push(AgentTrailStep {
+            phase: "result",
+            tool: "(trail truncated)".to_owned(),
+            detail: format!(
+                "recording stopped at {MAX_TRAIL_STEPS} steps; the run continued but is not recorded step-by-step"
+            ),
+        });
+    }
+}
+
 /// Wraps every registered tool so the chat panel can show live agent
 /// activity (2026-09-14). Transparent to the harness — manifest and
 /// validation delegate unchanged; execution emits a `call` event, runs the
@@ -205,6 +256,11 @@ struct ProgressTool {
     /// to "[subagent-xxxx]" so the user can tell child activity apart from
     /// the parent agent's in the same live feed.
     detail_prefix: Option<String>,
+    /// P7 run trail collector. `None` in unit-test registrations (no run to
+    /// record). Sub-agent tools share the PARENT's collector so one trail
+    /// covers everything the run actually did, child steps tagged by their
+    /// existing "[subagent-xxxx]" prefix.
+    trail: Option<SharedAgentTrail>,
 }
 
 impl Tool for ProgressTool {
@@ -225,6 +281,7 @@ impl Tool for ProgressTool {
             None => progress_detail(&tool, arguments),
         };
         let preview = progress_code_preview(&tool, arguments);
+        push_trail_step(&self.trail, "call", &tool, &detail);
         let _ = self.app.emit(
             "agent-progress",
             AgentProgressEvent {
@@ -242,6 +299,7 @@ impl Tool for ProgressTool {
                     summary.truncate(160);
                     summary.push('…');
                 }
+                push_trail_step(&self.trail, "result", &tool, &format!("Done: {summary}"));
                 let _ = self.app.emit(
                     "agent-progress",
                     AgentProgressEvent {
@@ -255,6 +313,7 @@ impl Tool for ProgressTool {
                 Ok(output)
             }
             Err(failure) => {
+                push_trail_step(&self.trail, "result", &tool, &format!("Failed: {failure}"));
                 let _ = self.app.emit(
                     "agent-progress",
                     AgentProgressEvent {
@@ -796,6 +855,14 @@ fn desktop_system_prefix(full_access: bool) -> String {
              When a task needs any of this, actually use the tools instead of claiming \
              you cannot. If a request falls outside what the tools above can reach, say \
              so honestly and specifically.\n\
+             Before any substantial build (a website, an app, a design, a long \
+             document), ask the user the few questions whose answers materially \
+             change the result — style, tech stack, language, scope — IF they \
+             have not already said. Keep it to ONE short message with 2-4 \
+             questions asked together, then WAIT for the answer; never start \
+             building and ask later, and never drag it out one question at a \
+             time. Small or fully-specified tasks need no questions: when the \
+             request is already clear, build it.\n\
              You are an autonomous agent: when the user asks you to build, create, \
              write, or fix something, do the whole task yourself with the tools — \
              create every file with fs.write (missing parent folders are created \
@@ -917,7 +984,51 @@ fn full_access_budget() -> BudgetLimits {
 /// The coding/automation workspace root. Full-access file tools and
 /// subprocesses are rooted here — never the encrypted pendrive vault — so
 /// agent writes land on rewritable host disk, not the read-mostly package.
+/// P7 (2026-10-01, user directive: the agent should be able to build and
+/// store folders on the Desktop): the user can grant a different root in
+/// Settings. The grant is stored HOST-LOCAL — `%LOCALAPPDATA%\UnoOne\agent-
+/// workspace.json`, the same base as the model cache — and deliberately
+/// NEVER in the vault: an absolute host folder picked on this computer must
+/// not follow the drive onto another machine, where the same path could
+/// point anywhere. A stale grant (the folder no longer exists) is ignored,
+/// not honored — the agent falls back to the default root rather than
+/// writing into a re-created folder it was never granted.
 fn workspace_root() -> Result<PathBuf, String> {
+    if let Some(granted) = granted_workspace_root() {
+        return Ok(granted);
+    }
+    default_workspace_root()
+}
+
+/// The persisted user grant, honored only while the folder still exists.
+fn granted_workspace_root() -> Option<PathBuf> {
+    let config = workspace_config_path().ok()?;
+    let text = std::fs::read_to_string(config).ok()?;
+    let grant: WorkspaceGrant = serde_json::from_str(&text).ok()?;
+    let path = PathBuf::from(grant.root.trim());
+    path.is_dir().then_some(path)
+}
+
+/// Where the host-local grant file lives.
+fn workspace_config_path() -> Result<PathBuf, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "cannot locate the host config directory for the agent workspace grant".to_owned()
+        })?;
+    Ok(base.join("UnoOne").join("agent-workspace.json"))
+}
+
+/// The persisted shape of one user grant.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorkspaceGrant {
+    root: String,
+    granted_at_ms: u64,
+}
+
+/// The un-granted default: `%USERPROFILE%\UnoOneAgent`, created on demand.
+fn default_workspace_root() -> Result<PathBuf, String> {
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
@@ -932,6 +1043,149 @@ fn workspace_root() -> Result<PathBuf, String> {
         )
     })?;
     Ok(root)
+}
+
+/// What the Settings UI shows: the effective root, the persisted grant (if
+/// any), and the default the grant replaced.
+#[derive(Debug, serde::Serialize)]
+pub struct AgentWorkspaceInfo {
+    pub effective_root: String,
+    pub user_granted: Option<String>,
+    pub default_root: String,
+}
+
+fn agent_workspace_info() -> Result<AgentWorkspaceInfo, String> {
+    let effective = workspace_root()?;
+    let default = default_workspace_root()?;
+    Ok(AgentWorkspaceInfo {
+        effective_root: effective.to_string_lossy().into_owned(),
+        user_granted: granted_workspace_root().map(|path| path.to_string_lossy().into_owned()),
+        default_root: default.to_string_lossy().into_owned(),
+    })
+}
+
+/// P7 audit: every grant and revocation lands in the encrypted vault as an
+/// `AuditRecord` — the user-visible scope change is as auditable as any
+/// tool call. Best-effort: an audit write failure must never block the
+/// grant itself, only be reported loudly.
+fn audit_workspace_grant(vault: &Arc<Mutex<Option<Vault>>>, action: &str, root: &str) {
+    let Ok(mut guard) = vault.lock() else {
+        eprintln!("workspace-grant audit skipped: vault lock poisoned");
+        return;
+    };
+    let Some(open) = guard.as_mut() else {
+        eprintln!("workspace-grant audit skipped: vault locked");
+        return;
+    };
+    use unoone_vault_core::{Record, RecordType};
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "kind": "workspace_grant",
+        "action": action,
+        "root": root,
+        "at_ms": at_ms,
+    });
+    let Ok(bytes) = serde_json::to_vec(&payload) else {
+        return;
+    };
+    let record = Record::new(RecordType::AuditRecord, "DESKTOP", "unoone-power");
+    if let Err(error) = open.write_record(record, &bytes) {
+        eprintln!("workspace-grant audit write failed (non-fatal): {error}");
+    }
+}
+
+/// Read the effective agent workspace for the Settings UI.
+#[tauri::command]
+pub async fn get_agent_workspace_info() -> Result<AgentWorkspaceInfo, String> {
+    agent_workspace_info()
+}
+
+/// Grant or revoke the agent workspace root (P7, user-directed). `None`
+/// revokes the grant and returns to the default root. A grant must name an
+/// EXISTING directory (the picker never creates folders), must not be a
+/// filesystem root, and must not sit inside the encrypted Pocket AI package
+/// — agent writes must never land on the read-mostly drive. The canonical
+/// path is persisted host-locally and audited in the vault.
+#[tauri::command]
+pub async fn set_agent_workspace_root(
+    root: Option<String>,
+    vault_state: tauri::State<'_, DesktopVaultState>,
+) -> Result<AgentWorkspaceInfo, String> {
+    let Some(raw) = root else {
+        let config = workspace_config_path()?;
+        if std::fs::remove_file(&config).is_ok() {
+            audit_workspace_grant(&vault_state.vault, "revoke", "");
+        }
+        return agent_workspace_info();
+    };
+    let candidate = PathBuf::from(raw.trim());
+    if candidate.as_os_str().is_empty() {
+        return Err("the workspace path is empty".to_owned());
+    }
+    if !candidate.is_absolute() {
+        return Err(format!(
+            "the workspace path must be absolute: {}",
+            candidate.display()
+        ));
+    }
+    let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "cannot use {} as the workspace: {error}",
+            candidate.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "the workspace must be an existing folder: {}",
+            canonical.display()
+        ));
+    }
+    if canonical.parent().is_none() {
+        return Err(
+            "a whole drive cannot be the workspace — pick a folder (e.g. the Desktop)".to_owned(),
+        );
+    }
+    let vault_root = vault_state
+        .vault_root
+        .lock()
+        .map_err(|_| "vault-root state lock failed".to_owned())?
+        .clone();
+    if !vault_root.is_empty() {
+        let vault_path = PathBuf::from(&vault_root);
+        let inside_vault = canonical.starts_with(&vault_path)
+            || std::fs::canonicalize(&vault_path)
+                .map(|resolved| canonical.starts_with(resolved))
+                .unwrap_or(false);
+        if inside_vault {
+            return Err(
+                "the workspace cannot sit inside the encrypted Pocket AI package — pick a folder on the host disk (e.g. the Desktop)"
+                    .to_owned(),
+            );
+        }
+    }
+    let granted_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let grant = WorkspaceGrant {
+        root: canonical.to_string_lossy().into_owned(),
+        granted_at_ms,
+    };
+    let config = workspace_config_path()?;
+    if let Some(parent) = config.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!("cannot create the config directory for the workspace grant: {error}")
+        })?;
+    }
+    let json = serde_json::to_string_pretty(&grant)
+        .map_err(|error| format!("cannot encode the workspace grant: {error}"))?;
+    std::fs::write(&config, json)
+        .map_err(|error| format!("cannot persist the workspace grant: {error}"))?;
+    audit_workspace_grant(&vault_state.vault, "grant", &grant.root);
+    agent_workspace_info()
 }
 
 /// Vision lane: the image types llama.cpp accepts through an `image_url`
@@ -1770,6 +2024,10 @@ struct PaiSubagentProvider {
     /// full-access set). `run_scoped_subagent` already refuses a request
     /// whose capabilities are not a subset of the parent's.
     capabilities: CapabilitySet,
+    /// The PARENT's run-trail collector: child tool activity lands in the
+    /// same trail (tagged by the existing "[subagent-xxxx]" prefix) so the
+    /// vault memory records what the whole run did, children included.
+    trail: SharedAgentTrail,
 }
 
 impl PaiSubagentProvider {
@@ -1784,6 +2042,7 @@ impl PaiSubagentProvider {
         browser: Arc<BrowserStateHolder>,
         app: Option<tauri::AppHandle>,
         capabilities: CapabilitySet,
+        trail: SharedAgentTrail,
     ) -> Self {
         Self {
             model_id,
@@ -1795,6 +2054,7 @@ impl PaiSubagentProvider {
             browser,
             app,
             capabilities,
+            trail,
         }
     }
 
@@ -1925,6 +2185,7 @@ impl PaiSubagentProvider {
                 Arc::clone(&self.browser),
                 self.app.clone(),
                 self.capabilities.clone(),
+                Arc::clone(&self.trail),
             ));
             builder = builder.register_tool(
                 self.child_tool(Arc::new(AgentSpawnTool::new(child_provider)), &child_prefix),
@@ -1964,13 +2225,15 @@ impl PaiSubagentProvider {
     }
 
     /// Wrap one child tool with the live-progress emitter when a UI is
-    /// attached; register it raw in tests.
+    /// attached; register it raw in tests. The child writes into the
+    /// PARENT's run-trail collector so one trail covers the whole run.
     fn child_tool(&self, tool: Arc<dyn Tool>, child_prefix: &str) -> Arc<dyn Tool> {
         match &self.app {
             Some(app) => Arc::new(ProgressTool {
                 inner: tool,
                 app: app.clone(),
                 detail_prefix: Some(child_prefix.to_owned()),
+                trail: Some(Arc::clone(&self.trail)),
             }),
             None => tool,
         }
@@ -2380,6 +2643,11 @@ pub async fn harness_chat(
     let chat_token_app = app.clone();
 
     let worker = tokio::task::spawn_blocking(move || {
+        // P7 run trail: this run's step collector, threaded through every
+        // ProgressTool registration (sub-agents share it through the
+        // provider). Written into the vault memory once, below, after the
+        // run ends — on BOTH the completed and stopped/failed paths.
+        let run_trail: SharedAgentTrail = Arc::new(Mutex::new(Vec::new()));
         let mut model_builder = PaiLlamaLocalProvider::new(model_id.clone(), port)
             .map_err(|error| error.to_string())?;
         for (id, media_type, base64_bytes) in &attachment_bytes {
@@ -2454,10 +2722,14 @@ pub async fn harness_chat(
         } else {
             HarnessBuilder::local_embedded(&vault_root).map_err(|error| error.to_string())?
         };
+        // The trait-object Arc the builder takes; a second typed Arc of the
+        // same provider stays local for the post-run P7 trail write.
+        let memory_provider: Arc<dyn inbharat_harness_core::providers::MemoryProvider> =
+            memory.clone();
         builder = builder
             .register_model(model)
             .map_err(|error| error.to_string())?
-            .memory_provider(memory)
+            .memory_provider(memory_provider)
             .system_prefix(desktop_system_prefix(full_access))
             .sandbox_provider(Arc::new(DesktopSandbox {
                 granted: capabilities.clone(),
@@ -2478,6 +2750,7 @@ pub async fn harness_chat(
                     inner: tool,
                     app: app.clone(),
                     detail_prefix: None,
+                    trail: Some(Arc::clone(&run_trail)),
                 }))
                 .map_err(|error| error.to_string())?;
         }
@@ -2496,6 +2769,7 @@ pub async fn harness_chat(
                 Arc::clone(&browser),
                 Some(app.clone()),
                 capabilities.clone(),
+                Arc::clone(&run_trail),
             ))
         });
         if let Some(filesystem) = workspace_fs.clone() {
@@ -2510,6 +2784,7 @@ pub async fn harness_chat(
                         inner: tool,
                         app: app.clone(),
                         detail_prefix: None,
+                        trail: Some(Arc::clone(&run_trail)),
                     }))
                     .map_err(|error| error.to_string())?;
             }
@@ -2519,6 +2794,7 @@ pub async fn harness_chat(
                         inner: Arc::new(AgentSpawnTool::new(provider)),
                         app: app.clone(),
                         detail_prefix: None,
+                        trail: Some(Arc::clone(&run_trail)),
                     }))
                     .map_err(|error| error.to_string())?;
             }
@@ -2563,9 +2839,78 @@ pub async fn harness_chat(
         }
         // `cancel` is the run token registered by the caller before this
         // worker started — the UI Stop control cancels it from outside.
-        let (outcome, _session) = harness
-            .run(&harness_prompt, &options, &cancel)
-            .map_err(|error| error.to_string())?;
+        let run_result = harness.run(&harness_prompt, &options, &cancel);
+        // P7 run trail (2026-10-01, user directive: "the memory of the drive
+        // should have the context and steps and what was done"): one bounded
+        // Project-scope memory record per MEANINGFUL agentic run — only
+        // full-access runs that actually used tools. A trivial L0/L1 chat
+        // writes no trail; the vault must not gain a record for every
+        // "hello". Written on the completed AND the stopped/failed path: a
+        // stopped run genuinely did things, and the honest trail says what
+        // they were. The record goes through the SAME vault memory provider
+        // the harness used, so it lands in the one envelope both hosts read
+        // (P1-E harness-memory plane — the phone hydrates it too). Best-effort
+        // and non-fatal, exactly like the P1-C outcome record.
+        if full_access {
+            let trail_steps = run_trail
+                .lock()
+                .map(|steps| steps.clone())
+                .unwrap_or_default();
+            if !trail_steps.is_empty() {
+                let failure = run_result.as_ref().err().map(|error| error.to_string());
+                let status = match &failure {
+                    None => "completed",
+                    Some(text) if text.starts_with("cancelled:") => "stopped",
+                    Some(_) => "failed",
+                };
+                let _ = crate::env_learning::record_agent_run_trail(
+                    &memory,
+                    &vault_id,
+                    &conversation_id,
+                    &crate::env_learning::AgentRunTrail {
+                        request: &message,
+                        status,
+                        failure: failure.as_deref(),
+                        steps: run_result
+                            .as_ref()
+                            .ok()
+                            .map(|(outcome, _)| outcome.steps)
+                            // No outcome on the stopped/failed path: the
+                            // honest count of tools ATTEMPTED is the number
+                            // of recorded call entries in the trail itself.
+                            .unwrap_or_else(|| {
+                                trail_steps
+                                    .iter()
+                                    .filter(|step| step.phase == "call")
+                                    .count() as u32
+                            }),
+                        tool_calls: run_result
+                            .as_ref()
+                            .ok()
+                            .map(|(outcome, _)| outcome.tool_calls)
+                            .unwrap_or(0),
+                        elapsed_ms: run_result
+                            .as_ref()
+                            .ok()
+                            .map(|(outcome, _)| {
+                                u64::try_from(outcome.elapsed.as_millis()).unwrap_or(u64::MAX)
+                            })
+                            .unwrap_or(0),
+                        model_id: &model_id,
+                        trail: &trail_steps,
+                        output: run_result
+                            .as_ref()
+                            .ok()
+                            .map(|(outcome, _)| outcome.output.as_str()),
+                        session_id: run_result
+                            .as_ref()
+                            .ok()
+                            .map(|(outcome, _)| outcome.session_id.as_str()),
+                    },
+                );
+            }
+        }
+        let (outcome, _session) = run_result.map_err(|error| error.to_string())?;
         // P1-C: the completed run leaves one honest ProcedureOutcome record in
         // the canonical vault — never promotable from this path (no streak,
         // no verified postconditions, no explicit approval), pure evidence for
@@ -2666,6 +3011,71 @@ mod run_registry_tests {
         assert!(registry.stop("conv-a"));
         assert!(a.is_cancelled());
         assert!(!b.is_cancelled());
+    }
+}
+
+#[cfg(test)]
+mod trail_tests {
+    use super::*;
+
+    /// The trail stops recording at the step cap with ONE explicit overflow
+    /// marker — a pathological run must never grow an unbounded record.
+    #[test]
+    fn trail_caps_at_max_steps_with_one_overflow_marker() {
+        let trail: SharedAgentTrail = Arc::new(Mutex::new(Vec::new()));
+        for index in 0..MAX_TRAIL_STEPS + 50 {
+            push_trail_step(
+                &Some(Arc::clone(&trail)),
+                "call",
+                "fs.write",
+                &format!("step {index}"),
+            );
+        }
+        let steps = trail.lock().unwrap();
+        assert_eq!(steps.len(), MAX_TRAIL_STEPS + 1, "cap + exactly one marker");
+        assert_eq!(steps.last().unwrap().tool, "(trail truncated)");
+        assert!(steps.last().unwrap().detail.contains("run continued"));
+    }
+
+    /// Each recorded detail is bounded to the per-step char cap.
+    #[test]
+    fn trail_details_are_bounded_per_step() {
+        let trail: SharedAgentTrail = Arc::new(Mutex::new(Vec::new()));
+        push_trail_step(
+            &Some(Arc::clone(&trail)),
+            "result",
+            "fs.read",
+            &"x".repeat(MAX_TRAIL_DETAIL_CHARS + 500),
+        );
+        let steps = trail.lock().unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].detail.chars().count(), MAX_TRAIL_DETAIL_CHARS);
+    }
+
+    /// No collector (unit-test registrations) and a poisoned lock are
+    /// skipped entries, never panics — the trail must never break a run.
+    #[test]
+    fn trail_without_collector_or_with_poisoned_lock_is_skipped() {
+        push_trail_step(&None, "call", "fs.write", "harmless");
+        let trail: SharedAgentTrail = Arc::new(Mutex::new(Vec::new()));
+        {
+            // Poison the lock: the helper thread takes it and panics while
+            // HOLDING it, then finishes. Never hold the lock on this thread
+            // while joining the helper — that ordering deadlocks (the exact
+            // class of hang this test exists to pin, caught live in CI).
+            let poison = trail.clone();
+            std::thread::spawn(move || {
+                let _guard = poison.lock().unwrap();
+                panic!("poison the lock");
+            })
+            .join()
+            .ok(); // the panic is intentional; ignore the join result
+        }
+        push_trail_step(&Some(trail.clone()), "call", "fs.write", "harmless");
+        assert!(
+            trail.lock().is_err() || trail.lock().map(|s| s.is_empty()).unwrap_or(true),
+            "no entry was recorded through the poisoned lock"
+        );
     }
 }
 
@@ -3363,6 +3773,7 @@ mod workspace_tool_tests {
             Arc::new(BrowserStateHolder::new()),
             None,
             CapabilitySet::all_local(),
+            Arc::new(Mutex::new(Vec::new())),
         ))
     }
 

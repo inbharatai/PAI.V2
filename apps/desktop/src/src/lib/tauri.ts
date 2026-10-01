@@ -460,6 +460,21 @@ export const tauriApi = {
   captureScreenSnapshot: () => invoke<string>('capture_screen_snapshot'),
   getWorkspaceRoot: () => invoke<string>('get_workspace_root'),
 
+  // P7 — user-granted agent workspace root. The agent builds and stores
+  // files at the effective root (full access only); `setAgentWorkspaceRoot`
+  // grants a new root (must be an existing host folder, never inside the
+  // encrypted drive package) or, with null, revokes the grant and returns
+  // to the default. Every grant/revocation is audited in the vault.
+  getAgentWorkspaceInfo: () =>
+    invoke<{ effective_root: string; user_granted: string | null; default_root: string }>(
+      'get_agent_workspace_info',
+    ),
+  setAgentWorkspaceRoot: (root: string | null) =>
+    invoke<{ effective_root: string; user_granted: string | null; default_root: string }>(
+      'set_agent_workspace_root',
+      { root },
+    ),
+
   // Security
   generateManifest: (vaultRoot: string) => invoke<VaultInfo & { entries: number; manifest_sha256: string }>('generate_manifest', { vault_root: vaultRoot }),
   recoverFromCrash: (vaultRoot: string) => invoke<{ state: string; recovered_files: number; rolled_back_files: number; errors: string[] }>('recover_from_crash', { vault_root: vaultRoot }),
