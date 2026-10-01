@@ -508,7 +508,17 @@ export function ChatView() {
         setMicError(result.error || 'Speech synthesis returned no audio.');
         return;
       }
-      setMessages(prev => prev.map(m => (m.id === msg.id ? { ...m, audioUrl: tauriApi.convertFileSrc(result.audio_path!) } : m)));
+      // Blob URL via the audited read command — the asset protocol cannot
+      // scope the removable-drive vault recordings dir (live-caught
+      // 2026-10-01: every spoken reply showed "Unable to play media").
+      const blobUrl = await tauriApi.spokenAudioBlobUrl(result.audio_path, vaultRoot)
+        .catch(err => {
+          setMicError(err instanceof Error ? err.message : String(err));
+          return null;
+        });
+      if (blobUrl) {
+        setMessages(prev => prev.map(m => (m.id === msg.id ? { ...m, audioUrl: blobUrl } : m)));
+      }
     } catch (err) {
       setMicError(err instanceof Error ? err.message : String(err));
     } finally {

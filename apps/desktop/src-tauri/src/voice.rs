@@ -769,6 +769,118 @@ fn file_exists_under(root: &std::path::Path, relative: &str) -> bool {
 
 // Tauri commands for voice module
 
+/// Serve spoken-audio bytes to the webview for playback.
+///
+/// Live-caught 2026-10-01 ("Unable to play media" on every spoken reply):
+/// TTS outputs land in two areas — the transient `$TEMP/unoone-tts` sweep
+/// area and the vault's `VAULT/recordings` retention area (the Piper lane
+/// writes `tts_<uuid>.wav` there by design). The Tauri asset protocol's
+/// static scope cannot cover a removable-drive vault path, and its verbatim
+/// `\\?\` forms kept tripping scope checks, so every `<audio>` element the
+/// chat rendered got a 403 and showed "Unable to play media." Instead of
+/// widening the asset scope, the webview fetches the bytes through this
+/// audited command and plays a Blob URL — no protocol scope involved, and
+/// reads stay confined to the two audio areas below (plaintext-by-design
+/// TTS output; vault *records* never pass through here).
+#[tauri::command]
+pub fn read_spoken_audio(path: String, vault_root: String) -> Result<Vec<u8>, String> {
+    use std::path::Path;
+
+    let candidate = Path::new(&path);
+
+    // The transient area lives under the OS temp root. Canonicalize both
+    // sides so `\\?\` verbatim forms and case differences cannot smuggle a
+    // path outside the boundary.
+    let candidate_canon = candidate
+        .canonicalize()
+        .map_err(|e| format!("spoken audio file is not accessible: {e}"))?;
+
+    let allowed: Vec<PathBuf> = {
+        let mut roots: Vec<PathBuf> = vec![std::env::temp_dir().join("unoone-tts")];
+        if !vault_root.trim().is_empty() {
+            roots.push(
+                Path::new(&vault_root)
+                    .join("VAULT")
+                    .join("recordings")
+                    .to_path_buf(),
+            );
+        }
+        roots
+            .iter()
+            .filter_map(|r| r.canonicalize().ok())
+            .collect()
+    };
+
+    let confined = allowed.iter().any(|root| {
+        candidate_canon
+            .strip_prefix(root)
+            .map(|rel| !rel.starts_with(".."))
+            .unwrap_or(false)
+    });
+    if !confined {
+        return Err(
+            "Refused to read spoken audio from outside the TTS output areas.".to_string(),
+        );
+    }
+
+    std::fs::read(&candidate_canon).map_err(|e| format!("failed to read spoken audio: {e}"))
+}
+
+#[cfg(test)]
+mod read_spoken_audio_tests {
+    use super::*;
+
+    fn temp_vault_with_recording() -> (tempfile::TempDir, std::path::PathBuf) {
+        let vault = tempfile::tempdir().expect("temp vault");
+        let rec_dir = vault.path().join("VAULT").join("recordings");
+        std::fs::create_dir_all(&rec_dir).expect("records dir");
+        let wav = rec_dir.join("tts_test.wav");
+        std::fs::write(&wav, b"RIFF-fake-tts-bytes").expect("wav");
+        (vault, wav)
+    }
+
+    #[test]
+    fn reads_piper_wav_from_vault_recordings() {
+        let (_vault, wav) = temp_vault_with_recording();
+        let bytes = read_spoken_audio(
+            wav.to_string_lossy().into_owned(),
+            _vault.path().to_string_lossy().into_owned(),
+        )
+        .expect("vault recordings read should be allowed");
+        assert_eq!(bytes, b"RIFF-fake-tts-bytes");
+    }
+
+    #[test]
+    fn refuses_files_outside_the_tts_areas() {
+        let elsewhere = tempfile::tempdir().expect("outside");
+        let secret = elsewhere.path().join("secret.txt");
+        std::fs::write(&secret, b"must-not-leak").expect("secret");
+        let vault = tempfile::tempdir().expect("vault");
+        std::fs::create_dir_all(vault.path().join("VAULT").join("recordings")).expect("dir");
+        let err = read_spoken_audio(
+            secret.to_string_lossy().into_owned(),
+            vault.path().to_string_lossy().into_owned(),
+        )
+        .expect_err("paths outside the TTS areas must be refused");
+        assert!(err.contains("Refused to read spoken audio"));
+    }
+
+    #[test]
+    fn rejects_parent_traversal_into_vault_secrets() {
+        let (vault, wav) = temp_vault_with_recording();
+        // `..\..` from VAULT/recordings/tts_test.wav climbs out of the area.
+        let mut traversal = wav.clone();
+        traversal.pop(); // VAULT/recordings
+        traversal.pop(); // VAULT
+        let vault_key = traversal.join("vault.key");
+        std::fs::write(&vault_key, b"k3y").expect("key");
+        let target = vault_key.to_string_lossy().into_owned();
+        let err = read_spoken_audio(target, vault.path().to_string_lossy().into_owned())
+            .expect_err("vault keys are not spoken audio");
+        assert!(err.contains("Refused to read spoken audio"));
+    }
+}
+
 #[tauri::command]
 pub fn get_voice_status(vault_root: String, language: String) -> serde_json::Value {
     let config = discover_voice_assets(&vault_root, &language);

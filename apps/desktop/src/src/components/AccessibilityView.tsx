@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, forwardRef } from 'react';
 import { tauriApi, type AccessibilityStatus, type AccessibilitySettingsInput } from '../lib/tauri';
 
 /** Live-caught 2026-09-13 (defect #23): a vision invoke whose IPC response was
@@ -19,6 +19,59 @@ function withVisionTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
     ),
   ]);
 }
+
+/** Live-caught 2026-10-01: legacy Piper TTS writes wavs into
+ * VAULT/recordings/, which the Tauri asset protocol cannot statically scope
+ * (removable-drive roots), so a convertFileSrc URL always failed with
+ * "Unable to play media". The spoken audio now travels through the audited
+ * read_spoken_audio command (confined to the TTS output areas) and is played
+ * from a blob URL that the WebView can always reach. */
+const SpokenAudioPlayer = forwardRef<HTMLAudioElement, { path: string; vaultRoot: string }>(
+  function SpokenAudioPlayer({ path, vaultRoot }, ref) {
+    const [src, setSrc] = useState('');
+    const [error, setError] = useState('');
+
+    useEffect(() => {
+      let active = true;
+      const objectUrl = { current: '' as string };
+      setSrc('');
+      setError('');
+      tauriApi
+        .spokenAudioBlobUrl(path, vaultRoot)
+        .then(url => {
+          if (active) {
+            objectUrl.current = url;
+            setSrc(url);
+          } else {
+            URL.revokeObjectURL(url);
+          }
+        })
+        .catch(err => {
+          if (active) setError(err instanceof Error ? err.message : String(err));
+        });
+      return () => {
+        active = false;
+        if (objectUrl.current) URL.revokeObjectURL(objectUrl.current);
+      };
+    }, [path, vaultRoot]);
+
+    if (error) {
+      return <div role="alert" style={{ marginTop: '12px', color: 'var(--text-muted)', fontSize: '13px' }}>{error}</div>;
+    }
+    if (!src) {
+      return <div style={{ marginTop: '12px', fontSize: '13px', color: 'var(--text-muted)' }}>Loading speech…</div>;
+    }
+    return (
+      <audio
+        ref={ref}
+        controls
+        src={src}
+        aria-label="Synthesized speech playback"
+        style={{ marginTop: '12px', width: '100%', borderRadius: 'var(--radius-sm)' }}
+      />
+    );
+  }
+);
 
 export function AccessibilityView() {
   const [status, setStatus] = useState<AccessibilityStatus | null>(null);
@@ -559,14 +612,22 @@ export function AccessibilityView() {
         requestAnimationFrame(() => {
           const el = speechAudioRef.current;
           if (el) {
-            el.src = tauriApi.convertFileSrc(result.audio_path as string);
-            el.play().catch(() => {
-              // Autoplay is allowed app-wide (--autoplay-policy=
-              // no-user-gesture-required, defect #21) so the description is
-              // spoken even after the long describe+synthesize chain; this
-              // catch only covers unusual WebView refusals, where the audio
-              // element's controls remain the manual fallback.
-            });
+            // Blob URL via the audited read command — the asset protocol
+            // cannot scope the removable-drive vault recordings dir
+            // (live-caught 2026-10-01 "Unable to play media").
+            void tauriApi.spokenAudioBlobUrl(result.audio_path as string, vaultRoot)
+              .then(url => {
+                if (el.src !== url) {
+                  el.src = url;
+                  el.play().catch(() => {
+                    // Autoplay is allowed app-wide (--autoplay-policy=
+                    // no-user-gesture-required, defect #21) so the description is
+                    // spoken even after the long describe+synthesize chain; this
+                    // catch only covers unusual WebView refusals, where the audio
+                    // element's controls remain the manual fallback.
+                  });
+                }
+              });
           }
         });
       } else {
@@ -1314,19 +1375,7 @@ export function AccessibilityView() {
                   )}
 
                   {ttsAudioPath && (
-                    <audio
-                      controls
-                      ref={speechAudioRef}
-                      src={tauriApi.convertFileSrc(ttsAudioPath)}
-                      style={{
-                        marginTop: '12px',
-                        width: '100%',
-                        borderRadius: 'var(--radius-sm)',
-                      }}
-                      aria-label="Synthesized speech playback"
-                    >
-                      Your browser does not support the audio element.
-                    </audio>
+                    <SpokenAudioPlayer path={ttsAudioPath} vaultRoot={vaultRoot} ref={speechAudioRef} />
                   )}
                 </div>
 

@@ -243,6 +243,7 @@ fn main() {
             voice::get_voice_status,
             voice::transcribe_audio,
             voice::synthesize_speech,
+            voice::read_spoken_audio,
             // Unified Harness text plane (production path) + InBharat Audio
             // adapter. The legacy agent loop remains registered as an explicit
             // rollback path until acceptance parity is proven on device.

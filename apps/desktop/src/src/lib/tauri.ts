@@ -536,6 +536,14 @@ export const tauriApi = {
     invoke<{ text: string; language: string; confidence: number | null; status: string }>('transcribe_audio', { audio_path: audioPath, vault_root: vaultRoot, language }),
   synthesizeSpeech: (text: string, vaultRoot: string, language: string) =>
     invoke<{ audio_path: string | null; duration_seconds: number | null; sample_rate: number; status: string; error: string | null }>('synthesize_speech', { text, vault_root: vaultRoot, language }),
+  // Spoken-audio playback goes through this audited command + a Blob URL:
+  // the asset protocol cannot statically scope a removable-drive vault path,
+  // so convertFileSrc on TTS output 403s ("Unable to play media").
+  spokenAudioBlobUrl: async (path: string, vaultRoot: string): Promise<string> => {
+    const bytes = await invoke<number[]>('read_spoken_audio', { path, vault_root: vaultRoot });
+    const buf = new Uint8Array(bytes);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  },
 
   // Browser workspace — the backend executes actions against the real webview
   // window and reports what actually happened (verified only when the page
