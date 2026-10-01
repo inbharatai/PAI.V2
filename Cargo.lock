@@ -5439,6 +5439,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unoone-browser-policy",
+ "unoone-capability-contracts",
  "unoone-document-migration",
  "unoone-recording-policy",
  "unoone-runtime-select",
