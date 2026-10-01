@@ -1,5 +1,8 @@
 package com.unoone.agent.memory
 
+import com.unoone.agent.core.contracts.ContractJson
+import com.unoone.agent.core.contracts.EnvObservation
+import com.unoone.agent.core.contracts.EpistemicStatus
 import com.unoone.agent.core.memory.OutcomeMemoryPolicy
 import com.unoone.agent.core.memory.OutcomeRecord
 import com.unoone.agent.core.util.Logger
@@ -114,7 +117,27 @@ class MemoryModule(
             Logger.w("MemoryModule: outcome retrieval failed (non-fatal): ${e.message}"); ""
         }
 
-        return listOf(memoryContext, outcomeHint).filter { it.isNotBlank() }.joinToString("; ")
+        // Env-learning confirmed capabilities (P1-C): ONLY verified facts the
+        // user explicitly approved are surfaced — a hypothesis or correction is
+        // never presented to the planner as an established capability.
+        val capabilityHint = try {
+            memoryDao.getByTypeList("envobs")
+                .mapNotNull { row ->
+                    try {
+                        ContractJson.decodeFromString(EnvObservation.serializer(), row.value)
+                    } catch (_: Exception) {
+                        null
+                    }
+                }
+                .filter { it.epistemicStatus == EpistemicStatus.VERIFIED_FACT && it.mayAuthorizeDeviceControl() }
+                .take(5)
+                .joinToString("; ") { obs -> "confirmed capability: ${obs.observedCapability.take(80)}" }
+        } catch (e: Exception) {
+            Logger.w("MemoryModule: env-fact retrieval failed (non-fatal): ${e.message}"); ""
+        }
+
+        return listOf(memoryContext, outcomeHint, capabilityHint).filter { it.isNotBlank() }
+            .joinToString("; ")
     }
 
     /** Parses an `outcome:` memory row back into an [OutcomeRecord]. */

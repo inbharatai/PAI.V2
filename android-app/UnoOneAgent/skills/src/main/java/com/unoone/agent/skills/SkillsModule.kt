@@ -19,12 +19,23 @@ import kotlinx.serialization.serializer
  * data and belongs in the canonical store.
  * @param onSkillDeleted invoked before the local row is deleted (the vault
  * link is unrecoverable afterwards) so the vault record can be tombstoned.
+ * @param onSuggestionCreated invoked when the usage counter crosses the
+ * threshold and a DISABLED suggestion is created — the epistemic moment a
+ * hypothesis comes to exist (P1-C env learning). Never fires for built-ins.
+ * @param onSkillEnabled invoked after the user explicitly enables a skill —
+ * the explicit approval the promotion gate requires.
+ * @param onSkillDisabled invoked after the user explicitly disables a skill —
+ * an honest epistemic correction that demotes any promotion built on the
+ * earlier approval.
  */
 class SkillsModule(
     private val skillDao: SkillDao,
     private val memoryDao: MemoryDao,
     private val onSkillSaved: suspend (SkillEntity) -> Unit = {},
     private val onSkillDeleted: suspend (SkillEntity) -> Unit = {},
+    private val onSuggestionCreated: suspend (skill: SkillEntity, tool: String, successCount: Int) -> Unit = { _, _, _ -> },
+    private val onSkillEnabled: suspend (SkillEntity) -> Unit = {},
+    private val onSkillDisabled: suspend (SkillEntity) -> Unit = {},
 ) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -106,7 +117,14 @@ class SkillsModule(
             enabled = false
         )
         Logger.i("Skills: created disabled learned suggestion '${suggestion.name}'")
-        return skillDao.getAll().first().firstOrNull { it.name == suggestion.name }
+        val created = skillDao.getAll().first().firstOrNull { it.name == suggestion.name }
+        if (created != null) {
+            // P1-C: the epistemic hypothesis is recorded the moment it exists.
+            // It stays device-local and the suggestion stays disabled — only
+            // the user's enable action can ever promote it.
+            onSuggestionCreated(created, tool, nextCount)
+        }
+        return created
     }
 
     suspend fun updateSkill(skill: SkillEntity) {
@@ -117,11 +135,13 @@ class SkillsModule(
     suspend fun disableSkill(skill: SkillEntity) {
         skillDao.update(skill.copy(enabled = false))
         onSkillSaved(skill.copy(enabled = false))
+        onSkillDisabled(skill)
     }
 
     suspend fun enableSkill(skill: SkillEntity) {
         skillDao.update(skill.copy(enabled = true))
         onSkillSaved(skill.copy(enabled = true))
+        onSkillEnabled(skill)
     }
 
     suspend fun deleteSkill(skill: SkillEntity) {

@@ -143,7 +143,16 @@ class AgentOrchestrator(
      * behaviour) and mirrored to the vault as a TRANSCRIPT record, so the
      * usage history from every host lives in ONE source.
      */
-    private val conversationDao: com.unoone.agent.storage.dao.ConversationTurnDao? = null
+    private val conversationDao: com.unoone.agent.storage.dao.ConversationTurnDao? = null,
+    /**
+     * Bounded env-learning producer (P1-C, null in tests): converts real tool
+     * outcomes and the user's skill enable/disable actions into capability
+     * contract records — procedure outcomes (device-local telemetry) and
+     * environment observations (verified facts / corrections vault-mirrored,
+     * hypotheses never). The promotion gate lives in the recorder: nothing
+     * auto-approves.
+     */
+    private val envLearningRecorder: com.unoone.agent.envlearning.EnvLearningRecorder? = null
 ) {
     // 0C-12: Use Dispatchers.Default for CPU-bound orchestration work.
     // DB writes use Dispatchers.IO via withContext. StateFlow.value setter is thread-safe.
@@ -229,6 +238,14 @@ class AgentOrchestrator(
         memoryDao,
         onSkillSaved = { skill -> vaultMirror?.onSkillUpserted(skill.id) },
         onSkillDeleted = { skill -> vaultMirror?.onRowDeleted(skill.vaultRecordId, VaultSyncPlanner.Kind.SKILL) },
+        // P1-C env learning: a suggestion creates a device-local HYPOTHESIS; the
+        // user's enable/disable are the explicit approval / correction events.
+        // The recorder enforces the promotion gate — nothing auto-approves.
+        onSuggestionCreated = { skill, tool, count ->
+            envLearningRecorder?.recordSuggestionHypothesis(skill, tool, count)
+        },
+        onSkillEnabled = { skill -> envLearningRecorder?.approveSkill(skill) },
+        onSkillDisabled = { skill -> envLearningRecorder?.disapproveSkill(skill) },
     )
 
     // Wire ActionExecutor callbacks to orchestrator state
@@ -1487,6 +1504,29 @@ class AgentOrchestrator(
                 success = result is Result.Success,
                 errorMessage = (result as? Result.Error)?.message
             )
+        } catch (_: Exception) { }
+        // P1-C env learning: the same execution becomes a capability-contract
+        // ProcedureOutcome row with honestly-evaluated promotion requirements.
+        // The verification verdict is the REAL ActionVerifier result (never
+        // assumed from the executor's success), so verified_postconditions is
+        // only true when the foreground/database actually confirmed the effect.
+        try {
+            val recorder = envLearningRecorder
+            if (recorder != null) {
+                val (verifiedResult, _) = verifyAndBuildObservation(toolCall.tool, result)
+                recorder.recordProcedureOutcome(
+                    command = sanitizedText,
+                    tool = toolCall.tool,
+                    success = result is Result.Success,
+                    verified = verifiedResult.verified && verifiedResult.status ==
+                        com.unoone.agent.core.model.ActionResult.Status.SUCCESS,
+                    verificationEvidence = verifiedResult.evidence.entries
+                        .joinToString(", ") { "${it.key}=${it.value}" }
+                        .ifBlank { verifiedResult.userMessage },
+                    failureReason = (result as? Result.Error)?.message,
+                    riskLevel = riskLevel,
+                )
+            }
         } catch (_: Exception) { }
         if (learnUsage && result is Result.Success) {
             try {

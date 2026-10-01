@@ -611,6 +611,20 @@ mod tests {
         let mut blocked = approved;
         blocked.risk_class = "BLOCK".into();
         assert!(blocked.promotable().is_err());
+        // APPROVED + BLOCK: the promotable() Err propagates out of validate().
+        assert!(blocked.validate().is_err());
+
+        // Parity pin (live-caught Kotlin divergence): for status NONE the
+        // `matches!(Approved) && !self.promotable()?` short-circuit means
+        // validate() NEVER consults promotable() — a BLOCK-tier record with
+        // status NONE is valid honest telemetry (the attempt was recorded,
+        // it can never promote). Producers rely on this to store blocked
+        // attempts; a mirror that eagerly calls promotable() silently drops
+        // every BLOCK record.
+        let mut blockedTelemetry = o.clone();
+        blockedTelemetry.risk_class = "BLOCK".into();
+        assert!(blockedTelemetry.validate().is_ok());
+        assert!(blockedTelemetry.promotable().is_err());
     }
 
     #[test]

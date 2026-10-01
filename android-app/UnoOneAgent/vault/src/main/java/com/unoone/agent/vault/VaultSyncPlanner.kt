@@ -12,7 +12,7 @@ package com.unoone.agent.vault
  */
 object VaultSyncPlanner {
 
-    enum class Kind { NOTE, MEMORY, SKILL, TRANSCRIPT }
+    enum class Kind { NOTE, MEMORY, SKILL, TRANSCRIPT, ENVOBS }
 
     /** A cache row with no vaultRecordId yet — needs a create in the vault. */
     data class PendingWrite(val localId: Long, val kind: Kind)

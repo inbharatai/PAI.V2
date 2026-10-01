@@ -164,6 +164,40 @@ class VaultRecordFactoryTest {
         assertEquals("voice", obj["inputType"]!!.jsonPrimitive.content)
     }
 
+    @Test
+    fun `env fact maps to a DOCUMENT record with the kind envobs envelope`() {
+        val observationJson = """{"schema":"inbharat.pai.envobs.v1","subject":"Suggested · Open Calendar"}"""
+        val m = VaultRecordFactory.forEnvFact(
+            recordId = "99999999-9999-4999-8999-999999999999",
+            transactionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            deviceId = "test-device",
+            subject = "Suggested · Open Calendar",
+            observedCapability = "execute skill 'Suggested · Open Calendar'",
+            epistemicStatus = "verified_fact",
+            verificationRef = "user_enabled_skill:Suggested · Open Calendar@1760000000000",
+            observationJson = observationJson,
+            createdAtIso = "2026-10-01T10:00:00+00:00",
+            updatedAtIso = "2026-10-01T10:00:00+00:00",
+            revision = 2,
+        )
+        assertEquals(allFields.toSet(), m.fields.keys)
+        assertEquals("DOCUMENT", m.fields["record_type"])
+        assertEquals(2, m.fields["revision"])
+        assertEquals(VaultCrypto.sha256Hex(m.content), m.fields["content_hash"])
+
+        val obj = Json.parseToJsonElement(String(m.content, Charsets.UTF_8)).jsonObject
+        assertEquals("envobs", obj["kind"]!!.jsonPrimitive.content)
+        assertEquals("Suggested · Open Calendar", obj["subject"]!!.jsonPrimitive.content)
+        assertEquals("verified_fact", obj["epistemicStatus"]!!.jsonPrimitive.content)
+        assertEquals(
+            "user_enabled_skill:Suggested · Open Calendar@1760000000000",
+            obj["verificationRef"]!!.jsonPrimitive.content,
+        )
+        // The contract body travels verbatim — hosts index the envelope
+        // without parsing, and the body must round-trip byte-identical.
+        assertEquals(observationJson, obj["observationJson"]!!.jsonPrimitive.content)
+    }
+
     private fun assertArrayEqualsMsg(a: ByteArray, b: ByteArray) {
         assertTrue("canonicalAad must be deterministic", a.contentEquals(b))
     }

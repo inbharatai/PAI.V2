@@ -68,11 +68,14 @@ interface MemoryDao {
     suspend fun getByIdOnce(id: Long): MemoryEntity?
 
     /**
-     * User-meaningful memories not yet written to the vault. Planner telemetry
-     * ("outcome:" keys, type="outcome") is device-local cache and is
-     * deliberately excluded — it is not canonical vault memory.
+     * User-meaningful memories not yet written to the vault. Device-local
+     * records are deliberately excluded — they are not canonical vault
+     * memory: planner telemetry ("outcome", type="outcome"), env-learning
+     * procedure records (type="procedure_outcome") and skill-suggestion
+     * HYPOTHESES (type="envobs_hypo" — a hypothesis never leaves the device
+     * that recorded it; only verified facts/corrections mirror).
      */
-    @Query("SELECT * FROM memories WHERE vaultRecordId IS NULL AND type != 'outcome' ORDER BY id ASC")
+    @Query("SELECT * FROM memories WHERE vaultRecordId IS NULL AND type NOT IN ('outcome', 'procedure_outcome', 'envobs_hypo') ORDER BY id ASC")
     suspend fun notSynced(): List<MemoryEntity>
 
     /** Every memory, one-shot — used by vault hydration to dedupe known records. */

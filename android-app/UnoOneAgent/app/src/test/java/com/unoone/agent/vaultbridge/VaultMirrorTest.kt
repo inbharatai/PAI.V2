@@ -361,4 +361,122 @@ class VaultMirrorTest {
 
         assertEquals(1, writer.written.size)
     }
+
+    // ---- env-learning facts (type "envobs") -------------------------------
+
+    /** A contract-valid fact value, exactly as EnvLearningRecorder stores it. */
+    private fun envFactValue(
+        subject: String,
+        status: com.unoone.agent.core.contracts.EpistemicStatus,
+    ): String {
+        val observation = com.unoone.agent.core.contracts.EnvObservation(
+            schema = com.unoone.agent.core.contracts.ContractSchemas.ENV_OBSERVATION,
+            subject = subject,
+            observedCapability = "execute skill '$subject'",
+            evidence = "user explicitly enabled skill '$subject'",
+            confidence = com.unoone.agent.core.contracts.Confidence.HIGH,
+            scope = com.unoone.agent.core.contracts.EnvScope.USER,
+            epistemicStatus = status,
+            provenance = com.unoone.agent.core.contracts.Provenance(
+                platform = "android",
+                deviceId = "test-device",
+                source = "user-approval",
+            ),
+            timestampMs = 1_760_000_000_000,
+            verificationRef = if (status == com.unoone.agent.core.contracts.EpistemicStatus.VERIFIED_FACT) {
+                "user_enabled_skill:$subject@1760000000000"
+            } else {
+                null
+            },
+        )
+        return com.unoone.agent.core.contracts.ContractJson.encodeToString(
+            com.unoone.agent.core.contracts.EnvObservation.serializer(),
+            observation,
+        )
+    }
+
+    private suspend fun insertEnvFact(
+        subject: String,
+        status: com.unoone.agent.core.contracts.EpistemicStatus = com.unoone.agent.core.contracts.EpistemicStatus.VERIFIED_FACT,
+    ): Long = db.memoryDao().insert(
+        MemoryEntity(key = "envfact:skill:$subject", value = envFactValue(subject, status), type = "envobs"),
+    )
+
+    @Test
+    fun `online env fact writes through as an envobs DOCUMENT and stamps the link`() = runBlocking {
+        writer.online = true
+        val id = insertEnvFact("Suggested · Open Calendar")
+        mirror().onEnvFactRecorded(id)
+
+        assertEquals(1, writer.written.size)
+        val fields = writer.writtenFields.single()
+        assertEquals("env facts canonicalize as DOCUMENT records", "DOCUMENT", fields["record_type"])
+        assertEquals(1, fields["revision"])
+        val body = String(writer.written.single().second, Charsets.UTF_8)
+        assertTrue("the honest {kind:\"envobs\"} envelope", body.contains("\"kind\":\"envobs\""))
+        assertTrue("the contract body travels verbatim", body.contains("inbharat.pai.envobs.v1"))
+        val stamped = db.memoryDao().getByIdOnce(id)!!
+        assertEquals(writer.written.single().first, stamped.vaultRecordId)
+        assertEquals(1, stamped.vaultRevision)
+        assertTrue("no env fact should remain unsynced", db.memoryDao().notSynced().none { it.type == "envobs" })
+    }
+
+    @Test
+    fun `an unparseable envobs value never mirrors`() = runBlocking {
+        writer.online = true
+        val id = db.memoryDao().insert(
+            MemoryEntity(key = "envfact:skill:broken", value = "not json at all", type = "envobs"),
+        )
+        mirror().onEnvFactRecorded(id)
+        assertTrue("honesty over reach — nothing must reach the vault", writer.written.isEmpty())
+        assertNull(db.memoryDao().getByIdOnce(id)!!.vaultRecordId)
+    }
+
+    @Test
+    fun `disapprove rewrites the SAME envobs record as a correction with revision plus one`() = runBlocking {
+        writer.online = true
+        val subject = "Suggested · Open Calendar"
+        val id = insertEnvFact(subject)
+        mirror().onEnvFactRecorded(id)
+        val recordId = db.memoryDao().getByIdOnce(id)!!.vaultRecordId!!
+
+        // The user disables the skill: EnvLearningRecorder.disapproveSkill
+        // rewrites the SAME key as an honest CORRECTION, then re-fires the
+        // mirror callback with the same row.
+        val status = com.unoone.agent.core.contracts.EpistemicStatus.CORRECTION
+        db.memoryDao().update(db.memoryDao().getByIdOnce(id)!!.copy(value = envFactValue(subject, status)))
+        mirror().onEnvFactRecorded(id)
+
+        assertEquals(2, writer.written.size)
+        assertEquals("rewrite must target the same vault record", recordId, writer.written[1].first)
+        assertEquals("metadata must carry the bumped revision", 2, writer.writtenFields[1]["revision"])
+        val body = String(writer.written[1].second, Charsets.UTF_8)
+        assertTrue(body.contains("\"epistemicStatus\":\"correction\""))
+        assertEquals(2, db.memoryDao().getByIdOnce(id)!!.vaultRevision)
+    }
+
+    @Test
+    fun `offline env facts flush on unlock but hypotheses never leave the device`() = runBlocking {
+        writer.online = false
+        insertEnvFact("Suggested · Open Calendar")
+        // A hypothesis row the recorder wrote while locked too.
+        db.memoryDao().insert(
+            MemoryEntity(key = "envobs_hypo:open_calendar:Suggested · Open Calendar", value = "hypo", type = "envobs_hypo"),
+        )
+
+        assertTrue("nothing written while locked", writer.written.isEmpty())
+
+        // Unlock: only the user-confirmed fact drains, via the envobs path.
+        writer.online = true
+        mirror().drainBacklog()
+
+        assertEquals(1, writer.written.size)
+        assertEquals("DOCUMENT", writer.writtenFields.single()["record_type"])
+        val body = String(writer.written.single().second, Charsets.UTF_8)
+        assertTrue(body.contains("\"kind\":\"envobs\""))
+        assertTrue("hypotheses must never reach the vault", writer.written.none { it.second.toString(Charsets.UTF_8).contains("envobs_hypo") })
+        assertTrue(db.memoryDao().notSynced().none { it.type == "envobs" })
+        // The hypothesis row itself stays unsynced forever, by DAO contract.
+        assertTrue(db.memoryDao().notSynced().none { it.type == "envobs_hypo" })
+    }
 }

@@ -1,5 +1,6 @@
 package com.unoone.agent.vaultbridge
 
+import com.unoone.agent.core.contracts.ContractJson
 import com.unoone.agent.core.util.Logger
 import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.NoteDao
@@ -72,13 +73,17 @@ class VaultMirror(
      * upsert (storePreference), so a row that already reached the vault is
      * REWRITTEN under the same record id with revision+1 — the vault stays
      * canonical and the desktop sees an honest version bump. Planner
-     * telemetry (type "outcome") is device-local and never mirrors.
+     * telemetry (type "outcome") is device-local and never mirrors; env-learning
+     * procedure records and hypotheses are device-local too; env FACTS
+     * (type "envobs") mirror through their own [onEnvFactRecorded] path.
      */
     suspend fun onMemoryUpserted(localId: Long) {
         try {
             val writer = writerProvider() ?: return
             val memory = memoryDao.getByIdOnce(localId) ?: return
-            if (memory.type == "outcome") return
+            if (memory.type == "outcome" || memory.type == "procedure_outcome" ||
+                memory.type == "envobs_hypo" || memory.type == "envobs"
+            ) return
             val isRewrite = memory.vaultRecordId != null
             val recordId = memory.vaultRecordId ?: idGen()
             val revision = if (isRewrite) memory.vaultRevision + 1 else 1
@@ -196,6 +201,53 @@ class VaultMirror(
         }
     }
 
+    // ---- env-learning fact write-through ----------------------------------
+
+    /**
+     * A user-confirmed environment fact or correction was written locally
+     * (row [localId], type "envobs"); mirror it if we can, so every host
+     * learns what the user has approved on this one. Facts upsert per
+     * subject, so an approve→disapprove cycle rewrites the SAME vault
+     * record with revision+1 — the correction honestly replaces the fact.
+     * Hypotheses never reach this path: they stay on the device that
+     * recorded them ([MemoryDao.notSynced] excludes type "envobs_hypo").
+     */
+    suspend fun onEnvFactRecorded(localId: Long) {
+        try {
+            val writer = writerProvider() ?: return
+            val fact = memoryDao.getByIdOnce(localId) ?: return
+            if (fact.type != "envobs") return
+            val record = try {
+                ContractJson.decodeFromString(
+                    com.unoone.agent.core.contracts.EnvObservation.serializer(),
+                    fact.value,
+                )
+            } catch (_: Exception) {
+                null
+            } ?: return // never mirror an unparseable fact — honesty over reach
+            val isRewrite = fact.vaultRecordId != null
+            val recordId = fact.vaultRecordId ?: idGen()
+            val revision = if (isRewrite) fact.vaultRevision + 1 else 1
+            val mapped = VaultRecordFactory.forEnvFact(
+                recordId = recordId,
+                transactionId = idGen(),
+                deviceId = deviceId,
+                subject = record.subject,
+                observedCapability = record.observedCapability,
+                epistemicStatus = record.epistemicStatus.serialName,
+                verificationRef = record.verificationRef ?: "",
+                observationJson = fact.value,
+                createdAtIso = isoOf(fact.createdAt),
+                updatedAtIso = isoOf(fact.updatedAt),
+                revision = revision,
+            )
+            writer.writeRecord(mapped.fields, mapped.content)
+            memoryDao.setVaultLink(localId, recordId, revision)
+        } catch (e: Exception) {
+            Logger.w("VaultMirror.onEnvFactRecorded non-fatal: ${e.message}")
+        }
+    }
+
     // ---- backlog flush --------------------------------------------------
 
     /** Flush everything that accumulated while locked/detached. Call on unlock. */
@@ -207,7 +259,11 @@ class VaultMirror(
                 writes.add(VaultSyncPlanner.PendingWrite(it.id, VaultSyncPlanner.Kind.NOTE))
             }
             memoryDao.notSynced().forEach {
-                writes.add(VaultSyncPlanner.PendingWrite(it.id, VaultSyncPlanner.Kind.MEMORY))
+                // Env facts mirror through their own DOCUMENT {kind:"envobs"}
+                // path; everything else is a plain memory record.
+                val kind = if (it.type == "envobs") VaultSyncPlanner.Kind.ENVOBS
+                else VaultSyncPlanner.Kind.MEMORY
+                writes.add(VaultSyncPlanner.PendingWrite(it.id, kind))
             }
             skillDao?.notSynced()?.forEach {
                 writes.add(VaultSyncPlanner.PendingWrite(it.id, VaultSyncPlanner.Kind.SKILL))
@@ -225,6 +281,7 @@ class VaultMirror(
                         VaultSyncPlanner.Kind.MEMORY -> onMemoryUpserted(op.localId)
                         VaultSyncPlanner.Kind.SKILL -> onSkillUpserted(op.localId)
                         VaultSyncPlanner.Kind.TRANSCRIPT -> onTurnRecorded(op.localId)
+                        VaultSyncPlanner.Kind.ENVOBS -> onEnvFactRecorded(op.localId)
                     }
                     is VaultSyncPlanner.Op.Tombstone -> {
                         writer.tombstone(op.vaultRecordId, op.deletedAtIso)

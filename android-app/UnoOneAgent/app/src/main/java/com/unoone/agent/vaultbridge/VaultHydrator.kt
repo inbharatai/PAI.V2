@@ -21,8 +21,8 @@ import java.time.Instant
  *
  * Bounded and honest by construction:
  * - Only records carrying the shared {kind:"memory"} / {kind:"skill"} /
- * {kind:"transcript"} JSON envelope hydrate. Anything else (e.g.
- * desktop-migrated raw text, or desktop voice-recording transcripts) is
+ * {kind:"transcript"} / {kind:"envobs"} JSON envelope hydrate. Anything else
+ * (e.g. desktop-migrated raw text, or desktop voice-recording transcripts) is
  * skipped — never structured into a fake memory or turn.
  * - Tombstoned records are skipped: deleted on any host, stays deleted.
  * - Records the cache already has at the latest revision are skipped without
@@ -48,10 +48,13 @@ class VaultHydrator(
         val skillsAdded: Int = 0,
         val skillsUpdated: Int = 0,
         val turnsAdded: Int = 0,
+        val envFactsAdded: Int = 0,
+        val envFactsUpdated: Int = 0,
         val skippedUnknown: Int = 0,
     ) {
         val total: Int
-            get() = memoriesAdded + memoriesUpdated + skillsAdded + skillsUpdated + turnsAdded
+            get() = memoriesAdded + memoriesUpdated + skillsAdded + skillsUpdated + turnsAdded +
+                envFactsAdded + envFactsUpdated
 
         operator fun plus(other: Result) = Result(
             memoriesAdded = memoriesAdded + other.memoriesAdded,
@@ -59,6 +62,8 @@ class VaultHydrator(
             skillsAdded = skillsAdded + other.skillsAdded,
             skillsUpdated = skillsUpdated + other.skillsUpdated,
             turnsAdded = turnsAdded + other.turnsAdded,
+            envFactsAdded = envFactsAdded + other.envFactsAdded,
+            envFactsUpdated = envFactsUpdated + other.envFactsUpdated,
             skippedUnknown = skippedUnknown + other.skippedUnknown,
         )
     }
@@ -123,6 +128,7 @@ class VaultHydrator(
                 "memory" -> hydrateMemory(recordId, fields, envelope)
                 "skill" -> hydrateSkill(recordId, fields, envelope)
                 "transcript" -> hydrateTurn(recordId, fields, envelope)
+                "envobs" -> hydrateEnvFact(recordId, fields, envelope)
                 else -> {
                     // A foreign JSON payload — never structured into a fake
                     // memory/skill/turn.
@@ -302,5 +308,93 @@ class VaultHydrator(
             ),
         )
         return Result(turnsAdded = 1)
+    }
+
+    /**
+     * A user-confirmed environment fact (or correction) authored on ANOTHER
+     * host — e.g. the user approved a skill on the Power desktop or a second
+     * phone. Only verified facts and corrections ever reach the vault, so
+     * hydrating adopts the other host's epistemic conclusion as a local
+     * "envobs" row the planner can surface as a confirmed capability. The
+     * full contract JSON is carried verbatim in the envelope's
+     * observationJson; the envelope index fields are only a shortcut.
+     * Unparseable or hypothesis-status payloads are skipped, never faked.
+     */
+    private suspend fun hydrateEnvFact(
+        recordId: String,
+        fields: Map<String, Any?>,
+        envelope: kotlinx.serialization.json.JsonObject,
+    ): Result {
+        val subject = fieldString(envelope, "subject")?.takeIf { it.isNotBlank() }
+            ?: return Result(skippedUnknown = 1)
+        val observationJson = fieldString(envelope, "observationJson")
+            ?: return Result(skippedUnknown = 1)
+        val status = fieldString(envelope, "epistemicStatus") ?: return Result(skippedUnknown = 1)
+        // The envelope claims must agree with the contract body — never trust
+        // the shortcut fields alone.
+        val record = try {
+            com.unoone.agent.core.contracts.ContractJson.decodeFromString(
+                com.unoone.agent.core.contracts.EnvObservation.serializer(),
+                observationJson,
+            )
+        } catch (_: Exception) {
+            null
+        } ?: return Result(skippedUnknown = 1)
+        if (record.subject != subject || record.epistemicStatus.serialName != status) {
+            return Result(skippedUnknown = 1)
+        }
+        if (record.epistemicStatus != com.unoone.agent.core.contracts.EpistemicStatus.VERIFIED_FACT &&
+            record.epistemicStatus != com.unoone.agent.core.contracts.EpistemicStatus.CORRECTION
+        ) {
+            return Result(skippedUnknown = 1) // a hypothesis must never leak across hosts
+        }
+        if (record.validate() !is com.unoone.agent.core.model.Result.Success) {
+            return Result(skippedUnknown = 1)
+        }
+        val revision = (fields["revision"] as? Int) ?: 1
+        val key = "envfact:$subject"
+        val local = memoryDao.getByKey(key)
+        val now = System.currentTimeMillis()
+        if (local == null) {
+            memoryDao.insert(
+                MemoryEntity(
+                    key = key,
+                    value = observationJson,
+                    type = "envobs",
+                    createdAt = epochOf(fields["created_at"] as? String, now),
+                    updatedAt = epochOf(fields["updated_at"] as? String, now),
+                    vaultRecordId = recordId,
+                    vaultRevision = revision,
+                ),
+            )
+            return Result(envFactsAdded = 1)
+        }
+        if (local.vaultRecordId == null) {
+            // Local-only fact for the same subject: adopt the vault's version.
+            memoryDao.update(
+                local.copy(
+                    value = observationJson,
+                    updatedAt = epochOf(fields["updated_at"] as? String, now),
+                    vaultRecordId = recordId,
+                    vaultRevision = revision,
+                ),
+            )
+            return Result(envFactsUpdated = 1)
+        }
+        if (local.vaultRecordId != recordId) {
+            Logger.i("VaultHydrator: env fact '$subject' has two vault records; keeping local ${local.vaultRecordId}")
+            return Result(skippedUnknown = 1)
+        }
+        if (revision > local.vaultRevision) {
+            memoryDao.update(
+                local.copy(
+                    value = observationJson,
+                    updatedAt = epochOf(fields["updated_at"] as? String, now),
+                    vaultRevision = revision,
+                ),
+            )
+            return Result(envFactsUpdated = 1)
+        }
+        return Result() // already current
     }
 }

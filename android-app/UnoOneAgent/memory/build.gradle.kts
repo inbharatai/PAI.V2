@@ -25,5 +25,8 @@ android {
 dependencies {
     implementation(project(":core"))
     implementation(project(":storage"))
+    // Runtime only — @Serializable classes live in :core; this module decodes
+    // them (ContractJson/EnvObservation) and needs the JSON runtime visible.
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }

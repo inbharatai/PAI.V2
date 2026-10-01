@@ -70,6 +70,37 @@ class VaultHydratorTest {
             records[id] = baseMeta(id, type, 1) to "just some migrated plaintext".toByteArray()
         }
 
+        /** A user-confirmed env fact authored on ANOTHER host (kind:"envobs" envelope). */
+        fun addEnvFact(
+            id: String,
+            subject: String,
+            status: String = "verified_fact",
+            revision: Int = 1,
+        ) {
+            val observation = (
+                "{" +
+                    "\"schema\":\"inbharat.pai.envobs.v1\"," +
+                    "\"subject\":\"$subject\"," +
+                    "\"observed_capability\":\"execute skill '$subject'\"," +
+                    "\"evidence\":\"user explicitly enabled skill '$subject' in the Skills screen\"," +
+                    "\"confidence\":\"high\",\"scope\":\"user\"," +
+                    "\"epistemic_status\":\"$status\"," +
+                    "\"provenance\":{\"platform\":\"android\",\"device_id\":\"other-phone\",\"source\":\"user-approval\"}," +
+                    "\"timestamp_ms\":1760000000000," +
+                    "\"verification_ref\":\"user_enabled_skill:$subject@1760000000000\"" +
+                    "}"
+                ).replace("\\", "\\\\").replace("\"", "\\\"")
+            val payload =
+                "{" +
+                    "\"kind\":\"envobs\",\"subject\":\"$subject\"," +
+                    "\"observedCapability\":\"execute skill '$subject'\"," +
+                    "\"epistemicStatus\":\"$status\"," +
+                    "\"verificationRef\":\"user_enabled_skill:$subject@1760000000000\"," +
+                    "\"observationJson\":\"$observation\"" +
+                    "}"
+            records[id] = baseMeta(id, "DOCUMENT", revision) to payload.toByteArray()
+        }
+
         fun tombstone(id: String) {
             val (meta, content) = records.getValue(id)
             records[id] = meta + mapOf("tombstone" to true) to content
@@ -276,5 +307,33 @@ class VaultHydratorTest {
         assertEquals(0, result.total)
         assertEquals(1, result.skippedUnknown)
         assertTrue(db.conversationTurnDao().allOnce().isEmpty())
+    }
+
+    @Test
+    fun `env fact confirmed on another host hydrates as a verified capability`() = runBlocking {
+        reader.addEnvFact("rec-env1", "Suggested · Open Calendar")
+
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(1, result.envFactsAdded)
+        val fact = db.memoryDao().getByKey("envfact:Suggested · Open Calendar")!!
+        assertEquals("envobs", fact.type)
+        assertEquals("rec-env1", fact.vaultRecordId)
+        val obs = com.unoone.agent.core.contracts.ContractJson.decodeFromString(
+            com.unoone.agent.core.contracts.EnvObservation.serializer(), fact.value,
+        )
+        assertTrue(obs.mayAuthorizeDeviceControl())
+        assertTrue(db.memoryDao().notSynced().isEmpty()) // linked rows never re-mirror
+    }
+
+    @Test
+    fun `a leaked hypothesis-status envobs payload never hydrates`() = runBlocking {
+        reader.addEnvFact("rec-env-hypo", "risky guess", status = "hypothesis")
+
+        val result = hydrator().hydrateFromVault()
+
+        assertEquals(0, result.total)
+        assertEquals(1, result.skippedUnknown)
+        assertNull(db.memoryDao().getByKey("envfact:risky guess"))
     }
 }

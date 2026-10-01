@@ -146,7 +146,14 @@ class UnoOneApplication : Application(), AgentRuntimeController {
             db.memoryDao(),
             db.skillDao(),
             vaultMirror = vaultMirror,
-            conversationDao = db.conversationTurnDao()
+            conversationDao = db.conversationTurnDao(),
+            envLearningRecorder = com.unoone.agent.envlearning.EnvLearningRecorder(
+                memoryDao = db.memoryDao(),
+                deviceIdProvider = {
+                    com.unoone.agent.vaultbridge.VaultDeviceId.getOrCreate(this)
+                },
+                onEnvFactRecorded = { rowId -> vaultMirror.onEnvFactRecorded(rowId) },
+            )
         )
         orchestrator.setVoiceModule(sharedVoiceModule)
         if (persistedEnabled) {

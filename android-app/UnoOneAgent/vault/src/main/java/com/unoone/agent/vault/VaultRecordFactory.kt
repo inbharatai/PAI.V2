@@ -73,6 +73,24 @@ object VaultRecordFactory {
         val inputType: String,
     )
 
+    /**
+     * A user-confirmed environment fact (or correction) — the vault-mirrored
+     * half of bounded env learning. The full capability-contract observation
+     * JSON travels in [observationJson] (schema inbharat.pai.envobs.v1); the
+     * envelope fields let every host index it without parsing the contract
+     * body. Only VERIFIED_FACT and CORRECTION records are ever mirrored —
+     * hypotheses stay device-local.
+     */
+    @Serializable
+    data class EnvFactContent(
+        val kind: String = "envobs",
+        val subject: String,
+        val observedCapability: String,
+        val epistemicStatus: String,
+        val verificationRef: String,
+        val observationJson: String,
+    )
+
     fun forNote(
         recordId: String,
         transactionId: String,
@@ -197,6 +215,49 @@ object VaultRecordFactory {
             baseFields(
                 recordId = recordId,
                 recordType = "TRANSCRIPT",
+                transactionId = transactionId,
+                deviceId = deviceId,
+                createdAtIso = createdAtIso,
+                updatedAtIso = updatedAtIso,
+                content = payload,
+                revision = revision,
+            ),
+            payload,
+        )
+    }
+
+    /**
+     * A user-confirmed env-learning fact mirrors as a DOCUMENT record with the
+     * {kind:"envobs"} envelope. Facts upsert per subject (approve → disapprove
+     * rewrites the same record as a correction), so a re-approval rewrites the
+     * SAME vault record with revision+1 (see [VaultMirror.onEnvFactRecorded]).
+     */
+    fun forEnvFact(
+        recordId: String,
+        transactionId: String,
+        deviceId: String,
+        subject: String,
+        observedCapability: String,
+        epistemicStatus: String,
+        verificationRef: String,
+        observationJson: String,
+        createdAtIso: String,
+        updatedAtIso: String,
+        revision: Int = 1,
+    ): Mapped {
+        val payload = json.encodeToString(
+            EnvFactContent(
+                subject = subject,
+                observedCapability = observedCapability,
+                epistemicStatus = epistemicStatus,
+                verificationRef = verificationRef,
+                observationJson = observationJson,
+            ),
+        ).toByteArray(Charsets.UTF_8)
+        return Mapped(
+            baseFields(
+                recordId = recordId,
+                recordType = "DOCUMENT",
                 transactionId = transactionId,
                 deviceId = deviceId,
                 createdAtIso = createdAtIso,
