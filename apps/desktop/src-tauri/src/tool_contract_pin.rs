@@ -111,12 +111,8 @@ mod tests {
         let mut registered: Vec<String> = read_tools
             .iter()
             .map(|t: &Arc<dyn Tool>| t.manifest().id.clone())
-            .chain(
-                constructible
-                    .iter()
-                    .map(|t: &Box<dyn Tool>| t.manifest().id.clone()),
-            )
             .collect();
+        registered.extend(constructible.iter().map(|t| t.manifest().id.clone()));
         registered.push("browser.act".to_owned());
         registered.push("agent.spawn".to_owned());
         registered.sort();

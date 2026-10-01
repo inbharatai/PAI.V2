@@ -491,7 +491,7 @@ impl DocumentProcessor {
         }
 
         // Collect all memory files with their content
-        let mut file_contents: Vec<(String, String, String, String)> = Vec::new(); // (id, content, extension, modified_at)
+        let mut file_contents: Vec<(String, String, String, String, String)> = Vec::new(); // (id, title, content, extension, modified_at)
         if let Ok(entries) = std::fs::read_dir(&memory_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -517,7 +517,7 @@ impl DocumentProcessor {
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_secs().to_string())
                             .unwrap_or_default();
-                        file_contents.push((file_stem, content, ext, modified));
+                        file_contents.push((file_stem.clone(), file_stem, content, ext, modified));
                     }
                 }
             }
@@ -931,6 +931,9 @@ struct RecordFileEntry {
     parent_record_id: Option<String>,
     created_at: String,
     updated_at: String,
+    /// Deleted records (their file now holds a tombstone envelope) must not
+    /// be listed or searched — a deletion on any host must stick here too.
+    tombstone: bool,
 }
 
 fn records_dir(vault_root: &std::path::Path) -> PathBuf {
@@ -960,6 +963,7 @@ fn scan_record_metadata(vault_root: &std::path::Path) -> Vec<RecordFileEntry> {
                         parent_record_id: m.parent_record_id,
                         created_at: m.created_at,
                         updated_at: m.updated_at,
+                        tombstone: m.tombstone,
                     });
                 }
             }
@@ -983,10 +987,9 @@ fn legacy_ids_for_parents(
     let Some(vault) = vault else {
         return map;
     };
-    for entry in records
-        .iter()
-        .filter(|e| e.record_type == RecordType::ContextSnapshot && e.parent_record_id.is_some())
-    {
+    for entry in records.iter().filter(|e| {
+        !e.tombstone && e.record_type == RecordType::ContextSnapshot && e.parent_record_id.is_some()
+    }) {
         if let Ok((_, bytes)) = vault.read_record(&entry.record_id) {
             if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 let parent = entry.parent_record_id.clone().unwrap();
@@ -1009,22 +1012,86 @@ fn legacy_ids_for_parents(
     map
 }
 
+/// An Android-authored record payload envelope, written by the phone's
+/// `VaultRecordFactory`: `{"kind":"note",title,content,tags}` inside DOCUMENT
+/// records and `{"kind":"memory",key,value,type}` inside MEMORY records.
+/// Read-compat only — the desktop never re-writes these records in the
+/// Android format; it reads them so a shared drive shows the same notes and
+/// memories on every host.
+struct AndroidEnvelope {
+    kind: String,
+    title_or_key: String,
+    body: String,
+    tags: Vec<String>,
+}
+
+fn parse_android_envelope(bytes: &[u8]) -> Option<AndroidEnvelope> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    let kind = value.get("kind")?.as_str()?.to_string();
+    match kind.as_str() {
+        "note" => Some(AndroidEnvelope {
+            kind,
+            title_or_key: value.get("title")?.as_str()?.to_string(),
+            body: value
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            tags: value
+                .get("tags")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .collect(),
+        }),
+        "memory" => Some(AndroidEnvelope {
+            kind,
+            title_or_key: value.get("key")?.as_str()?.to_string(),
+            body: value
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            tags: Vec::new(),
+        }),
+        _ => None,
+    }
+}
+
 /// List documents whose originals live as encrypted records (parentless
 /// Document originals). Metadata is honest even locked; size bytes are
 /// unknown without decrypt and are reported as None-equivalent zero with a
-/// derived title.
+/// derived title. When the vault is unlocked, an Android-authored note
+/// envelope yields the REAL title and tags; otherwise the title falls back
+/// to the record id (truthful, if ugly) — never an invented title.
 pub fn list_migrated_documents(vault_root: &str, vault: Option<&Vault>) -> Vec<DocumentMetadata> {
     let root = PathBuf::from(vault_root);
     let records = scan_record_metadata(&root);
     let legacy = legacy_ids_for_parents(&records, vault);
     records
         .iter()
-        .filter(|e| e.record_type == RecordType::Document && e.parent_record_id.is_none())
+        .filter(|e| {
+            !e.tombstone && e.record_type == RecordType::Document && e.parent_record_id.is_none()
+        })
         .map(|e| {
+            // Prefer the decrypted Android envelope when we can read it.
+            let android = vault.and_then(|v| {
+                v.read_record(&e.record_id)
+                    .ok()
+                    .and_then(|(_, bytes)| parse_android_envelope(&bytes))
+                    .filter(|env| env.kind == "note")
+            });
             let (title, _rel) = legacy
                 .get(&e.record_id)
                 .cloned()
                 .unwrap_or_else(|| (e.record_id.clone(), String::new()));
+            let title = android
+                .as_ref()
+                .map(|env| env.title_or_key.clone())
+                .unwrap_or(title);
             DocumentMetadata {
                 id: e.record_id.clone(),
                 title,
@@ -1034,7 +1101,9 @@ pub fn list_migrated_documents(vault_root: &str, vault: Option<&Vault>) -> Vec<D
                 created_at: e.created_at.clone(),
                 modified_at: e.updated_at.clone(),
                 source_platform: "DESKTOP".to_string(),
-                tags: vec!["migrated".to_string()],
+                tags: android
+                    .map(|env| env.tags)
+                    .unwrap_or_else(|| vec!["migrated".to_string()]),
                 page_count: None,
                 word_count: None,
             }
@@ -1047,7 +1116,7 @@ pub fn list_migrated_documents(vault_root: &str, vault: Option<&Vault>) -> Vec<D
 /// distinguish provenance (never hidden from the caller).
 fn score_with_tfidf(
     query: &MemorySearchQuery,
-    file_contents: Vec<(String, String, String, String)>,
+    file_contents: Vec<(String, String, String, String, String)>,
     provenance: &str,
 ) -> Vec<MemorySearchResult> {
     if file_contents.is_empty() {
@@ -1058,14 +1127,14 @@ fn score_with_tfidf(
     if query.query == "*" {
         let mut results: Vec<MemorySearchResult> = file_contents
             .into_iter()
-            .map(|(id, content, memory_type, modified_at)| {
+            .map(|(id, title, content, memory_type, modified_at)| {
                 // Grapheme-safe: raw byte slicing panicked mid-character
                 // on Devanagari/Bengali/Assamese input.
                 let preview = unoone_text::preview(&content, 200);
                 MemorySearchResult {
                     id: id.clone(),
                     memory_type,
-                    title: id,
+                    title,
                     preview,
                     relevance: 1.0,
                     created_at: modified_at,
@@ -1083,7 +1152,7 @@ fn score_with_tfidf(
 
     let num_docs = file_contents.len() as f32;
     let mut doc_freq: HashMap<String, u32> = HashMap::new();
-    for (_, content, _, _) in &file_contents {
+    for (_, _, content, _, _) in &file_contents {
         let unique_terms: std::collections::HashSet<String> =
             tokenize(&content.to_lowercase()).into_iter().collect();
         for term in unique_terms {
@@ -1093,7 +1162,7 @@ fn score_with_tfidf(
 
     let mut scored: Vec<MemorySearchResult> = file_contents
         .into_iter()
-        .filter_map(|(id, content, memory_type, modified_at)| {
+        .filter_map(|(id, title, content, memory_type, modified_at)| {
             if !query.memory_types.is_empty()
                 && !query
                     .memory_types
@@ -1138,7 +1207,7 @@ fn score_with_tfidf(
                 } else {
                     provenance.to_string()
                 },
-                title: id,
+                title,
                 preview,
                 relevance: score,
                 created_at: modified_at,
@@ -1169,8 +1238,12 @@ pub fn search_migrated_contents(
     let root = PathBuf::from(vault_root);
     let records = scan_record_metadata(&root);
     let legacy = legacy_ids_for_parents(&records, Some(vault));
-    let mut contents: Vec<(String, String, String, String)> = Vec::new();
+    // (id, title, content, memory_type, modified_at)
+    let mut contents: Vec<(String, String, String, String, String)> = Vec::new();
     for entry in &records {
+        if entry.tombstone {
+            continue; // deleted on any host — stays deleted here
+        }
         let is_memory = entry.record_type == RecordType::Memory && entry.parent_record_id.is_none();
         // Transcript children count only when their parent is a Document —
         // Memory originals also get a Transcript child during migration, and
@@ -1187,49 +1260,87 @@ pub fn search_migrated_contents(
         let Ok((_, bytes)) = vault.read_record(&entry.record_id) else {
             continue; // a record we cannot decrypt is omitted, not broken over
         };
-        let content = match String::from_utf8(bytes) {
-            Ok(c) => c,
-            Err(_) => continue, // binary content honestly excluded from text search
-        };
-        let id = if is_memory {
-            entry.record_id.clone()
+        if is_memory {
+            // Android-authored MEMORY records carry a {kind:"memory",key,value}
+            // envelope: search "key: value" (clean tokens, real title). Raw
+            // legacy memory bytes search verbatim.
+            let (title, content) = match parse_android_envelope(&bytes) {
+                Some(env) if env.kind == "memory" => {
+                    let title = env.title_or_key;
+                    let content = format!("{}: {}", title, env.body);
+                    (title, content)
+                }
+                _ => {
+                    let Ok(raw) = String::from_utf8(bytes) else {
+                        continue; // binary memory content honestly excluded from text search
+                    };
+                    (entry.record_id.clone(), raw)
+                }
+            };
+            contents.push((
+                entry.record_id.clone(),
+                title,
+                content,
+                "memory".to_string(),
+                entry.updated_at.clone(),
+            ));
         } else {
-            entry
+            let content = match String::from_utf8(bytes) {
+                Ok(c) => c,
+                Err(_) => continue, // binary content honestly excluded from text search
+            };
+            let id = entry
                 .parent_record_id
                 .as_ref()
                 .and_then(|p| legacy.get(p).map(|(lid, _)| lid.clone()))
-                .unwrap_or_else(|| entry.record_id.clone())
-        };
-        // Keep type names compatible with the agent's memory_types filter
-        // (["note","document","memory"]) — starts_with matching applies.
-        let ext = if is_memory {
-            "memory".to_string()
-        } else {
-            "document".to_string()
-        };
-        contents.push((id, content, ext, entry.updated_at.clone()));
+                .unwrap_or_else(|| entry.record_id.clone());
+            let title = id.clone();
+            contents.push((
+                id,
+                title,
+                content,
+                "document".to_string(),
+                entry.updated_at.clone(),
+            ));
+        }
     }
+    // Keep type names compatible with the agent's memory_types filter
+    // (["note","document","memory"]) — starts_with matching applies, so the
+    // provenance must stay "" (a "migrated" label here would be filtered out).
     score_with_tfidf(query, contents, "")
 }
 
-/// Read one migrated document's content by its pre-migration legacy id.
-/// Returns the ORIGINAL bytes (or the extracted transcript when asked to
-/// present text). Only works unlocked; returns None otherwise.
+/// Read one migrated document's content. [id] is whatever `list_migrated_documents`
+/// surfaced: a pre-migration legacy id (desktop-migrated documents) or a vault
+/// record id (Android-authored notes list their record id, and locked listings
+/// fall back to it too). Returns the ORIGINAL bytes. Only works unlocked;
+/// returns None otherwise.
 pub fn read_migrated_document_content(
     vault_root: &str,
-    legacy_id: &str,
+    id: &str,
     vault: &Vault,
 ) -> Option<Vec<u8>> {
     let root = PathBuf::from(vault_root);
     let records = scan_record_metadata(&root);
+    // Direct record-id match first (no decrypt needed to resolve).
+    if let Some(direct) = records.iter().find(|e| {
+        !e.tombstone
+            && e.record_type == RecordType::Document
+            && e.parent_record_id.is_none()
+            && e.record_id == id
+    }) {
+        return vault.read_record(&direct.record_id).ok().map(|(_, b)| b);
+    }
+    // Otherwise resolve through the migration envelope's legacy id.
     let legacy = legacy_ids_for_parents(&records, Some(vault));
     // Document original whose migration envelope carries this legacy id.
     let target = records.iter().find(|e| {
-        e.record_type == RecordType::Document
+        !e.tombstone
+            && e.record_type == RecordType::Document
             && e.parent_record_id.is_none()
             && legacy
                 .get(&e.record_id)
-                .map(|(lid, _)| lid == legacy_id)
+                .map(|(lid, _)| lid == id)
                 .unwrap_or(false)
     })?;
     let (_, bytes) = vault.read_record(&target.record_id).ok()?;
@@ -1441,6 +1552,138 @@ mod migrated_readpath_tests {
         // Unlocked-handle absence: all three paths return empty/None.
         assert!(search_migrated_contents(&query, &root, None).is_empty());
         assert!(list_migrated_documents(&root, None).is_empty());
+    }
+
+    // ---- Android-authored record interop (read-compat) ----------------------
+    // The phone's VaultRecordFactory writes {kind:"note"...} into DOCUMENT
+    // records and {kind:"memory"...} into MEMORY records. The desktop must
+    // read them back with real titles/keys, not raw record ids.
+
+    fn android_vault(dir_path: &std::path::Path) -> (Vault, String) {
+        let vault_root = dir_path.join("UNOONE");
+        let _ = Vault::create(&vault_root, b"synthetic-android-interop-pw").unwrap();
+        let mut vault = Vault::open(&vault_root).unwrap();
+        vault.unlock(b"synthetic-android-interop-pw").unwrap();
+        (vault, vault_root.to_string_lossy().to_string())
+    }
+
+    fn write_android_record(vault: &mut Vault, record_type: RecordType, payload: &str) -> String {
+        let mut record = unoone_vault_core::Record::new(record_type, "ANDROID", "phone-uuid");
+        record.origin_platform = "ANDROID".to_string();
+        let id = record.record_id.clone();
+        vault.write_record(record, payload.as_bytes()).unwrap();
+        id
+    }
+
+    #[test]
+    fn android_note_lists_with_real_title_and_reads_by_record_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        let payload = r#"{"kind":"note","title":"Groceries","content":"turmeric and cardamom","tags":"list,errand"}"#;
+        let note_id = write_android_record(&mut vault, RecordType::Document, payload);
+
+        // Unlocked: the envelope yields the real title and tags.
+        let listed = list_migrated_documents(&root, Some(&vault));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].title, "Groceries",
+            "Android note must show its real title, not the record id"
+        );
+        assert_eq!(
+            listed[0].tags,
+            vec!["list".to_string(), "errand".to_string()]
+        );
+        assert_eq!(listed[0].id, note_id);
+
+        // The id surfaced by the listing (the record id) must read back.
+        let bytes = read_migrated_document_content(&root, &note_id, &vault)
+            .expect("Android note must be readable by its record id");
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("turmeric"));
+    }
+
+    #[test]
+    fn locked_listing_of_android_note_falls_back_to_record_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        let payload = r#"{"kind":"note","title":"Groceries","content":"turmeric","tags":""}"#;
+        let note_id = write_android_record(&mut vault, RecordType::Document, payload);
+        drop(vault);
+
+        // Locked: no decrypt, so the title is the record id — honest, never invented.
+        let listed = list_migrated_documents(&root, None);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, note_id);
+    }
+
+    #[test]
+    fn android_memory_searches_by_value_with_key_as_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        let payload =
+            r#"{"kind":"memory","key":"wake_word","value":"namaste deva","type":"preference"}"#;
+        write_android_record(&mut vault, RecordType::Memory, payload);
+
+        let query = MemorySearchQuery {
+            query: "namaste".to_string(),
+            memory_types: vec![],
+            limit: 10,
+            min_relevance: 0.0,
+        };
+        let found = search_migrated_contents(&query, &root, Some(&vault));
+        assert_eq!(found.len(), 1, "expected exactly one hit: {found:?}");
+        assert_eq!(
+            found[0].title, "wake_word",
+            "memory title must be the envelope key, not the record id"
+        );
+        assert!(found[0].preview.contains("namaste deva"));
+
+        // The agent's memory_types filter must still match ("memory").
+        let typed = MemorySearchQuery {
+            query: "namaste".to_string(),
+            memory_types: vec!["memory".to_string()],
+            limit: 10,
+            min_relevance: 0.0,
+        };
+        assert_eq!(
+            search_migrated_contents(&typed, &root, Some(&vault)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn tombstoned_records_are_never_listed_or_searched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut vault, root) = android_vault(dir.path());
+        let note_payload = r#"{"kind":"note","title":"Secret","content":"deleted soon","tags":""}"#;
+        let note_id = write_android_record(&mut vault, RecordType::Document, note_payload);
+        let mem_payload =
+            r#"{"kind":"memory","key":"old_pref","value":"cardamom forever","type":"preference"}"#;
+        let mem_id = write_android_record(&mut vault, RecordType::Memory, mem_payload);
+
+        // Delete both on the phone (tombstone) — the desktop must respect it.
+        vault
+            .delete_record(&note_id, "ANDROID", "phone-uuid")
+            .unwrap();
+        vault
+            .delete_record(&mem_id, "ANDROID", "phone-uuid")
+            .unwrap();
+
+        assert!(
+            list_migrated_documents(&root, Some(&vault)).is_empty(),
+            "a deleted note must not come back on the desktop"
+        );
+        let query = MemorySearchQuery {
+            query: "cardamom".to_string(),
+            memory_types: vec![],
+            limit: 10,
+            min_relevance: 0.0,
+        };
+        assert!(
+            search_migrated_contents(&query, &root, Some(&vault)).is_empty(),
+            "a deleted memory must not come back on the desktop"
+        );
+        assert!(read_migrated_document_content(&root, &note_id, &vault).is_none());
     }
 }
 
