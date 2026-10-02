@@ -8,6 +8,11 @@ edition = "2021"
 name = "start-unoone"
 path = "src/main.rs"
 
+# Windows identity (2026-10-02): build-only, embeds icon.ico into the exe
+# resource section via rc.exe — no runtime dependency.
+[build-dependencies]
+winresource = "0.1"
+
 [dependencies]
 serde_json = "1"
 unoone-usb-manifest = { path = "../../../packages/usb-manifest" }

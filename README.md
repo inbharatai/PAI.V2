@@ -511,6 +511,20 @@ Control policies will allow unsigned build scripts or binaries: Windows bundle
 CI is the reproducible build path, and release signing plus a real prepared-host
 insertion test remain mandatory production gates.
 
+**Windows application identity** (2026-10-02): all three shipped executables
+embed the UnoOne brand icon (rendered from the same `favicon.svg` brand mark
+the in-app UI uses — no redesign) as a multi-resolution resource. `UnoOnePower.exe`
+embeds it through Tauri's resource pipeline from `apps/desktop/src-tauri/icons/icon.ico`
+(16/24/32/48/64/128/256 px), which is what the taskbar, Alt+Tab and the title bar
+show, because the Tauri window is owned by that same executable — no launcher,
+helper or WebView host owns it, so no AppUserModelID override is needed.
+`Start UnoOne.exe` and `UnoOneDock.exe` embed the same icon via a `winresource`
+build script. The taskbar/window face was previously the Tauri placeholder stub
+(a 126-byte 32×32 .ico), which Windows rendered as the generic white icon.
+Build note: `tauri_build` re-embeds the icon only when `tauri.conf.json` changes
+— after replacing icon files in an existing target dir, touch the config or
+build clean; CI's fresh checkout is unaffected.
+
 ## Tests
 
 ```bash
