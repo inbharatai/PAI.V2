@@ -925,22 +925,22 @@ fn parse_pptx_slide(xml: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// One plaintext-indexable record from the encrypted store.
-struct RecordFileEntry {
-    record_id: String,
-    record_type: RecordType,
-    parent_record_id: Option<String>,
-    created_at: String,
-    updated_at: String,
+pub(crate) struct RecordFileEntry {
+    pub(crate) record_id: String,
+    pub(crate) record_type: RecordType,
+    pub(crate) parent_record_id: Option<String>,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
     /// Deleted records (their file now holds a tombstone envelope) must not
     /// be listed or searched — a deletion on any host must stick here too.
-    tombstone: bool,
+    pub(crate) tombstone: bool,
 }
 
 fn records_dir(vault_root: &std::path::Path) -> PathBuf {
     vault_root.join("VAULT").join("records")
 }
 
-fn scan_record_metadata(vault_root: &std::path::Path) -> Vec<RecordFileEntry> {
+pub(crate) fn scan_record_metadata(vault_root: &std::path::Path) -> Vec<RecordFileEntry> {
     let dir = records_dir(vault_root);
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(&dir) else {

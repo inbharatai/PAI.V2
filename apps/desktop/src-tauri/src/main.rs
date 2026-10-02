@@ -16,6 +16,12 @@ mod bharat_audio;
 mod boot_trace;
 mod browser;
 mod capability;
+// Persistent conversation memory: every completed chat turn is written to
+// the encrypted vault as a MESSAGE record, and a new session recalls the
+// recent turns so the model has continuity across sessions. The vault is
+// the single canonical store — the same records serve the agent's
+// search plane and any vault-aware client on any host.
+mod chat_memory;
 mod document_migration;
 mod documents;
 // P1-C: desktop producer of the shared ProcedureOutcome contract record —
@@ -237,6 +243,8 @@ fn main() {
             vault_is_unlocked,
             vault_read_record,
             vault_write_record,
+            save_chat_turn,
+            recall_chat_memory,
             // Settings and configuration
             get_version,
             set_settings,
@@ -1047,6 +1055,57 @@ fn vault_write_record(
         .map_err(|e| format!("Write failed: {}", e))?;
 
     Ok(record_id)
+}
+
+/// Save one completed chat turn (user message + assistant reply) to the
+/// encrypted vault as a MESSAGE record. Persistent conversation memory:
+/// the next session recalls it via `recall_chat_memory`. Requires the
+/// vault to be unlocked — no silent plaintext fallback.
+#[tauri::command]
+fn save_chat_turn(
+    session_id: String,
+    user_message: String,
+    assistant_message: String,
+    state: tauri::State<'_, DesktopVaultState>,
+) -> Result<String, String> {
+    let mut vault_opt = state
+        .vault
+        .lock()
+        .map_err(|e| format!("State lock error: {}", e))?;
+    let vault = vault_opt.as_mut().ok_or("Vault is not unlocked")?;
+    let turn =
+        chat_memory::ChatTurn::new(&session_id, &user_message, &assistant_message);
+    chat_memory::save_chat_turn_to_vault(vault, &turn)
+}
+
+/// Recall the most recent persisted chat turns, oldest first, so a new
+/// session starts with conversation continuity. Requires an unlocked
+/// vault (content is encrypted); returns [] when nothing is stored.
+#[tauri::command]
+fn recall_chat_memory(
+    limit: Option<u32>,
+    state: tauri::State<'_, DesktopVaultState>,
+) -> Result<serde_json::Value, String> {
+    let vault_opt = state
+        .vault
+        .lock()
+        .map_err(|e| format!("State lock error: {}", e))?;
+    let vault = vault_opt.as_ref().ok_or("Vault is not unlocked")?;
+    let vault_root = std::path::PathBuf::from(
+        state
+            .vault_root
+            .lock()
+            .map_err(|e| format!("State lock error: {}", e))?
+            .clone(),
+    );
+    let turns = chat_memory::recall_chat_turns(&vault_root, vault, limit.unwrap_or(30) as usize);
+    crate::boot_trace::mark_detail(
+        "chat memory: recall",
+        &format!("{} turn(s) restored", turns.len()),
+    );
+    Ok(serde_json::json!({
+        "turns": turns,
+    }))
 }
 
 #[tauri::command]

@@ -365,6 +365,49 @@ export function ChatView() {
     return () => { cancelled = true; };
   }, []);
 
+  // Persistent conversation memory (directive: run-trail memory): the chat
+  // history lives in the encrypted vault as MESSAGE records — every device
+  // that unlocks this vault reads the same memory. On mount the most recent
+  // turns are restored so the model starts with continuity instead of a
+  // blank slate; they are ordinary history turns, so the request pipeline
+  // and the context budget treat them like any other turn. A locked or
+  // absent vault degrades to the previous session-only chat.
+  const [memoryRestoredCount, setMemoryRestoredCount] = useState(0);
+  const memoryRestoreAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (memoryRestoreAttemptedRef.current) return;
+    memoryRestoreAttemptedRef.current = true;
+    void tauriApi.recallChatMemory(30)
+      .then(({ turns }) => {
+        if (turns.length === 0) return;
+        setMessages(prev => {
+          // Never clobber a live chat — restore only into an empty view.
+          if (prev.length > 0) return prev;
+          const restored: ChatMessage[] = [];
+          for (const turn of turns) {
+            const at = Date.parse(turn.timestamp) || Date.now();
+            restored.push({
+              id: crypto.randomUUID(),
+              role: 'user',
+              content: turn.user_message,
+              timestamp: at,
+            });
+            restored.push({
+              id: crypto.randomUUID(),
+              role: 'assistant',
+              content: turn.assistant_message,
+              timestamp: at,
+            });
+          }
+          return restored;
+        });
+        setMemoryRestoredCount(turns.length);
+      })
+      .catch(() => {
+        // Vault locked / unavailable — session-only chat, as before.
+      });
+  }, []);
+
   // The real expanded agent workspace root for the full-access label (defect
   // #36, live-caught 2026-09-14: the label showed a literal
   // "%USERPROFILE%\UnoOneAgent" and the agent's answers said only "in your
@@ -559,6 +602,12 @@ export function ChatView() {
       content: composedPrompt,
       timestamp: Date.now(),
     };
+    // What the user actually said — persisted to the vault as memory. The
+    // attachment blocks are not: they are per-turn payload, not memory.
+    const saidText = input.trim();
+    // Stopped runs leave a UI bubble but are not replies — they must not
+    // enter the persistent conversation memory.
+    let persistTurn = true;
 
     setMessages(prev => [...prev, userMessage]);
     setInput('');
@@ -627,6 +676,7 @@ export function ChatView() {
         // the work the user just stopped. Honest stopped bubble carrying the
         // tool activity recorded so far.
         if (/^cancelled:/.test(harnessMsg)) {
+          persistTurn = false;
           const cause = /: user$/.test(harnessMsg)
             ? 'you stopped it'
             : 'a newer request superseded it';
@@ -680,6 +730,14 @@ export function ChatView() {
         }
       }
       setMessages(prev => [...prev, assistantMessage]);
+      // Persistent memory: the completed turn is written to the encrypted
+      // vault as a MESSAGE record so the next session — on this or any
+      // device that unlocks the same vault — recalls it. Non-fatal: a
+      // locked vault degrades to session-only chat.
+      if (persistTurn) {
+        void tauriApi.saveChatTurn(conversationIdRef.current, saidText, assistantMessage.content)
+          .catch(err => console.warn('[ChatView] chat turn not persisted:', err));
+      }
       // STS out: with auto-speak on, the reply is voiced as it lands.
       if (autoSpeak && vaultRoot) void speakMessage(assistantMessage);
     } catch (err) {
@@ -834,6 +892,11 @@ export function ChatView() {
           </div>
         )}
 
+        {memoryRestoredCount > 0 && (
+          <div style={{ padding: '8px 16px', fontSize: '12px', color: 'var(--text-secondary, #888)', textAlign: 'center' }}>
+            ↺ Restored {memoryRestoredCount} turn{memoryRestoredCount === 1 ? '' : 's'} of conversation memory from your vault — the model starts with this history.
+          </div>
+        )}
         {messages.map(msg => (
           <div key={msg.id} className={`chat-message ${msg.role}`}>
             <div className="chat-avatar">

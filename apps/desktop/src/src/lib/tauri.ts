@@ -138,6 +138,17 @@ export interface ModelCacheStatus {
   sha256: string;
 }
 
+/// One persisted conversation turn, decrypted from the vault's MESSAGE
+/// records — oldest first, ready to splice into the chat history.
+export interface ChatMemoryTurn {
+  kind: 'chat_turn';
+  schema: number;
+  session_id: string;
+  user_message: string;
+  assistant_message: string;
+  timestamp: string;
+}
+
 export type Content = string | ContentPart[];
 
 export interface ContentPart {
@@ -458,6 +469,17 @@ export const tauriApi = {
   stageModelCache: (modelPath: string, vaultRoot: string) =>
     invoke<ModelCacheStatus>('stage_model_cache', { model_path: modelPath, vault_root: vaultRoot }),
   checkFileExists: (path: string) => invoke<boolean>('check_file_exists', { path }),
+
+  // Persistent conversation memory — chat turns live in the encrypted
+  // vault (MESSAGE records) and are recalled at session start.
+  saveChatTurn: (sessionId: string, userMessage: string, assistantMessage: string) =>
+    invoke<string>('save_chat_turn', {
+      session_id: sessionId,
+      user_message: userMessage,
+      assistant_message: assistantMessage,
+    }),
+  recallChatMemory: (limit = 30) =>
+    invoke<{ turns: ChatMemoryTurn[] }>('recall_chat_memory', { limit }),
 
   // Safety guard
   getSecurityLevel: () => invoke<SecurityLevel>('get_security_level'),

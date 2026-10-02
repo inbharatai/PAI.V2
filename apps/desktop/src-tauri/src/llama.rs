@@ -2665,9 +2665,10 @@ pub async fn start_model_server(
     //      runs on unverified bytes — the gate only moves WHEN the multi-GB
     //      asset sweep must finish relative to model boot.
     let serving_verified_host_cache = model_served_from_verified_host_cache(&config.model_path);
-    if !startup.is_asset_validation_complete()
-        && !(startup.is_boot_gate_complete() && serving_verified_host_cache)
-    {
+    // Two-tier gate (see the comment above); the release condition reads
+    // cleanly as: full sweep done, or (boot gate done AND cached model).
+    let boot_released = startup.is_boot_gate_complete() && serving_verified_host_cache;
+    if !startup.is_asset_validation_complete() && !boot_released {
         crate::boot_trace::mark(
             "start_model_server: REFUSED — assets not validated (and model is not on the verified host cache)",
         );
