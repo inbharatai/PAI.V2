@@ -395,32 +395,6 @@ fn scan_removable_drives() -> Vec<String> {
     drives
 }
 
-/// Validate that a directory is a legitimate UnoOne vault by checking
-/// manifest.json, VERSION, and vault.id — not just the directory name.
-fn validate_vault_root(vault_root: &str) -> Result<(String, String), String> {
-    let started = std::time::Instant::now();
-    boot_trace::mark_detail("validate_vault_root: begin", vault_root);
-    let root = startup::normalize_candidate_root(std::path::Path::new(vault_root))
-        .ok_or_else(|| "No UNOONE directory or manifest.json found".to_string())?;
-    let report = unoone_usb_manifest::validate_package(
-        &root,
-        unoone_usb_manifest::ValidationScope::DesktopLaunch,
-    );
-    let package = report.package.ok_or_else(|| {
-        report
-            .failures
-            .iter()
-            .map(|failure| format!("{:?}: {}", failure.code, failure.message))
-            .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    boot_trace::mark_detail(
-        "validate_vault_root: end",
-        &format!("elapsed={:.1}s", started.elapsed().as_secs_f32()),
-    );
-    Ok((package.root.to_string_lossy().to_string(), package.vault_id))
-}
-
 /// Guards against stacking background DesktopLaunch validations: the sweep is
 /// expensive (it hashes every package asset), so only one may run at a time.
 static ASSET_VALIDATION_RUNNING: AtomicBool = AtomicBool::new(false);
