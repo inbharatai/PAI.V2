@@ -66,6 +66,17 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   manifest-declared UnoOne Power executable.
 - Removal stops model inference, discards active recording buffers, and
   emergency-locks the vault.
+- **BootGate (2026-10-02):** a fast identity + runtimes gate (~8–14 s)
+  releases model boot from the digest-verified host cache while the full
+  556-asset package sweep keeps running in the background — the model is
+  usable ~15 s from drive-detect instead of waiting out the full sweep, and
+  drive-path models still wait for it. The background sweep also stages
+  the ASR/TTS models to the host cache when it finishes. The 13-minute
+  cold-boot regression (2026-10-02) was measured to Windows Defender's
+  first-access scanning of same-day-staged 11 GB, not code; warm boot went
+  77.4 s → 40–56 s with the model server live at ~15 s. A boot-chain race
+  that killed model startup when the user unlocked during validation
+  (silently, no error, no retry) was caught live and fixed the same day.
 - Real Tauri API calls (no mock data), real SHA-256 verification, honest error states.
 - Windows bundle CI builds `UnoOnePower.exe`, `UnoOneDock.exe`, and
   `Start UnoOne.exe` together and publishes their SHA-256 sums as one artifact.
@@ -91,6 +102,20 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   (≥3 lexical hits) are reordered by one bounded think-off completion on the
   same verified local model (top 8 candidates, 30 s hard deadline,
   fail-open to the lexical order on any error — retrieval can never regress).
+- **Persistent conversation memory (2026-10-02):** every completed chat
+  turn (the user's words + the assistant's reply) is written to the
+  unlocked vault as an XChaCha20-Poly1305-encrypted `MESSAGE` record, and
+  a new session recalls the most recent 30 turns, oldest first, as
+  ordinary history — the context budget and request pipeline treat
+  restored turns like any other, and a banner states how much was
+  restored. The drive vault is the single memory plane: any client that
+  unlocks it reads the same history. Stopped runs are never saved,
+  attachment payloads stay per-turn, tombstones hold across sessions, and
+  a locked vault degrades to session-only chat (never plaintext). Long
+  replies are also spoken in sentence-bounded ~280-char chunks spliced
+  into one WAV, so CPU-bound TTS can no longer hit the 180 s process
+  deadline (the shipped audio.cpp build is CPU-only — RTF ~7 — which the
+  2026-10-02 measurement exposed as the remaining speech latency).
 - **Tool surface (FullAccess permission, default ON):** `fs.read/write/list`
   with exact size/count metadata, `process.run` with allowlisted direct-argv
   execution and 10 s foreground deadlines (background deploys supported),
@@ -118,11 +143,11 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 
 | Component | Status |
 |-----------|--------|
-| Physical Pocket AI | **INTEGRITY-VERIFIED PROTOTYPE — re-staged 2026-10-01** (Windows apps staged from the `c861bba` CI bundle: Power/Dock/Starter hash-verified; Android APK staged from the P1-E build (tree `8d0c2d0`, android-identical to main `37110f8`); `SOURCE/PAI.V2` = `git archive` of main `37110f8`): strict manifest sweep passes (`Start UnoOne.exe --verify-only` exit 0, 0 failures), manifest schema `2`, `pai_version 0.5.0-alpha`; live boot + baseline inference re-verified on the drive 2026-10-01 (starter → Power with correct drive-root args; llama-server loaded Gemma-12B in 42 s and answered a live prompt). Manifest now also records the Android APK (`mobile.apk`, kind `MOBILE_APP`) for tamper-evidence. Historical acceptance 2026-09-14/15: `docs/verification/2026-09-14/` + `docs/verification/2026-09-15/` (docs 105–116) |
+| Physical Pocket AI | **INTEGRITY-VERIFIED PROTOTYPE — UnoOnePower re-staged 2026-10-02** (`UnoOnePower.exe` rebuilt from main and staged at exe sha `E22067AA…`, backed up to `RECOVERY/package-backups/`; Dock/Starter/Android APK unchanged from the 2026-10-01 staging — Starter `c861bba` bundle, APK tree `8d0c2d0`): strict manifest sweep passes (`Start UnoOne.exe --verify-only` exit 0, 0 failures), manifest schema `2`, `pai_version 0.5.0-alpha`; live boot verified on the drive 2026-10-02 with BootGate (identity+runtime gate PASSED 14.1 s → model released from the verified host cache 15.4 s → Gemma-12B VERIFIED LOADED 40.3 s) and the persistent chat-memory recall live (`0 turn(s)` on first run — correct, nothing persisted yet). Manifest also records the Android APK (`mobile.apk`, kind `MOBILE_APP`) for tamper-evidence. Historical acceptance 2026-09-14/15: `docs/verification/2026-09-14/` + `docs/verification/2026-09-15/` (docs 105–116) |
 | Desktop frontend embedding | **VERIFIED** — root cause of the historic "localhost refused to connect" drive is fixed (`tauri/custom-protocol` default feature; without it `generate_context!` embeds zero assets). Byte-level gate passes in CI and on the staged drive binary |
 | Mobile app (Android) | V2 agent pipeline + Pocket AI USB auto-open; M1-M3 truthful fixes (USB detection reasons, Room TTL/clear-on-detach cache, unused permission removed). Compiles, lints, tests, and `assembleDebug` passes; **cross-platform vault contract proven bidirectionally in CI** (Kotlin↔Rust Argon2id + AES-GCM record layer AND XChaCha20 master-key wrap — `packages/vault-core/test-vectors/`, `VaultCryptoCrossPlatformTest`). Physical phone test pending |
 | Desktop frontend (React) | BUILDS — Vite build passes, oxlint clean, real Tauri API calls, no mock data |
-| Desktop backend (Rust) | BUILDS AND TESTS — fmt/check/test/clippy clean on **both windows-latest and macos-latest**; 70/70+ vault-core (Wave-1 regressions + cross-platform vectors), 20/20 recording-policy, 16/16 text-util, 16/16 usb-manifest, 9/9 document-migration, 13/13 browser-policy. The deferred dead-code sweep landed: `wait_for_exit()`, `get_backend()`, the never-read config/model_info fields and `is_confirmation_required()` are gone with clippy `-D warnings` still clean |
+| Desktop backend (Rust) | BUILDS AND TESTS — fmt/check/test/clippy clean on **both windows-latest and macos-latest**; 70/70+ vault-core (Wave-1 regressions + cross-platform vectors), 20/20 recording-policy, 16/16 text-util, 16/16 usb-manifest, 9/9 document-migration, 13/13 browser-policy, 2/2 chat-memory round-trip (vault `MESSAGE` record persistence: ordering + limit tail, tombstones and foreign records skipped). The deferred dead-code sweep landed: `wait_for_exit()`, `get_backend()`, the never-read config/model_info fields and `is_confirmation_required()` are gone with clippy `-D warnings` still clean |
 | Windows Dock / Starter | **INTEGRITY-VERIFIED ON DRIVE** — manifest-declared, hash-verified, native `--verify-only` exits 0; transactional staging with automatic rollback proven live |
 | Vault encryption (`packages/vault-core`) | IMPLEMENTED AND CORRECTNESS-HARDENED — Argon2id (256 MiB / t=3 / p=4) + AES-256-GCM for new records (legacy XChaCha20-Poly1305 stays readable, identified by nonce length) + HKDF-SHA-256 + BIP-39 recovery + write-ahead journal; transactional first-use setup refuses re-initialisation and preserves packaged `vault.id` bytes. Per-vault random salts on both the password and recovery paths. The KDF parameters are pinned as a cross-platform contract with the Kotlin `encrypted-vault` package (`SPEC_ARGON2_*` plus a `const` assertion that makes drift a compile error in release builds), because the test profile deliberately uses reduced parameters and would not catch a change that broke Android↔Windows unlock. **Wave 1** additionally fixed four release blockers: header slot selection now picks the newest committed generation (a password change written to the inactive slot used to be silently discarded on restart), record metadata is authenticated and re-verified on every read (privacy level, tombstone, type, revision and timestamps were previously editable on disk while content still decrypted), record writes are wrapped in real journal transactions with fsync-and-verify before promotion, and record IDs must be canonical UUID v4 before touching a path |
 | Model inference | Bundled llama.cpp only; direct runtime test verified (real answer, 127.0.0.1-only, clean stop) — see `docs/verification/2026-07-30/59_DIRECT_GEMMA.md` |
@@ -472,7 +497,7 @@ the two path dependencies above resolve unchanged.
 |-----------|---------|--------|
 | `UnlockScreen` | Password-only vault unlock, USB detection, new vault setup | IMPLEMENTED (live-unlocked on the staged drive each acceptance run) |
 | `Sidebar` | View navigation (Chat, Recordings, Memory, Vault, Model, Browser, Documents, Accessibility, Capabilities, Hardware, Settings) | IMPLEMENTED (live-driven) |
-| `ChatView` | Gemma 4 conversation via the harness bridge (agent lane, attachments, voice picker 16 languages) | IMPLEMENTED (live-verified: chat, STS loop, vision attachments) |
+| `ChatView` | Gemma 4 conversation via the harness bridge (agent lane, attachments, voice picker 16 languages); persistent conversation memory (vault `MESSAGE` records — save after each completed turn, 30 most recent restored at session start with an honest banner) | IMPLEMENTED (live-verified: chat, STS loop, vision attachments, chunked TTS; chat-memory recall mark live in the boot trace) |
 | `RecordingView` | Recording with type/privacy, pause/resume/bookmarks, vault encryption | IMPLEMENTED (backend wired, needs UI testing) |
 | `MemoryExplorer` | 7 memory types, search, cross-platform sync | BUILDS_NOT_RUNTIME_TESTED |
 | `VaultView` | Vault status, emergency lock | BUILDS_NOT_RUNTIME_TESTED |
