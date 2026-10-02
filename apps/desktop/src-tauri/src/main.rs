@@ -492,6 +492,22 @@ fn start_background_asset_validation(app_handle: tauri::AppHandle, root: &std::p
         if let Some(package) = report.package {
             startup_state.connect(&package);
             startup_state.full_sweep_completed();
+
+            // Phase C — warm the speech model host cache. The measured
+            // per-synthesis cost was 24 s of pure USB model read (0.04 s
+            // CPU); staging OmniVoice + Qwen3-ASR onto the host disk after
+            // the sweep (never during it — no drive contention with the
+            // 556-asset hash pass) turns later syntheses into SSD reads.
+            // Non-fatal and never blocking: speech serves from the drive
+            // path until the verified copy lands.
+            let speech_root = root.clone();
+            std::thread::spawn(move || {
+                if let Err(error) =
+                    bharat_audio::stage_speech_models_to_host_cache(&speech_root.to_string_lossy())
+                {
+                    boot_trace::mark_detail("speech cache: skipped", &error);
+                }
+            });
         } else {
             startup_state.reject(report.failures.clone());
         }

@@ -497,7 +497,7 @@ impl ModelManager {
     }
 
     /// Compute the SHA-256 hex digest of a file.
-    fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    pub(crate) fn sha256_file(path: &std::path::Path) -> Result<String, String> {
         use sha2::Digest;
         use std::io::Read;
         let mut file = std::fs::File::open(path)
@@ -530,7 +530,7 @@ impl ModelManager {
 
     /// Read the expected SHA-256 hash for a model path from the USB manifest.
     /// Accepts either the relative manifest path or an absolute on-disk path.
-    fn read_manifest_model_hash(vault_root: &str, model_path: &str) -> Option<String> {
+    pub(crate) fn read_manifest_model_hash(vault_root: &str, model_path: &str) -> Option<String> {
         // Host-disk model cache entries are named <manifest-sha256>.gguf and
         // are only published after the streamed copy is digest-verified, so
         // for a cache path the filename IS the manifest-expected hash. The
@@ -573,6 +573,23 @@ impl ModelManager {
                 let full = Self::normalize_path(&std::fs::canonicalize(&full).unwrap_or(full));
                 if full == requested {
                     return Some(asset.sha256.clone());
+                }
+            }
+            // Speech models (SPEECH/models/…) get the same digest-bound
+            // treatment: the speech plane serves ASR/TTS inference from the
+            // host cache too, and staging needs the manifest sha256 here.
+            if let Some(speech) = manifest.platforms.windows.speech.as_ref() {
+                for asset in speech
+                    .models
+                    .iter()
+                    .filter(|asset| asset.kind == unoone_usb_manifest::AssetKind::SpeechModel)
+                {
+                    let full = vault_root_path.join(&asset.path);
+                    let full =
+                        Self::normalize_path(&std::fs::canonicalize(&full).unwrap_or(full));
+                    if full == requested {
+                        return Some(asset.sha256.clone());
+                    }
                 }
             }
         }
@@ -2446,6 +2463,89 @@ mod tests {
         assert!(!cache_dir.join(format!("{}.part", "0".repeat(64))).is_file());
         let _ = std::fs::remove_dir_all(&vault_dir);
     }
+
+    /// A speech model (SPEECH/models/…, AssetKind::SpeechModel — a separate
+    /// manifest section from desktop models) must resolve its manifest
+    /// sha256 and stage into the host cache exactly like a desktop model:
+    /// the speech plane serves inference from the same digest-verified
+    /// cache.
+    #[test]
+    fn read_manifest_model_hash_and_stage_cover_speech_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_dir = dir.path().join("unoone-speech-cache-test");
+        let _ = std::fs::remove_dir_all(&vault_dir);
+        let model_rel = "SPEECH/models/tts/omnivoice.gguf";
+        std::fs::create_dir_all(vault_dir.join("SPEECH/models/tts")).unwrap();
+        let model_path = vault_dir.join(model_rel);
+        // Unique bytes so the cache key can never collide with other tests.
+        std::fs::write(&model_path, b"speech model bytes unique to the cache test").unwrap();
+        let sha = ModelManager::sha256_file(&model_path).unwrap();
+        let size = std::fs::metadata(&model_path).unwrap().len();
+
+        let manifest = serde_json::json!({
+            "product_id": "unoone-pai",
+            "schema_version": 2,
+            "pai_version": "cache-test",
+            "vault": { "id_path": "VAULT/identity/vault.id" },
+            "platforms": { "windows": {
+                "architectures": ["x64"],
+                "desktop": {
+                    "id": "desktop-exe",
+                    "kind": "DESKTOP_EXECUTABLE",
+                    "path": "APPS/WINDOWS/UnoOnePower.exe",
+                    "size_bytes": 1,
+                    "sha256": "00"
+                },
+                "speech": { "models": [ {
+                    "id": "speech-model",
+                    "kind": "SPEECH_MODEL",
+                    "path": model_rel,
+                    "size_bytes": size,
+                    "sha256": sha
+                } ] }
+            } }
+        });
+        std::fs::write(
+            vault_dir.join("manifest.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        // The absolute on-disk path must resolve to the speech section's
+        // sha256 (typed PocketManifest branch, not the JSON fallback).
+        let resolved = ModelManager::read_manifest_model_hash(
+            vault_dir.to_str().unwrap(),
+            model_path.to_str().unwrap(),
+        )
+        .expect("speech model hash must resolve from the speech manifest section");
+        assert_eq!(resolved, sha);
+
+        // And the model must stage into the host cache keyed by that sha.
+        let (cached, staged_size) = stage_model_to_host_cache(
+            model_path.to_str().unwrap(),
+            vault_dir.to_str().unwrap(),
+        )
+        .expect("speech model staging must succeed");
+        assert_eq!(staged_size, size);
+        assert!(cached.is_file());
+        assert_eq!(
+            cached.file_name().unwrap().to_str().unwrap(),
+            format!("{sha}.gguf"),
+            "the speech cache entry must be keyed by the manifest sha256"
+        );
+        assert!(cached
+            .parent()
+            .unwrap()
+            .join(format!("{sha}.verified"))
+            .is_file());
+        // Re-staging must take the cheap verified path and leave the file.
+        let (again, _) = stage_model_to_host_cache(
+            model_path.to_str().unwrap(),
+            vault_dir.to_str().unwrap(),
+        )
+        .expect("re-staging a verified speech copy must succeed");
+        assert_eq!(again, cached);
+    }
 }
 
 // Tauri command wrappers
@@ -2699,7 +2799,7 @@ pub async fn stop_model_server(state: tauri::State<'_, ModelManagerState>) -> Re
 /// Windows `%LOCALAPPDATA%\UnoOne\model-cache`, macOS
 /// `~/Library/Caches/UnoOne/model-cache`, Linux
 /// `$XDG_CACHE_HOME/UnoOne/model-cache` (default `~/.cache/...`).
-fn model_cache_dir() -> Result<PathBuf, String> {
+pub(crate) fn model_cache_dir() -> Result<PathBuf, String> {
     if cfg!(target_os = "windows") {
         let base = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
@@ -2747,7 +2847,7 @@ fn model_cache_marker_value(path: &std::path::Path) -> Option<String> {
 
 /// True when a cached copy exists, has a verification marker, and has not
 /// been touched since the marker was written.
-fn model_cache_is_verified(cached: &std::path::Path, marker: &std::path::Path) -> bool {
+pub(crate) fn model_cache_is_verified(cached: &std::path::Path, marker: &std::path::Path) -> bool {
     if !cached.is_file() || !marker.is_file() {
         return false;
     }
@@ -2784,7 +2884,10 @@ fn model_served_from_verified_host_cache(model_path: &str) -> bool {
 
 /// Stream a manifest-vouched model from the drive to the host cache, hashing
 /// in the same single pass. Returns the cached path and byte count.
-fn stage_model_to_host_cache(model_path: &str, vault_root: &str) -> Result<(PathBuf, u64), String> {
+pub(crate) fn stage_model_to_host_cache(
+    model_path: &str,
+    vault_root: &str,
+) -> Result<(PathBuf, u64), String> {
     use sha2::Digest;
     use std::io::{Read, Write};
 

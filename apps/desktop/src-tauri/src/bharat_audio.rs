@@ -160,6 +160,79 @@ fn canonical_root(vault_root: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("Pocket AI root is unavailable: {e}"))
 }
 
+/// Resolve a speech model to the path the CLI should consume: the
+/// digest-verified host-cache copy when one is staged (the measured USB read
+/// of the 1.35 GB OmniVoice model was 24 s of the ~26 s per-synthesis wall
+/// time, at 0.04 s of CPU — pure removable-media I/O), otherwise the drive
+/// path unchanged. Integrity is not relaxed by the swap: the cached copy is
+/// keyed by the USB manifest's sha256 and carries a `.verified` size+mtime
+/// marker, `verify_acceptance` hashes THIS path (so the consumed bytes are
+/// attestation-checked), and the background DesktopLaunch sweep still
+/// independently hashes the drive copy.
+fn speech_model_serving_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let drive_path = canonical_under(root, relative, true)?;
+    let root_text = root.to_string_lossy().to_string();
+    let expected_sha = crate::llama::ModelManager::read_manifest_model_hash(
+        &root_text,
+        &drive_path.to_string_lossy(),
+    );
+    if let Some(expected_sha) = expected_sha.filter(|sha| !sha.is_empty()) {
+        if let Ok(cache_dir) = crate::llama::model_cache_dir() {
+            let cached = cache_dir.join(format!("{expected_sha}.gguf"));
+            let marker = cache_dir.join(format!("{expected_sha}.verified"));
+            if crate::llama::model_cache_is_verified(&cached, &marker) {
+                crate::boot_trace::mark_detail(
+                    "speech model: serving from host cache",
+                    &format!("{relative} -> {}", cached.display()),
+                );
+                return Ok(cached);
+            }
+        }
+    }
+    Ok(drive_path)
+}
+
+/// Stream the speech pack's ASR/TTS models from the drive into the
+/// digest-verified host cache (single pass, hashed against the USB manifest
+/// sha256 exactly like desktop models). TTS first: it is the user-facing
+/// "🔊 synthesizing…" latency. Idempotent — a verified staged copy is a
+/// no-op. Called from the background boot flow after the full sweep so the
+/// cache is warm a minute or two into a session without ever blocking a
+/// request; synthesize/transcribe serve from the drive until it lands.
+pub(crate) fn stage_speech_models_to_host_cache(vault_root: &str) -> Result<Vec<String>, String> {
+    let (root, manifest) = read_manifest(vault_root)?;
+    let mut staged = Vec::new();
+    // TTS before ASR: the spoken-chat path is the one the user waits on.
+    for task in [manifest.tts.as_ref(), manifest.asr.as_ref()].into_iter().flatten() {
+        let drive_path = canonical_under(&root, &task.model_relative_path, true)?;
+        match crate::llama::stage_model_to_host_cache(
+            &drive_path.to_string_lossy(),
+            &root.to_string_lossy(),
+        ) {
+            Ok((cached, size)) => {
+                crate::boot_trace::mark_detail(
+                    "speech cache: model staged",
+                    &format!(
+                        "{} -> {} ({} bytes)",
+                        task.model_relative_path,
+                        cached.display(),
+                        size
+                    ),
+                );
+                staged.push(task.model_relative_path.clone());
+            }
+            Err(error) => {
+                // Non-fatal by design: inference keeps the drive path.
+                crate::boot_trace::mark_detail(
+                    "speech cache: staging refused",
+                    &format!("{}: {error}", task.model_relative_path),
+                );
+            }
+        }
+    }
+    Ok(staged)
+}
+
 fn canonical_under(root: &Path, relative: &str, must_exist: bool) -> Result<PathBuf, String> {
     let rel = Path::new(relative);
     if rel.is_absolute()
@@ -657,8 +730,11 @@ fn verify_acceptance(
     validate_language(manifest, &acceptance.asr.language)?;
     validate_language(manifest, &acceptance.tts.language)?;
 
-    let asr_model = canonical_under(root, &asr.model_relative_path, true)?;
-    let tts_model = canonical_under(root, &tts.model_relative_path, true)?;
+    // Serving paths, not raw drive paths: when the host cache holds a
+    // verified copy the attestation must hash the bytes the CLI will
+    // actually consume.
+    let asr_model = speech_model_serving_path(root, &asr.model_relative_path)?;
+    let tts_model = speech_model_serving_path(root, &tts.model_relative_path)?;
     let actual = [
         (
             audiocpp_path,
@@ -969,7 +1045,7 @@ pub fn transcribe(
         .asr
         .as_ref()
         .ok_or_else(|| "ASR is not configured in the Pocket AI speech pack".to_string())?;
-    let model = canonical_under(&root, &task.model_relative_path, true)?;
+    let model = speech_model_serving_path(&root, &task.model_relative_path)?;
     let cli = audio_cpp_cli(&root)?;
 
     let input = confine_audio_input(&root, audio_path)?;
@@ -1067,7 +1143,7 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         .tts
         .as_ref()
         .ok_or_else(|| "TTS is not configured in the Pocket AI speech pack".to_string())?;
-    let model = canonical_under(&root, &task.model_relative_path, true)?;
+    let model = speech_model_serving_path(&root, &task.model_relative_path)?;
     let cli = audio_cpp_cli(&root)?;
     // Synthesized speech is plaintext derived from user text. It previously
     // persisted unencrypted at VAULT/recordings/tts/ — plaintext inside the
@@ -1264,6 +1340,73 @@ mod tests {
         let error = check_runtime_status(&manifest, &status)
             .expect_err("commit mismatch must fail the gate");
         assert!(error.contains("commit mismatch"), "got: {error}");
+    }
+
+    /// The TTS latency fix: when the digest-verified host-cache copy of a
+    /// speech model is staged, the CLI must consume it (24 s measured USB
+    /// read vs an SSD read of the same bytes); when the `.verified` marker
+    /// is revoked the resolver must fall back to the drive path — the
+    /// cache never overrides integrity, it only serves verified bytes.
+    #[test]
+    fn speech_model_serving_path_prefers_and_revokes_with_the_host_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let model_rel = "SPEECH/models/tts/omnivoice.gguf";
+        std::fs::create_dir_all(root.join("SPEECH/models/tts")).unwrap();
+        let model_path = root.join(model_rel);
+        // Unique bytes so the cache key can never collide with other tests.
+        std::fs::write(&model_path, b"omnivoice bytes unique to the serving-path test").unwrap();
+        let sha = crate::llama::ModelManager::sha256_file(&model_path).unwrap();
+        let size = std::fs::metadata(&model_path).unwrap().len();
+
+        let manifest = serde_json::json!({
+            "product_id": "unoone-pai",
+            "schema_version": 2,
+            "pai_version": "serving-test",
+            "vault": { "id_path": "VAULT/identity/vault.id" },
+            "platforms": { "windows": {
+                "architectures": ["x64"],
+                "desktop": {
+                    "id": "desktop-exe",
+                    "kind": "DESKTOP_EXECUTABLE",
+                    "path": "APPS/WINDOWS/UnoOnePower.exe",
+                    "size_bytes": 1,
+                    "sha256": "00"
+                },
+                "speech": { "models": [ {
+                    "id": "speech-model",
+                    "kind": "SPEECH_MODEL",
+                    "path": model_rel,
+                    "size_bytes": size,
+                    "sha256": sha
+                } ] }
+            } }
+        });
+        std::fs::write(root.join("manifest.json"), manifest.to_string()).unwrap();
+
+        // Before staging: the resolver must serve the drive path.
+        let before = speech_model_serving_path(&root, model_rel).unwrap();
+        assert_eq!(before, model_path.canonicalize().unwrap());
+
+        // Stage (same machinery the background boot flow uses), then the
+        // resolver must serve the cached copy.
+        let (cached, _) = crate::llama::stage_model_to_host_cache(
+            &model_path.to_string_lossy(),
+            &root.to_string_lossy(),
+        )
+        .expect("staging must succeed");
+        let after = speech_model_serving_path(&root, model_rel).unwrap();
+        assert_eq!(after, cached, "a verified staged copy must be served");
+
+        // Revocation: removing the .verified marker must fall back to the
+        // drive path — an unverified cache copy is never consumed.
+        std::fs::remove_file(cached.parent().unwrap().join(format!("{sha}.verified"))).unwrap();
+        let revoked = speech_model_serving_path(&root, model_rel).unwrap();
+        assert_eq!(
+            revoked,
+            model_path.canonicalize().unwrap(),
+            "without the marker the resolver must serve the drive path"
+        );
     }
 
     /// The 1 MiB read buffer in `sha256_file` MUST be heap allocated: a stack
