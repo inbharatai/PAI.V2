@@ -22,7 +22,11 @@ fn sha256_file_timed(path: &Path) -> Result<(String, u64, std::time::Duration), 
         hasher.update(&buffer[..count]);
         total += count as u64;
     }
-    Ok((hex::encode_upper(hasher.finalize()), total, started.elapsed()))
+    Ok((
+        hex::encode_upper(hasher.finalize()),
+        total,
+        started.elapsed(),
+    ))
 }
 
 use sha2::{Digest, Sha256};
@@ -85,10 +89,7 @@ fn main() {
     records.sort_by_key(|r| std::cmp::Reverse(r.1));
     println!("top 12 slowest assets:");
     for (path, ms, bytes, digest) in records.iter().take(12) {
-        println!(
-            "{ms:>6}ms {:>8.2}GB  {path}",
-            *bytes as f64 / 1073741824.0
-        );
+        println!("{ms:>6}ms {:>8.2}GB  {path}", *bytes as f64 / 1073741824.0);
         let _ = digest;
     }
 }

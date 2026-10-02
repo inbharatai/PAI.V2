@@ -621,10 +621,10 @@ mod tests {
         // it can never promote). Producers rely on this to store blocked
         // attempts; a mirror that eagerly calls promotable() silently drops
         // every BLOCK record.
-        let mut blockedTelemetry = o.clone();
-        blockedTelemetry.risk_class = "BLOCK".into();
-        assert!(blockedTelemetry.validate().is_ok());
-        assert!(blockedTelemetry.promotable().is_err());
+        let mut blocked_telemetry = o.clone();
+        blocked_telemetry.risk_class = "BLOCK".into();
+        assert!(blocked_telemetry.validate().is_ok());
+        assert!(blocked_telemetry.promotable().is_err());
     }
 
     #[test]

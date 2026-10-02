@@ -1075,8 +1075,7 @@ mod tests {
         assert!(report.failures.iter().any(|failure| {
             matches!(
                 failure.code,
-                ValidationFailureCode::AssetSizeMismatch
-                    | ValidationFailureCode::AssetHashMismatch
+                ValidationFailureCode::AssetSizeMismatch | ValidationFailureCode::AssetHashMismatch
             )
         }));
     }
