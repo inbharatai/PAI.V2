@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { tauriApi } from '../lib/tauri';
-import type { SecurityLevel } from '../lib/tauri';
+import type { AgentWorkspaceInfo, SecurityLevel } from '../lib/tauri';
 
 interface SettingsViewProps {
   vaultRoot: string;
@@ -20,14 +20,13 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
   const [appVersion, setAppVersion] = useState('v0.1.0');
   const [error, setError] = useState('');
   // P7 — user-granted agent workspace root (full-access lane).
-  const [workspace, setWorkspace] = useState<{
-    effective_root: string;
-    user_granted: string | null;
-    default_root: string;
-  } | null>(null);
+  const [workspace, setWorkspace] = useState<AgentWorkspaceInfo | null>(null);
   const [workspaceInput, setWorkspaceInput] = useState('');
   const [workspaceMsg, setWorkspaceMsg] = useState('');
   const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  // P7 — additional granted folders the agent reaches by absolute path.
+  const [folderInput, setFolderInput] = useState('');
+  const [folderMsg, setFolderMsg] = useState('');
 
   // Load settings and version from backend on mount
   useEffect(() => {
@@ -77,6 +76,38 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
       );
     } catch (e) {
       setWorkspaceMsg(`Rejected: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
+  // Grant or revoke one ADDITIONAL folder. The agent's fs tools reach these
+  // by absolute path, fenced per folder; grants widen the file surface,
+  // never the program allowlist. All validated + audited by the backend.
+  const applyAddFolder = async () => {
+    setWorkspaceBusy(true);
+    setFolderMsg('');
+    try {
+      const info = await tauriApi.addAgentFolder(folderInput.trim());
+      setWorkspace(info);
+      setFolderInput('');
+      setFolderMsg('Granted — the agent can now read and write inside this folder.');
+    } catch (e) {
+      setFolderMsg(`Rejected: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setWorkspaceBusy(false);
+    }
+  };
+
+  const applyRemoveFolder = async (root: string) => {
+    setWorkspaceBusy(true);
+    setFolderMsg('');
+    try {
+      const info = await tauriApi.removeAgentFolder(root);
+      setWorkspace(info);
+      setFolderMsg('Revoked — the agent can no longer reach that folder.');
+    } catch (e) {
+      setFolderMsg(`Rejected: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setWorkspaceBusy(false);
     }
@@ -289,6 +320,64 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
                 </div>
                 {workspaceMsg && (
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{workspaceMsg}</div>
+                )}
+              </div>
+              <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '8px' }}>
+                <div>
+                  <div className="settings-row-label">Additional Granted Folders</div>
+                  <div className="settings-row-desc">
+                    Extra folders the agent may read and write (reached by absolute path, fenced per
+                    folder, audited on every grant and revocation). Grant e.g. the Desktop or a folder
+                    on a second drive — never a folder inside the encrypted Pocket AI drive, and never
+                    a whole drive.
+                  </div>
+                </div>
+                {(workspace?.folders.length ?? 0) > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    {workspace?.folders.map((folder) => (
+                      <div
+                        key={folder.root}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                          fontSize: '12px',
+                          fontFamily: 'var(--font-mono)',
+                        }}
+                      >
+                        <span style={{ flex: 1, wordBreak: 'break-all' }}>
+                          {folder.root}
+                          {!folder.exists && (
+                            <span title="the folder no longer exists — the grant is not honored"> ⚠ missing</span>
+                          )}
+                        </span>
+                        <button
+                          disabled={workspaceBusy}
+                          onClick={() => void applyRemoveFolder(folder.root)}
+                        >
+                          Revoke
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                  <input
+                    type="text"
+                    placeholder="e.g. C:\Users\reetu\Desktop"
+                    value={folderInput}
+                    onChange={e => { setFolderInput(e.target.value); setFolderMsg(''); }}
+                    style={{ width: '340px' }}
+                  />
+                  <button
+                    disabled={workspaceBusy || !folderInput.trim()}
+                    onClick={() => void applyAddFolder()}
+                  >
+                    Grant Folder
+                  </button>
+                </div>
+                {folderMsg && (
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{folderMsg}</div>
                 )}
               </div>
             </div>

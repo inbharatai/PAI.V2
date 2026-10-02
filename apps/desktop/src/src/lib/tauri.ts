@@ -149,6 +149,24 @@ export interface ChatMemoryTurn {
   timestamp: string;
 }
 
+/// One additional folder the user granted the agent (P7). `exists` is false
+/// when the folder no longer exists — the grant is displayed but not
+/// honored until the folder returns.
+export interface GrantedFolderInfo {
+  root: string;
+  granted_at_ms: number;
+  exists: boolean;
+}
+
+/// The agent's effective file-surface as Settings shows it: the workspace
+/// root (granted or default) plus every additional granted folder.
+export interface AgentWorkspaceInfo {
+  effective_root: string;
+  user_granted: string | null;
+  default_root: string;
+  folders: GrantedFolderInfo[];
+}
+
 export type Content = string | ContentPart[];
 
 export interface ContentPart {
@@ -510,20 +528,20 @@ export const tauriApi = {
   captureScreenSnapshot: () => invoke<string>('capture_screen_snapshot'),
   getWorkspaceRoot: () => invoke<string>('get_workspace_root'),
 
-  // P7 — user-granted agent workspace root. The agent builds and stores
-  // files at the effective root (full access only); `setAgentWorkspaceRoot`
-  // grants a new root (must be an existing host folder, never inside the
-  // encrypted drive package) or, with null, revokes the grant and returns
-  // to the default. Every grant/revocation is audited in the vault.
-  getAgentWorkspaceInfo: () =>
-    invoke<{ effective_root: string; user_granted: string | null; default_root: string }>(
-      'get_agent_workspace_info',
-    ),
+  // P7 — user-granted agent workspace root + additional granted folders.
+  // The agent builds and stores files at the effective root (full access
+  // only); `setAgentWorkspaceRoot` grants a new root (must be an existing
+  // host folder, never inside the encrypted drive package) or, with null,
+  // revokes the grant and returns to the default. `addAgentFolder` /
+  // `removeAgentFolder` manage the additional granted folders the agent's
+  // fs tools can reach by absolute path. Every grant/revocation is audited
+  // in the vault.
+  getAgentWorkspaceInfo: () => invoke<AgentWorkspaceInfo>('get_agent_workspace_info'),
   setAgentWorkspaceRoot: (root: string | null) =>
-    invoke<{ effective_root: string; user_granted: string | null; default_root: string }>(
-      'set_agent_workspace_root',
-      { root },
-    ),
+    invoke<AgentWorkspaceInfo>('set_agent_workspace_root', { root }),
+  addAgentFolder: (path: string) => invoke<AgentWorkspaceInfo>('add_agent_folder', { path }),
+  removeAgentFolder: (path: string) =>
+    invoke<AgentWorkspaceInfo>('remove_agent_folder', { path }),
 
   // Security
   generateManifest: (vaultRoot: string) => invoke<VaultInfo & { entries: number; manifest_sha256: string }>('generate_manifest', { vault_root: vaultRoot }),

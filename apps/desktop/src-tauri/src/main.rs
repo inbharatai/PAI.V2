@@ -29,6 +29,7 @@ mod documents;
 // telemetry in the canonical vault.
 mod env_learning;
 mod gguf_meta;
+mod granted_fs;
 mod harness_bridge;
 mod llama;
 mod recording;
@@ -266,6 +267,8 @@ fn main() {
             // P7 (2026-10-01): user-granted agent workspace root (Settings UI).
             harness_bridge::get_agent_workspace_info,
             harness_bridge::set_agent_workspace_root,
+            harness_bridge::add_agent_folder,
+            harness_bridge::remove_agent_folder,
             bharat_audio::get_bharat_audio_status,
         ])
         .setup(|app| {
@@ -1073,8 +1076,7 @@ fn save_chat_turn(
         .lock()
         .map_err(|e| format!("State lock error: {}", e))?;
     let vault = vault_opt.as_mut().ok_or("Vault is not unlocked")?;
-    let turn =
-        chat_memory::ChatTurn::new(&session_id, &user_message, &assistant_message);
+    let turn = chat_memory::ChatTurn::new(&session_id, &user_message, &assistant_message);
     chat_memory::save_chat_turn_to_vault(vault, &turn)
 }
 
@@ -1145,7 +1147,10 @@ fn get_hardware_profile() -> Result<HardwareProfile, String> {
     boot_trace::mark_detail("get_hardware_profile: usb probed", &usb_speed);
 
     let cpu_speed = detect_cpu_speed();
-    boot_trace::mark_detail("get_hardware_profile: cpu-speed probed", &format!("{cpu_speed}"));
+    boot_trace::mark_detail(
+        "get_hardware_profile: cpu-speed probed",
+        &format!("{cpu_speed}"),
+    );
 
     Ok(HardwareProfile {
         total_ram_gb: (total_ram_gb * 10.0).round() / 10.0,
@@ -1287,9 +1292,7 @@ fn detect_usb_speed() -> String {
             &format!("drives={drives:?}"),
         );
         for drive in &drives {
-            if let Some(root) =
-                startup::normalize_candidate_root(std::path::Path::new(drive))
-            {
+            if let Some(root) = startup::normalize_candidate_root(std::path::Path::new(drive)) {
                 let structural = ["manifest.json", "VERSION", "VAULT\\identity\\vault.id"];
                 if structural.iter().all(|rel| root.join(rel).is_file()) {
                     return "USB 3.0+".to_string();

@@ -93,6 +93,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let fs = RootedFs::new(&dir).expect("fence");
+        // The search/patch tools are fenced to the granted-folder set —
+        // here a single-root set standing in for the run-time union.
+        let folders = crate::granted_fs::GrantedFolders::new(vec![fs]).expect("granted-folder set");
 
         let constructible: Vec<Box<dyn Tool>> = vec![
             Box::new(ReadFileTool::default()),
@@ -100,8 +103,8 @@ mod tests {
             Box::new(WriteFileTool::default()),
             Box::new(MakeDirTool::default()),
             Box::new(RunProcessTool::default()),
-            Box::new(DesktopSearchTool::new(fs.clone())),
-            Box::new(DesktopPatchTool::new(fs.clone())),
+            Box::new(DesktopSearchTool::new(folders.clone())),
+            Box::new(DesktopPatchTool::new(folders.clone())),
         ];
         for t in &constructible {
             assert_matches_contract(t.as_ref(), &contract);

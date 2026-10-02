@@ -8,6 +8,7 @@
 use crate::{
     browser::{self, BrowserAction, BrowserStateHolder, ScrollDirection},
     documents,
+    granted_fs::{GrantedFolderBroker, GrantedFolders},
     llama::{Content, ConversationTurn, ModelManagerState},
     safety::{DesktopSafetyGuard, SafetyGuardState, ToolAction},
     security, DesktopVaultState,
@@ -18,8 +19,8 @@ use inbharat_harness_core::{
     tools::{ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool},
     AttachmentMetadata, BudgetLimits, CancelCause, CancellationToken, Capability, CapabilitySet,
     ConfirmationMode, ConfirmationOutcome, Determinism, ErrorCode, ExecutionLevel, Failure,
-    FailureClass, HarnessBuilder, HarnessResult, LocalExecutionBroker, MemoryOptions,
-    PermissionDecision, PermissionProvider, RootedFs, RunOptions, SandboxProvider, SideEffect,
+    FailureClass, HarnessBuilder, HarnessResult, MemoryOptions, PermissionDecision,
+    PermissionProvider, RootedFs, RunOptions, SandboxProvider, SideEffect,
     StaticConfirmationProvider, SubagentRequest, SubagentResult, Tool, ToolArguments, ToolContext,
     ToolManifest, ToolOutput, Value,
 };
@@ -27,7 +28,7 @@ use pai_harness_adapter::{
     PaiLlamaLocalProvider, PaiVaultMemoryProvider, PaiVaultMemoryProviderConfig,
 };
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Emitter;
@@ -825,14 +826,22 @@ fn desktop_system_prefix(full_access: bool) -> String {
     let workspace = workspace_root()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|_| "%USERPROFILE%\\UnoOneAgent".to_owned());
+    // P7 folder grants: every additional folder the user granted this
+    // agent is enumerated truthfully — the briefing must never claim more
+    // or less reach than the fence actually enforces.
+    let granted_lines = granted_folder_roots()
+        .iter()
+        .map(|folder| format!("\n- plus the user-granted folder: {}", folder.display()))
+        .collect::<Vec<_>>()
+        .join("");
     if full_access {
         format!(
             "You are UnoOne, the user's private Pocket AI running locally on their Windows \
              computer (fully offline, no cloud). You are NOT limited to a vault: in this \
              session you have full agent tools, all audited and budgeted.\n\
              - Read/write/list/search/patch files in the workspace folder: {workspace}\n\
-             (give tool paths relative to that folder, or as absolute paths \
-             inside it — both are accepted and fenced to it)\n\
+             (give tool paths relative to that folder, or as absolute paths inside \
+             it — both are accepted and fenced to it){granted_lines}\n\
              - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
              dotnet, go, java, cmake, make, gcc, clang, powershell) inside that workspace\n\
              - Deploy long-running processes (servers, watchers): pass \
@@ -1007,9 +1016,7 @@ fn workspace_root() -> Result<PathBuf, String> {
 
 /// The persisted user grant, honored only while the folder still exists.
 fn granted_workspace_root() -> Option<PathBuf> {
-    let config = workspace_config_path().ok()?;
-    let text = std::fs::read_to_string(config).ok()?;
-    let grant: WorkspaceGrant = serde_json::from_str(&text).ok()?;
+    let grant = read_grants_file().workspace?;
     let path = PathBuf::from(grant.root.trim());
     path.is_dir().then_some(path)
 }
@@ -1026,10 +1033,109 @@ fn workspace_config_path() -> Result<PathBuf, String> {
 }
 
 /// The persisted shape of one user grant.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct WorkspaceGrant {
     root: String,
     granted_at_ms: u64,
+}
+
+/// The on-disk store (v2): the workspace grant plus every additional
+/// user-granted folder (P7). A v1 file — a bare `WorkspaceGrant` — parses
+/// as workspace-only, so pre-folder-grant installs migrate on first write.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorkspaceGrantsFile {
+    version: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace: Option<WorkspaceGrant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folders: Vec<WorkspaceGrant>,
+}
+
+/// Reads the host-local grant store. An absent or unreadable file is simply
+/// no grant at all — the agent falls back to the default workspace root.
+fn read_grants_file() -> WorkspaceGrantsFile {
+    let empty = WorkspaceGrantsFile {
+        version: 2,
+        workspace: None,
+        folders: Vec::new(),
+    };
+    let Ok(config) = workspace_config_path() else {
+        return empty;
+    };
+    let Ok(text) = std::fs::read_to_string(config) else {
+        return empty;
+    };
+    // v1 first: the bare grant shape puts `root` at top level and has no
+    // `version`, so the two shapes never parse as each other.
+    if let Ok(v1) = serde_json::from_str::<WorkspaceGrant>(&text) {
+        return WorkspaceGrantsFile {
+            version: 2,
+            workspace: Some(v1),
+            folders: Vec::new(),
+        };
+    }
+    serde_json::from_str::<WorkspaceGrantsFile>(&text).unwrap_or(empty)
+}
+
+/// Persists the grant store; the canonical paths are stored verbatim and
+/// are never re-canonicalized on read.
+fn write_grants_file(file: &WorkspaceGrantsFile) -> Result<(), String> {
+    let config = workspace_config_path()?;
+    if let Some(parent) = config.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!("cannot create the config directory for the agent grants: {error}")
+        })?;
+    }
+    let json = serde_json::to_string_pretty(file)
+        .map_err(|error| format!("cannot encode the agent grants: {error}"))?;
+    std::fs::write(&config, json)
+        .map_err(|error| format!("cannot persist the agent grants: {error}"))
+}
+
+/// The additional user-granted folders (beyond the workspace root),
+/// honored only while each still exists — the same stale-grant rule as the
+/// workspace — and never twice: deduped against each other and against the
+/// effective workspace root, case-insensitively.
+fn granted_folder_roots() -> Vec<PathBuf> {
+    let mut folders = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    if let Ok(workspace) = workspace_root() {
+        seen.push(workspace.to_string_lossy().to_lowercase());
+    }
+    for grant in read_grants_file().folders {
+        let path = PathBuf::from(grant.root.trim());
+        let key = path.to_string_lossy().to_lowercase();
+        if !path.is_dir() || seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        folders.push(path);
+    }
+    folders
+}
+
+/// The multi-root fence for one agent run: the workspace root plus every
+/// additional user-granted folder, one `RootedFs` per folder with the
+/// full-access byte limits (2 MiB read / 4 MiB write) applied uniformly —
+/// the main lane and every sub-agent child build from this same set.
+fn granted_folders() -> Result<GrantedFolders, String> {
+    const MAX_READ_BYTES: usize = 2 * 1024 * 1024;
+    const MAX_WRITE_BYTES: usize = 4 * 1024 * 1024;
+    let workspace = workspace_root()?;
+    let mut roots = vec![RootedFs::new(&workspace)
+        .map_err(|error| error.to_string())?
+        .with_limits(MAX_READ_BYTES, MAX_WRITE_BYTES)];
+    for folder in granted_folder_roots() {
+        match RootedFs::new(&folder) {
+            Ok(fenced) => roots.push(fenced.with_limits(MAX_READ_BYTES, MAX_WRITE_BYTES)),
+            Err(error) => {
+                // A folder that vanished between the stale-check and the
+                // canonicalize is skipped honestly, never fatal to the run.
+                eprintln!("granted folder skipped: {error}");
+            }
+        }
+    }
+    GrantedFolders::new(roots).map_err(|error| error.to_string())
 }
 
 /// The un-granted default: `%USERPROFILE%\UnoOneAgent`, created on demand.
@@ -1051,21 +1157,46 @@ fn default_workspace_root() -> Result<PathBuf, String> {
 }
 
 /// What the Settings UI shows: the effective root, the persisted grant (if
-/// any), and the default the grant replaced.
+/// any), the default the grant replaced, and every additional granted
+/// folder.
 #[derive(Debug, serde::Serialize)]
 pub struct AgentWorkspaceInfo {
     pub effective_root: String,
     pub user_granted: Option<String>,
     pub default_root: String,
+    pub folders: Vec<GrantedFolderInfo>,
+}
+
+/// One additional user-granted folder as the Settings UI shows it.
+#[derive(Debug, serde::Serialize)]
+pub struct GrantedFolderInfo {
+    pub root: String,
+    pub granted_at_ms: u64,
+    /// False when the folder no longer exists: the grant is displayed but
+    /// not honored (the same stale rule as the workspace grant).
+    pub exists: bool,
 }
 
 fn agent_workspace_info() -> Result<AgentWorkspaceInfo, String> {
     let effective = workspace_root()?;
     let default = default_workspace_root()?;
+    let folders = read_grants_file()
+        .folders
+        .into_iter()
+        .map(|grant| {
+            let exists = PathBuf::from(grant.root.trim()).is_dir();
+            GrantedFolderInfo {
+                root: grant.root,
+                granted_at_ms: grant.granted_at_ms,
+                exists,
+            }
+        })
+        .collect();
     Ok(AgentWorkspaceInfo {
         effective_root: effective.to_string_lossy().into_owned(),
         user_granted: granted_workspace_root().map(|path| path.to_string_lossy().into_owned()),
         default_root: default.to_string_lossy().into_owned(),
+        folders,
     })
 }
 
@@ -1102,6 +1233,53 @@ fn audit_workspace_grant(vault: &Arc<Mutex<Option<Vault>>>, action: &str, root: 
     }
 }
 
+/// The grant validations every user-directed folder grant shares (P7): a
+/// grant must name an EXISTING folder, must not be a filesystem root, and
+/// must not sit inside the encrypted Pocket AI package — agent writes must
+/// never land on the read-mostly drive. Returns the canonicalized path.
+fn validate_grant_path(candidate: &Path, vault_root: &str) -> Result<PathBuf, String> {
+    if candidate.as_os_str().is_empty() {
+        return Err("the folder path is empty".to_owned());
+    }
+    if !candidate.is_absolute() {
+        return Err(format!(
+            "the folder path must be absolute: {}",
+            candidate.display()
+        ));
+    }
+    let canonical = std::fs::canonicalize(candidate).map_err(|error| {
+        format!(
+            "cannot use {} as a granted folder: {error}",
+            candidate.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(format!(
+            "the granted folder must exist: {}",
+            canonical.display()
+        ));
+    }
+    if canonical.parent().is_none() {
+        return Err(
+            "a whole drive cannot be granted — pick a folder (e.g. the Desktop)".to_owned(),
+        );
+    }
+    if !vault_root.is_empty() {
+        let vault_path = PathBuf::from(vault_root);
+        let inside_vault = canonical.starts_with(&vault_path)
+            || std::fs::canonicalize(&vault_path)
+                .map(|resolved| canonical.starts_with(resolved))
+                .unwrap_or(false);
+        if inside_vault {
+            return Err(
+                "that folder sits inside the encrypted Pocket AI package — grant a folder on the host disk (e.g. the Desktop)"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(canonical)
+}
+
 /// Read the effective agent workspace for the Settings UI.
 #[tauri::command]
 pub async fn get_agent_workspace_info() -> Result<AgentWorkspaceInfo, String> {
@@ -1109,87 +1287,119 @@ pub async fn get_agent_workspace_info() -> Result<AgentWorkspaceInfo, String> {
 }
 
 /// Grant or revoke the agent workspace root (P7, user-directed). `None`
-/// revokes the grant and returns to the default root. A grant must name an
-/// EXISTING directory (the picker never creates folders), must not be a
-/// filesystem root, and must not sit inside the encrypted Pocket AI package
-/// — agent writes must never land on the read-mostly drive. The canonical
-/// path is persisted host-locally and audited in the vault.
+/// revokes the workspace grant and returns to the default root — any
+/// additional granted folders survive. A grant must name an EXISTING
+/// directory (the picker never creates folders), must not be a filesystem
+/// root, and must not sit inside the encrypted Pocket AI package. The
+/// canonical path is persisted host-locally and audited in the vault.
 #[tauri::command]
 pub async fn set_agent_workspace_root(
     root: Option<String>,
     vault_state: tauri::State<'_, DesktopVaultState>,
 ) -> Result<AgentWorkspaceInfo, String> {
-    let Some(raw) = root else {
-        let config = workspace_config_path()?;
-        if std::fs::remove_file(&config).is_ok() {
-            audit_workspace_grant(&vault_state.vault, "revoke", "");
-        }
-        return agent_workspace_info();
-    };
-    let candidate = PathBuf::from(raw.trim());
-    if candidate.as_os_str().is_empty() {
-        return Err("the workspace path is empty".to_owned());
-    }
-    if !candidate.is_absolute() {
-        return Err(format!(
-            "the workspace path must be absolute: {}",
-            candidate.display()
-        ));
-    }
-    let canonical = std::fs::canonicalize(&candidate).map_err(|error| {
-        format!(
-            "cannot use {} as the workspace: {error}",
-            candidate.display()
-        )
-    })?;
-    if !canonical.is_dir() {
-        return Err(format!(
-            "the workspace must be an existing folder: {}",
-            canonical.display()
-        ));
-    }
-    if canonical.parent().is_none() {
-        return Err(
-            "a whole drive cannot be the workspace — pick a folder (e.g. the Desktop)".to_owned(),
-        );
-    }
     let vault_root = vault_state
         .vault_root
         .lock()
         .map_err(|_| "vault-root state lock failed".to_owned())?
         .clone();
-    if !vault_root.is_empty() {
-        let vault_path = PathBuf::from(&vault_root);
-        let inside_vault = canonical.starts_with(&vault_path)
-            || std::fs::canonicalize(&vault_path)
-                .map(|resolved| canonical.starts_with(resolved))
-                .unwrap_or(false);
-        if inside_vault {
-            return Err(
-                "the workspace cannot sit inside the encrypted Pocket AI package — pick a folder on the host disk (e.g. the Desktop)"
-                    .to_owned(),
-            );
+    let mut file = read_grants_file();
+    let Some(raw) = root else {
+        let was_granted = file.workspace.take().is_some();
+        if was_granted {
+            if file.folders.is_empty() {
+                // Nothing left to remember — the store goes away entirely,
+                // matching the pre-folder-grant observable behavior.
+                let config = workspace_config_path()?;
+                std::fs::remove_file(&config).ok();
+            } else {
+                write_grants_file(&file)?;
+            }
+            audit_workspace_grant(&vault_state.vault, "revoke", "");
         }
+        return agent_workspace_info();
+    };
+    let canonical = validate_grant_path(Path::new(raw.trim()), &vault_root)?;
+    let granted_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    file.workspace = Some(WorkspaceGrant {
+        root: canonical.to_string_lossy().into_owned(),
+        granted_at_ms,
+    });
+    write_grants_file(&file)?;
+    audit_workspace_grant(&vault_state.vault, "grant", &canonical.to_string_lossy());
+    agent_workspace_info()
+}
+
+/// Grant one additional folder to the agent (P7, user-directed): every
+/// fs tool call routed inside that folder runs with the full `RootedFs`
+/// fence — grants widen the file surface, never the program allowlist.
+/// Same validations as the workspace grant; the canonical path is persisted
+/// host-locally and audited in the vault. Duplicate grants (including the
+/// workspace root itself) are refused.
+#[tauri::command]
+pub async fn add_agent_folder(
+    path: String,
+    vault_state: tauri::State<'_, DesktopVaultState>,
+) -> Result<AgentWorkspaceInfo, String> {
+    let vault_root = vault_state
+        .vault_root
+        .lock()
+        .map_err(|_| "vault-root state lock failed".to_owned())?
+        .clone();
+    let canonical = validate_grant_path(Path::new(path.trim()), &vault_root)?;
+    let key = canonical.to_string_lossy().to_lowercase();
+    let mut file = read_grants_file();
+    if file
+        .workspace
+        .as_ref()
+        .is_some_and(|grant| grant.root.trim().to_lowercase() == key)
+    {
+        return Err("that folder is already granted as the workspace root".to_owned());
+    }
+    if file
+        .folders
+        .iter()
+        .any(|grant| grant.root.trim().to_lowercase() == key)
+    {
+        return Err("that folder is already granted".to_owned());
     }
     let granted_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let grant = WorkspaceGrant {
+    file.folders.push(WorkspaceGrant {
         root: canonical.to_string_lossy().into_owned(),
         granted_at_ms,
-    };
-    let config = workspace_config_path()?;
-    if let Some(parent) = config.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!("cannot create the config directory for the workspace grant: {error}")
-        })?;
+    });
+    write_grants_file(&file)?;
+    audit_workspace_grant(
+        &vault_state.vault,
+        "folder_grant",
+        &canonical.to_string_lossy(),
+    );
+    agent_workspace_info()
+}
+
+/// Revoke one additional folder grant. Revoking the workspace root itself
+/// stays on `set_agent_workspace_root(None)`; this removes only from the
+/// folders list. A path not in the list is an error, never a silent no-op.
+#[tauri::command]
+pub async fn remove_agent_folder(
+    path: String,
+    vault_state: tauri::State<'_, DesktopVaultState>,
+) -> Result<AgentWorkspaceInfo, String> {
+    let key = PathBuf::from(path.trim()).to_string_lossy().to_lowercase();
+    let mut file = read_grants_file();
+    let before = file.folders.len();
+    file.folders
+        .retain(|grant| grant.root.trim().to_lowercase() != key);
+    if file.folders.len() == before {
+        return Err("that folder is not in the granted list".to_owned());
     }
-    let json = serde_json::to_string_pretty(&grant)
-        .map_err(|error| format!("cannot encode the workspace grant: {error}"))?;
-    std::fs::write(&config, json)
-        .map_err(|error| format!("cannot persist the workspace grant: {error}"))?;
-    audit_workspace_grant(&vault_state.vault, "grant", &grant.root);
+    write_grants_file(&file)?;
+    audit_workspace_grant(&vault_state.vault, "folder_revoke", path.trim());
     agent_workspace_info()
 }
 
@@ -1333,16 +1543,16 @@ fn value_as_bool(value: &Value) -> Option<bool> {
 /// than by this tool's own logic.
 pub(crate) struct DesktopSearchTool {
     manifest: ToolManifest,
-    filesystem: RootedFs,
+    folders: GrantedFolders,
 }
 
 impl DesktopSearchTool {
-    pub(crate) fn new(filesystem: RootedFs) -> Self {
+    pub(crate) fn new(folders: GrantedFolders) -> Self {
         Self {
             manifest: ToolManifest {
                 id: "workspace.search".to_owned(),
                 version: "1.0.0".to_owned(),
-                description: "Recursively search file contents in the agent workspace for a literal substring; returns path:line: text matches.".to_owned(),
+                description: "Recursively search file contents in the agent workspace (and any additional user-granted folders, addressed by absolute path) for a literal substring; returns path:line: text matches.".to_owned(),
                 input_schema: r#"{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"case_insensitive":{"type":"boolean"},"max_results":{"type":"integer","minimum":1,"maximum":200}},"required":["query"],"additionalProperties":false}"#.to_owned(),
                 output_schema: r#"{"type":"string"}"#.to_owned(),
                 required_capabilities: CapabilitySet::from_slice(&[Capability::FileRead]),
@@ -1356,7 +1566,7 @@ impl DesktopSearchTool {
                 verification: "fenced-local-read-v1".to_owned(),
                 compensation: "none".to_owned(),
             },
-            filesystem,
+            folders,
         }
     }
 }
@@ -1429,7 +1639,7 @@ impl Tool for DesktopSearchTool {
             if depth >= MAX_DEPTH {
                 continue;
             }
-            let entries = match self.filesystem.list(&dir) {
+            let entries = match self.folders.list(&dir) {
                 Ok(entries) => entries,
                 // Unreadable directories (permissions, fence) are skipped, not
                 // fatal: a search reports what it could see.
@@ -1445,7 +1655,7 @@ impl Tool for DesktopSearchTool {
                 } else {
                     format!("{dir}/{name}")
                 };
-                let resolved = match self.filesystem.resolve_existing(&relative) {
+                let resolved = match self.folders.resolve_existing(&relative) {
                     Ok(resolved) => resolved,
                     Err(_) => continue,
                 };
@@ -1464,7 +1674,7 @@ impl Tool for DesktopSearchTool {
                     continue;
                 }
                 scanned += 1;
-                let Ok(text) = self.filesystem.read_text(&relative) else {
+                let Ok(text) = self.folders.read_text(&relative) else {
                     continue;
                 };
                 for (index, line) in text.lines().enumerate() {
@@ -1515,16 +1725,16 @@ impl Tool for DesktopSearchTool {
 /// failed or partial patch never leaves a torn file.
 pub(crate) struct DesktopPatchTool {
     manifest: ToolManifest,
-    filesystem: RootedFs,
+    folders: GrantedFolders,
 }
 
 impl DesktopPatchTool {
-    pub(crate) fn new(filesystem: RootedFs) -> Self {
+    pub(crate) fn new(folders: GrantedFolders) -> Self {
         Self {
             manifest: ToolManifest {
                 id: "workspace.patch".to_owned(),
                 version: "1.0.0".to_owned(),
-                description: "Replace an exact literal substring inside one workspace file. By default the match must be unique; pass replace_all=true to replace every occurrence.".to_owned(),
+                description: "Replace an exact literal substring inside one workspace file (or a file in any granted folder, by absolute path). By default the match must be unique; pass replace_all=true to replace every occurrence.".to_owned(),
                 input_schema: r#"{"type":"object","properties":{"path":{"type":"string"},"find":{"type":"string"},"replace":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","find","replace"],"additionalProperties":false}"#.to_owned(),
                 output_schema: r#"{"type":"string"}"#.to_owned(),
                 required_capabilities: CapabilitySet::from_slice(&[Capability::FileWrite]),
@@ -1538,7 +1748,7 @@ impl DesktopPatchTool {
                 verification: "fenced-atomic-write-v1".to_owned(),
                 compensation: "re-write-v1".to_owned(),
             },
-            filesystem,
+            folders,
         }
     }
 }
@@ -1603,7 +1813,7 @@ impl Tool for DesktopPatchTool {
             .and_then(value_as_bool)
             .unwrap_or(false);
 
-        let text = self.filesystem.read_text(path)?;
+        let text = self.folders.read_text(path)?;
         let occurrences = text.matches(find).count();
         if occurrences == 0 {
             return Err(inbharat_harness_core::Failure::invalid(
@@ -1624,7 +1834,7 @@ impl Tool for DesktopPatchTool {
         } else {
             text.replacen(find, replace, 1)
         };
-        self.filesystem.write_text_atomic(path, &patched)?;
+        self.folders.write_text_atomic(path, &patched)?;
         let summary = format!(
             "patched {path}: replaced {occurrences} occurrence(s); file is now {} bytes",
             patched.len()
@@ -1906,8 +2116,10 @@ impl Tool for DesktopBrowserTool {
 /// The full-access tool set: the harness built-ins (fenced fs.read/fs.list/
 /// fs.write + allowlisted direct-argv process.run), plus the desktop search,
 /// patch and browser adapters. Every tool stays behind the harness pipeline.
+/// The fs tools are fenced to the granted-folder set — the workspace root
+/// plus every additional user-granted folder.
 fn desktop_workspace_tools(
-    filesystem: RootedFs,
+    folders: GrantedFolders,
     app: tauri::AppHandle,
     browser: Arc<BrowserStateHolder>,
     safety: Arc<Mutex<DesktopSafetyGuard>>,
@@ -1918,8 +2130,8 @@ fn desktop_workspace_tools(
         Arc::new(WriteFileTool::default()),
         Arc::new(MakeDirTool::default()),
         Arc::new(RunProcessTool::default()),
-        Arc::new(DesktopSearchTool::new(filesystem.clone())),
-        Arc::new(DesktopPatchTool::new(filesystem.clone())),
+        Arc::new(DesktopSearchTool::new(folders.clone())),
+        Arc::new(DesktopPatchTool::new(folders.clone())),
         Arc::new(DesktopBrowserTool::new(app, browser, safety)),
     ]
 }
@@ -1982,13 +2194,18 @@ fn subagent_system_prefix() -> String {
     let workspace = workspace_root()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_else(|_| "%USERPROFILE%\\UnoOneAgent".to_owned());
+    let granted_lines = granted_folder_roots()
+        .iter()
+        .map(|folder| format!("\n- plus the user-granted folder: {}", folder.display()))
+        .collect::<Vec<_>>()
+        .join("");
     format!(
         "You are a sub-agent spawned by another AI agent to complete ONE \
          task inside the user's private Pocket AI workspace. You never talk \
          to the user directly — the parent agent receives your final report \
          and verifies it.\n\
          You have the same tools as the parent, all audited and budgeted:\n\
-         - Read/write/list/search/patch files in the workspace folder: {workspace}\n\
+         - Read/write/list/search/patch files in the workspace folder: {workspace}{granted_lines}\n\
          - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
          dotnet, go, java, cmake, make, gcc, clang, powershell)\n\
          - Deploy long-running processes with background:true on process.run\n\
@@ -2104,7 +2321,7 @@ impl PaiSubagentProvider {
             // contract as the main lane).
             .with_lexical_rerank(self.model_id.clone(), self.port),
         );
-        let workspace = workspace_root().map_err(|error| {
+        let folders = granted_folders().map_err(|error| {
             Failure::new(
                 ErrorCode::FilesystemDenied,
                 FailureClass::Policy,
@@ -2112,16 +2329,8 @@ impl PaiSubagentProvider {
                 error,
             )
         })?;
-        let filesystem = RootedFs::new(&workspace).map_err(|error| {
-            Failure::new(
-                ErrorCode::FilesystemDenied,
-                FailureClass::Policy,
-                "subagent.workspace",
-                error.to_string(),
-            )
-        })?;
-        let broker = LocalExecutionBroker::new(
-            filesystem.clone(),
+        let broker = GrantedFolderBroker::new(
+            folders.clone(),
             FULL_ACCESS_PROGRAMS.iter().map(|p| (*p).to_owned()),
         );
         let child_prefix = format!("[{child_id}]");
@@ -2161,7 +2370,7 @@ impl PaiSubagentProvider {
             builder = builder.register_tool(self.child_tool(tool, &child_prefix))?;
         }
         for tool in desktop_workspace_tools(
-            filesystem,
+            folders,
             self.app.clone().ok_or_else(|| {
                 Failure::new(
                     ErrorCode::Internal,
@@ -2600,9 +2809,7 @@ pub async fn harness_chat(
     kept_lines.reverse();
     let mut history_context = kept_lines.join("");
     if history_truncated {
-        history_context.push_str(
-            "(older turns were omitted to fit the granted context window)\n",
-        );
+        history_context.push_str("(older turns were omitted to fit the granted context window)\n");
     }
     let context_note = history_truncated.then(|| {
         format!(
@@ -2740,18 +2947,13 @@ pub async fn harness_chat(
             CapabilitySet::from_slice(&[Capability::Model, Capability::FileRead])
         };
         let workspace_fs = if full_access {
-            let workspace = workspace_root().map_err(|error| error.to_string())?;
-            Some(
-                RootedFs::new(&workspace)
-                    .map_err(|error| error.to_string())?
-                    .with_limits(2 * 1024 * 1024, 4 * 1024 * 1024),
-            )
+            Some(granted_folders().map_err(|error| error.to_string())?)
         } else {
             None
         };
-        let mut builder = if let Some(filesystem) = workspace_fs.clone() {
-            let broker = LocalExecutionBroker::new(
-                filesystem,
+        let mut builder = if let Some(folders) = workspace_fs.clone() {
+            let broker = GrantedFolderBroker::new(
+                folders,
                 FULL_ACCESS_PROGRAMS
                     .iter()
                     .map(|program| (*program).to_owned()),
@@ -2794,7 +2996,7 @@ pub async fn harness_chat(
                 }))
                 .map_err(|error| error.to_string())?;
         }
-        let subagent_provider = workspace_fs.as_ref().map(|_filesystem| {
+        let subagent_provider = workspace_fs.as_ref().map(|_folders| {
             // The multi-agent lane (2026-09-15): agent.spawn delegates a
             // self-contained sub-task to a fresh nested harness run — a
             // sub-agent with the same verified model, the same fenced
@@ -2812,9 +3014,9 @@ pub async fn harness_chat(
                 Arc::clone(&run_trail),
             ))
         });
-        if let Some(filesystem) = workspace_fs.clone() {
+        if let Some(folders) = workspace_fs.clone() {
             for tool in desktop_workspace_tools(
-                filesystem,
+                folders,
                 app.clone(),
                 Arc::clone(&browser),
                 Arc::clone(&safety),
@@ -3124,6 +3326,7 @@ mod trail_tests {
 mod workspace_tool_tests {
     use super::*;
     use inbharat_harness_core::ExecutionBroker;
+    use inbharat_harness_core::LocalExecutionBroker;
 
     /// A throwaway fenced workspace under the OS temp directory.
     fn temp_workspace() -> (PathBuf, RootedFs) {
@@ -3136,6 +3339,12 @@ mod workspace_tool_tests {
             .expect("fence the temp workspace")
             .with_limits(2 * 1024 * 1024, 4 * 1024 * 1024);
         (dir, filesystem)
+    }
+
+    /// A granted-folder set wrapping the single fenced workspace — the shape
+    /// the search/patch tools take in production (index 0 = primary).
+    fn granted(filesystem: &RootedFs) -> GrantedFolders {
+        GrantedFolders::new(vec![filesystem.clone()]).expect("granted-folder set")
     }
 
     /// A ToolContext wired to an empty-allowlist broker over the same fence.
@@ -3578,7 +3787,7 @@ mod workspace_tool_tests {
         filesystem
             .write_text_atomic("sub/beta.txt", "a needle deeper down\n")
             .expect("write beta");
-        let tool = DesktopSearchTool::new(filesystem.clone());
+        let tool = DesktopSearchTool::new(granted(&filesystem));
         let broker = harness_broker(&filesystem);
         let cancel = CancellationToken::new();
         let context = tool_context(&filesystem, &cancel, &broker);
@@ -3614,7 +3823,7 @@ mod workspace_tool_tests {
         filesystem
             .write_text_atomic("notes.md", "GEMMA is a family of models\n")
             .expect("write notes");
-        let tool = DesktopSearchTool::new(filesystem.clone());
+        let tool = DesktopSearchTool::new(granted(&filesystem));
         let broker = harness_broker(&filesystem);
         let cancel = CancellationToken::new();
         let context = tool_context(&filesystem, &cancel, &broker);
@@ -3649,7 +3858,7 @@ mod workspace_tool_tests {
         filesystem
             .write_text_atomic("inside.txt", "needle inside\n")
             .expect("write inside");
-        let tool = DesktopSearchTool::new(filesystem.clone());
+        let tool = DesktopSearchTool::new(granted(&filesystem));
         let broker = harness_broker(&filesystem);
         let cancel = CancellationToken::new();
         let context = tool_context(&filesystem, &cancel, &broker);
@@ -3682,7 +3891,7 @@ mod workspace_tool_tests {
         filesystem
             .write_text_atomic("config.toml", "name = \"old\"\nvalue = 1\n")
             .expect("write config");
-        let tool = DesktopPatchTool::new(filesystem.clone());
+        let tool = DesktopPatchTool::new(granted(&filesystem));
         let broker = harness_broker(&filesystem);
         let cancel = CancellationToken::new();
         let context = tool_context(&filesystem, &cancel, &broker);
@@ -3705,7 +3914,7 @@ mod workspace_tool_tests {
         filesystem
             .write_text_atomic("log.txt", "todo one\ntodo two\n")
             .expect("write log");
-        let tool = DesktopPatchTool::new(filesystem.clone());
+        let tool = DesktopPatchTool::new(granted(&filesystem));
         let broker = harness_broker(&filesystem);
         let cancel = CancellationToken::new();
         let context = tool_context(&filesystem, &cancel, &broker);
@@ -3740,7 +3949,7 @@ mod workspace_tool_tests {
         filesystem
             .write_text_atomic("root.txt", "present\n")
             .expect("write root file");
-        let tool = DesktopPatchTool::new(filesystem.clone());
+        let tool = DesktopPatchTool::new(granted(&filesystem));
         let broker = harness_broker(&filesystem);
         let cancel = CancellationToken::new();
         let context = tool_context(&filesystem, &cancel, &broker);
