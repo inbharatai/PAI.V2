@@ -45,6 +45,11 @@ pub struct HarnessChatResult {
     pub elapsed_ms: u64,
     pub model_id: String,
     pub memory_namespace: String,
+    /// Item 24 (2026-10-02): set when the oldest conversation turns were
+    /// omitted to fit the granted context window — rendered by ChatView so
+    /// truncation is visible, never silent.
+    #[serde(default)]
+    pub context_note: Option<String>,
 }
 
 /// Gap 1 (2026-09-16): one generated token of a plain (tool-free) chat
@@ -2536,18 +2541,36 @@ pub async fn harness_chat(
     // grants the escalation to L3 (multi-step agentic) execution.
     let full_access = allow_workspace_goal.unwrap_or(true);
 
+    // Item 24 (2026-10-02): the history byte cap derives from the REAL
+    // granted context window (artifact-native, host-RAM-clamped at server
+    // start) instead of a fixed constant. On a small host the history must
+    // shrink before the current request overflows the window; on a large
+    // host the historical 48 KiB ceiling is kept so behavior does not
+    // silently grow.
+    let granted_context = {
+        let guard = model_state.manager.lock().await;
+        guard.as_ref().and_then(|m| m.granted_context())
+    };
+    // Conservative inverse of the bytes/3 token estimate in
+    // llama::trim_history_to_budget: 3 bytes per estimated token, minus a
+    // 2,048-token response + chat-template reserve.
+    let history_byte_cap = granted_context
+        .map(|ctx| (ctx.saturating_sub(2_048).max(512) as usize) * 3)
+        .unwrap_or(48 * 1024)
+        .min(48 * 1024);
+
     // UNOONE encrypted MESSAGE records remain the only canonical chat history.
     // The frontend supplies that already-decrypted history for this one run;
     // Harness never persists a duplicate conversation stream.
-    let mut history_context = String::new();
-    for turn in conversation_history
-        .into_iter()
-        .rev()
-        .take(24)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
+    //
+    // Truncation priority (item 24): keep the NEWEST turns, drop the oldest
+    // first. The old loop iterated oldest→newest and broke at the cap, which
+    // kept the stalest context and silently dropped the most recent turns —
+    // exactly backwards for a long-running task.
+    let mut kept_lines: Vec<String> = Vec::new();
+    let mut history_truncated = false;
+    let mut history_bytes = 0usize;
+    for turn in conversation_history.into_iter().rev().take(24) {
         let role = match turn.role.as_str() {
             "user" => "USER",
             "assistant" => "ASSISTANT",
@@ -2562,14 +2585,31 @@ pub async fn harness_chat(
             continue;
         }
         let bounded = unoone_text::truncate_bytes_with_notice(&text, 8 * 1024);
-        history_context.push_str(role);
-        history_context.push_str(": ");
-        history_context.push_str(&bounded);
-        history_context.push('\n');
-        if history_context.len() > 48 * 1024 {
+        let mut line = String::new();
+        line.push_str(role);
+        line.push_str(": ");
+        line.push_str(&bounded);
+        line.push('\n');
+        history_bytes += line.len();
+        if history_bytes > history_byte_cap && !kept_lines.is_empty() {
+            history_truncated = true;
             break;
         }
+        kept_lines.push(line);
     }
+    kept_lines.reverse();
+    let mut history_context = kept_lines.join("");
+    if history_truncated {
+        history_context.push_str(
+            "(older turns were omitted to fit the granted context window)\n",
+        );
+    }
+    let context_note = history_truncated.then(|| {
+        format!(
+            "context note: oldest turns omitted to fit the {}-token window",
+            granted_context.unwrap_or(0)
+        )
+    });
     let harness_prompt = if history_context.is_empty() {
         message.clone()
     } else {
@@ -2937,6 +2977,7 @@ pub async fn harness_chat(
             elapsed_ms: u64::try_from(outcome.elapsed.as_millis()).unwrap_or(u64::MAX),
             model_id,
             memory_namespace: conversation_namespace,
+            context_note,
         })
     });
     let worker_result = worker

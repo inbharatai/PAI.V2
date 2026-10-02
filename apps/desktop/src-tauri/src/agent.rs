@@ -50,6 +50,11 @@ pub struct AgentResult {
     pub steps: Vec<AgentStep>,
     pub final_text: String,
     pub iterations: u32,
+    /// Item 24 (2026-10-02): set when the context window forced the oldest
+    /// conversation turns out of a request — the UI renders it so trimming
+    /// is visible, never silent. None = full history was sent every step.
+    #[serde(default)]
+    pub context_note: Option<String>,
 }
 
 /// D3: Tool implementations that use real vault state.
@@ -441,6 +446,14 @@ pub async fn agent_chat(
 
     let tool_definitions = get_tool_definitions();
     let max_steps = agent_state.max_steps;
+    // Item 24 (2026-10-02): the granted context window of the running
+    // server, so each loop iteration's request is trimmed to the real
+    // window instead of overflowing it on long conversations.
+    let granted_context = {
+        let manager = model_state.manager.lock().await;
+        manager.as_ref().and_then(|m| m.granted_context())
+    };
+    let mut context_note: Option<String> = None;
     // Whole-loop deadline so a model cannot hang the agent indefinitely.
     let loop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
     // Circuit breaker over repeated identical (tool, args) calls.
@@ -469,6 +482,7 @@ pub async fn agent_chat(
             // its tool calls think-off with temperature 0.2 — unifying the
             // two policies is a deliberate follow-up, not a silent change.
             disable_reasoning: None,
+            context_budget: granted_context,
         };
 
         let port = *model_state
@@ -483,6 +497,11 @@ pub async fn agent_chat(
                 .send_completion(&request, port)
                 .await?
         };
+        // First trim notice wins — it says how much of the *oldest* history
+        // was dropped, which is the fact the user needs to know.
+        if context_note.is_none() {
+            context_note = response.context_note.clone();
+        }
 
         // 2. Check if model wants to call tools
         if let Some(tool_calls) = &response.tool_calls {
@@ -648,6 +667,7 @@ pub async fn agent_chat(
         final_text,
         steps,
         iterations,
+        context_note,
     })
 }
 

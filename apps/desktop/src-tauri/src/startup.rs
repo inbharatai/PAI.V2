@@ -285,14 +285,13 @@ mod set_phase_if_booting_tests {
     use super::*;
 
     fn coordinator_at(phase: StartupPhase) -> StartupCoordinator {
-        let c = StartupCoordinator {
+        StartupCoordinator {
             phase: Mutex::new(phase),
             supplied_root: Mutex::new(None),
             connected_root: Mutex::new(None),
             vault_id: Mutex::new(None),
             validation_failures: Mutex::new(Vec::new()),
-        };
-        c
+        }
     }
 
     fn phase_of(c: &StartupCoordinator) -> StartupPhase {

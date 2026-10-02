@@ -193,6 +193,118 @@ pub struct InferenceRequest {
     /// lanes (OCR, blind-aid describe); None keeps the model's default
     /// behavior (the agent loop reasons, as before).
     pub disable_reasoning: Option<bool>,
+    /// Universal-adaptive context (2026-10-02): the granted context window
+    /// for THIS session (from gguf_meta::derive_context_budget, stored when
+    /// the server started). When set, send_completion trims the oldest
+    /// conversation turns to keep prompt + response reserve inside the
+    /// window — the alternative was a request that silently overflows and
+    /// fails mid-session. None = no trimming (single-shot lanes).
+    #[serde(default)]
+    pub context_budget: Option<u32>,
+}
+
+/// Item 24 — token-accurate truncation priorities for the chat history.
+///
+/// Conservative token estimate: bytes/3 overestimates English (~4 B/token)
+/// and is close for Devanagari (~3 B/code point), so trimming fires a little
+/// early rather than after the server has already rejected the prompt.
+pub(crate) fn estimated_tokens(text: &str) -> usize {
+    text.len() / 3 + 1
+}
+
+/// Tokens a serialized turn is assumed to cost (role + tool-call JSON adds a
+/// small fixed overhead on top of the content itself).
+fn turn_tokens(turn: &ConversationTurn) -> usize {
+    let content = match &turn.content {
+        Content::Text(text) => estimated_tokens(text),
+        // Multimodal turns carry a base64 image — the vision encoder's token
+        // budget is dominated by image patches; charge the textual parts and
+        // a flat image cost.
+        Content::Multimodal(parts) => parts
+            .iter()
+            .map(|p| match p {
+                ContentPart::text { text } => estimated_tokens(text),
+                ContentPart::image_url { .. } => 1_024,
+            })
+            .sum(),
+    };
+    let tool_overhead = turn
+        .tool_calls
+        .as_ref()
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|c| estimated_tokens(&c.name) + estimated_tokens(&c.arguments.to_string()))
+                .sum()
+        })
+        .unwrap_or(0);
+    content + tool_overhead + 8
+}
+
+/// Trim the oldest turns so prompt estimate + response reserve fit the
+/// granted window. Priorities, newest-last: the system prompt and the LAST
+/// user turn are never dropped (the current task must always reach the
+/// model); older turns go first. A turn that alone exceeds the window is
+/// kept anyway — the server's error is the honest outcome, silently
+/// dropping the task the user just asked for is not.
+///
+/// Returns the trimmed history and how many turns were dropped.
+pub(crate) fn trim_history_to_budget(
+    system_prompt: Option<&str>,
+    history: &[ConversationTurn],
+    tools: Option<&Vec<ToolDefinition>>,
+    context_budget: u32,
+    max_tokens: u32,
+) -> (Vec<ConversationTurn>, u32) {
+    let reserve = max_tokens.max(256) + 512; // response + chat-template/tool overhead
+    let mut budget = context_budget.saturating_sub(reserve) as usize;
+
+    let mut fixed = 0usize;
+    if let Some(sys) = system_prompt {
+        fixed += estimated_tokens(sys);
+    }
+    if let Some(tools) = tools {
+        let serialized = serde_json::to_string(tools).unwrap_or_default();
+        fixed += estimated_tokens(&serialized);
+    }
+    budget = budget.saturating_sub(fixed);
+
+    let cost: Vec<usize> = history.iter().map(turn_tokens).collect();
+    let total: usize = cost.iter().sum();
+
+    // Everything fits: no trimming, no notice.
+    if total <= budget || history.is_empty() {
+        return (history.to_vec(), 0);
+    }
+
+    // Index of the last user turn — protected.
+    let last_user = history
+        .iter()
+        .rposition(|t| t.role == "user")
+        .unwrap_or(history.len() - 1);
+
+    let mut dropped: u32 = 0;
+    let mut remaining = total;
+    let mut keep = vec![true; history.len()];
+    for i in 0..history.len() {
+        if remaining <= budget {
+            break;
+        }
+        if i == last_user {
+            continue; // never drop the current task
+        }
+        keep[i] = false;
+        remaining = remaining.saturating_sub(cost[i]);
+        dropped += 1;
+    }
+
+    let trimmed: Vec<ConversationTurn> = history
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| keep[*i])
+        .map(|(_, t)| t.clone())
+        .collect();
+    (trimmed, dropped)
 }
 
 /// Conversation turn — extended with multimodal content support for vision/OCR
@@ -298,6 +410,13 @@ pub struct InferenceResponse {
     /// callers verify the cache is actually being hit instead of assuming.
     #[serde(default)]
     pub cached_prompt_tokens: Option<u32>,
+    /// Item 24 (2026-10-02): set when send_completion had to drop older
+    /// conversation turns to fit the granted context window — "context note:
+    /// trimmed N oldest turns to fit 32,768-token budget". None = the full
+    /// history was sent. Rendered by the UI so trimming is visible, not
+    /// silent memory loss.
+    #[serde(default)]
+    pub context_note: Option<String>,
 }
 
 /// Verified server identity returned after a successful start.
@@ -344,6 +463,11 @@ pub struct ModelManager {
     llama_process: Mutex<Option<std::process::Child>>,
     /// Verified identity of the running llama-server process (PID, port, model id).
     server_identity: Mutex<Option<ServerIdentity>>,
+    /// Item 24 (2026-10-02): the granted context window of the running
+    /// server (clamped by artifact + host RAM in start_server). Agent/chat
+    /// requests read this so their prompts are trimmed to the real window
+    /// — with None (no server) no trimming is attempted.
+    granted_context: Mutex<Option<u32>>,
 }
 
 impl ModelManager {
@@ -353,7 +477,13 @@ impl ModelManager {
             backend: Mutex::new(AccelerationBackend::Cpu),
             llama_process: Mutex::new(None),
             server_identity: Mutex::new(None),
+            granted_context: Mutex::new(None),
         }
+    }
+
+    /// Granted context window of the running server, for request trimming.
+    pub fn granted_context(&self) -> Option<u32> {
+        *self.granted_context.lock().unwrap()
     }
 
     /// Find a free localhost TCP port by binding a temporary socket to port 0.
@@ -974,6 +1104,7 @@ impl ModelManager {
             detected_ram_gib().map(|gib| gib as u64),
             config.cache_type_k.as_deref(),
         );
+        *self.granted_context.lock().unwrap() = Some(context_budget.granted_context);
 
         // Strict identity policy requires a disk hash compared against the
         // manifest hash. Hash the model ONCE here, BEFORE spawning
@@ -1247,6 +1378,7 @@ impl ModelManager {
             *process = None;
         }
         *self.server_identity.lock().unwrap() = None;
+        *self.granted_context.lock().unwrap() = None;
         *self.status.lock().unwrap() = ModelStatus::NotLoaded;
         Ok(())
     }
@@ -1281,12 +1413,36 @@ impl ModelManager {
     ) -> Result<InferenceResponse, String> {
         let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
 
+        // Item 24 (2026-10-02): token-accurate truncation. When the caller
+        // supplies the granted context budget, the oldest turns (never the
+        // system prompt or the last user turn) are dropped so the prompt +
+        // response reserve fit the window. The note surfaces in the response
+        // so the UI can show that history was trimmed.
+        let (history, dropped_turns) = match request.context_budget {
+            Some(budget) => trim_history_to_budget(
+                request.system_prompt.as_deref(),
+                &request.conversation_history,
+                request.tools.as_ref(),
+                budget,
+                request.max_tokens.unwrap_or(4096),
+            ),
+            None => (request.conversation_history.clone(), 0),
+        };
+        let context_note = (dropped_turns > 0).then(|| {
+            format!(
+                "trimmed {} oldest turn{} to fit the {}-token context budget",
+                dropped_turns,
+                if dropped_turns == 1 { "" } else { "s" },
+                request.context_budget.unwrap_or(0)
+            )
+        });
+
         // Build OpenAI-compatible request body
         let mut messages = Vec::new();
         if let Some(sys) = &request.system_prompt {
             messages.push(serde_json::json!({"role": "system", "content": sys}));
         }
-        for turn in &request.conversation_history {
+        for turn in &history {
             // Serialize Content enum: Text becomes a plain string,
             // Multimodal becomes an array of content parts
             let content_value = match &turn.content {
@@ -1498,6 +1654,7 @@ impl ModelManager {
             tool_calls: final_tool_calls,
             finish_reason,
             reasoning,
+            context_note,
         })
     }
 
@@ -1587,6 +1744,90 @@ impl ModelManagerState {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    // -- item 24: token-accurate history trimming --
+
+    fn turn(role: &str, text: &str) -> ConversationTurn {
+        ConversationTurn {
+            role: role.to_string(),
+            content: Content::text(text),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    #[test]
+    fn short_history_is_sent_untouched() {
+        let history = vec![turn("user", "hello"), turn("assistant", "hi")];
+        let (trimmed, dropped) =
+            trim_history_to_budget(None, &history, None, 32_768, 4096);
+        assert_eq!(dropped, 0);
+        assert_eq!(trimmed.len(), 2);
+    }
+
+    #[test]
+    fn oversized_history_drops_oldest_but_never_the_last_user_turn() {
+        // 60 turns of ~600 estimated tokens each = ~36.5k; budget after
+        // reserve (4096+512) is 28_160 — the oldest turns must go.
+        let mut history = Vec::new();
+        for i in 0..60 {
+            let filler = "x".repeat(1_800); // ~600 tokens by bytes/3
+            if i == 59 {
+                history.push(turn("user", &format!("answer this: {}", filler)));
+            } else {
+                let role = if i % 2 == 0 { "user" } else { "assistant" };
+                history.push(turn(role, &filler));
+            }
+        }
+        let (trimmed, dropped) =
+            trim_history_to_budget(None, &history, None, 32_768, 4096);
+        assert!(dropped > 0, "a 36k-token history in a 28k budget must trim");
+        assert!(dropped < 60, "the budget must keep most turns, not empty the history");
+        // The LAST user turn (index 59) must survive.
+        let last = trimmed.last().expect("history must never be empty");
+        assert_eq!(last.role, "user");
+        let last_text = match &last.content {
+            Content::Text(t) => t.clone(),
+            Content::Multimodal(_) => String::new(),
+        };
+        assert!(last_text.contains("answer this:"));
+        // Oldest turns went first.
+        assert_eq!(trimmed[0].role, if dropped % 2 == 0 { "user" } else { "assistant" });
+    }
+
+    #[test]
+    fn system_prompt_and_tools_are_charged_to_the_budget() {
+        // Same history, but now a 20k-token system prompt + tools must force
+        // more trimming than the bare call.
+        let mut history = Vec::new();
+        for i in 0..30 {
+            let filler = "x".repeat(1_800);
+            history.push(turn("user", &format!("{} {}", i, filler)));
+        }
+        let sys = "s".repeat(30_000); // ~10k tokens
+        let (_, dropped_bare) =
+            trim_history_to_budget(None, &history, None, 32_768, 4096);
+        let (_, dropped_with_sys) =
+            trim_history_to_budget(Some(&sys), &history, None, 32_768, 4096);
+        assert!(dropped_with_sys > dropped_bare);
+    }
+
+    #[test]
+    fn a_single_turn_larger_than_the_window_is_kept_not_silently_dropped() {
+        let huge = "x".repeat(300_000); // ~100k tokens > whole 32k window
+        let history = vec![turn("user", &huge)];
+        let (trimmed, dropped) =
+            trim_history_to_budget(None, &history, None, 32_768, 4096);
+        assert_eq!(dropped, 0);
+        assert_eq!(trimmed.len(), 1, "the current task must still reach the model");
+    }
+
+    #[test]
+    fn estimated_tokens_is_conservative() {
+        // 12 bytes of ASCII ≈ 3 tokens at 4 B/token real; bytes/3 gives 5.
+        assert!(estimated_tokens("hello world") >= 3);
+        assert_eq!(estimated_tokens(""), 1);
+    }
 
     #[test]
     fn find_free_port_returns_usable_local_port() {

@@ -605,6 +605,11 @@ export function ChatView() {
         if (telemetry) {
           progressSteps.unshift({ type: 'Thinking', text: telemetry });
         }
+        // Item 24: context trimming is visible — when the granted window
+        // forced the oldest turns out of the prompt, say so.
+        if (harness.context_note) {
+          progressSteps.unshift({ type: 'Thinking', text: harness.context_note });
+        }
         assistantMessage = {
           id: crypto.randomUUID(),
           role: 'assistant',
@@ -660,12 +665,15 @@ export function ChatView() {
             type: 'Thinking' as const,
             text: `Fell back to the read-only legacy agent (the primary agent pipeline stopped: ${harnessMsg}). This fallback can only read vault records — its answers may understate what this session can do.`,
           };
+          const legacySteps: AgentStep[] = result.context_note
+            ? [{ type: 'Thinking' as const, text: result.context_note }, ...(result.steps ?? [])]
+            : (result.steps ?? []);
           assistantMessage = {
             id: crypto.randomUUID(),
             role: 'assistant',
             content: result.final_text,
             timestamp: Date.now(),
-            steps: [fallbackStep, ...(result.steps ?? [])],
+            steps: [fallbackStep, ...legacySteps],
           };
         }
       }

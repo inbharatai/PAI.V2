@@ -263,6 +263,9 @@ export interface AgentResult {
   final_text: string;
   steps: AgentStep[];
   iterations: number;
+  /** Set when the oldest conversation turns had to be dropped to fit the
+   *  granted context window — rendered by ChatView so trimming is visible. */
+  context_note?: string | null;
 }
 
 // Unified Harness text plane (production path). The legacy agent_chat remains
@@ -281,6 +284,9 @@ export interface HarnessChatResult {
   elapsed_ms: number;
   model_id: string;
   memory_namespace: string;
+  /** Set when the oldest turns were omitted to fit the granted context
+   *  window — shown as a visible note on the reply, never silent. */
+  context_note?: string | null;
 }
 
 // InBharat Audio adapter status. production_ready is true only when the real

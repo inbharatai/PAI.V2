@@ -187,6 +187,8 @@ pub async fn perform_ocr(
         // the describe lane, same template: 44.6 s -> 5.7 s with comparable
         // answer length — OCR is the same shape of call.
         disable_reasoning: Some(true),
+        // Single-shot image prompt — no history to trim.
+        context_budget: None,
     };
 
     let port = *model_state
@@ -316,6 +318,9 @@ pub async fn describe_image(
         // reasoning_content. A blind user presses "What's in front of me?"
         // and this is the difference between waiting ~45 s and ~6 s.
         disable_reasoning: Some(true),
+        // Single-shot image prompt — no history to trim; the granted window
+        // is enforced by start_server's -c clamp.
+        context_budget: None,
     };
 
     let port = *model_state
