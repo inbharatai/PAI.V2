@@ -117,16 +117,38 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   deadline (the shipped audio.cpp build is CPU-only — RTF ~7 — which the
   2026-10-02 measurement exposed as the remaining speech latency).
 - **Tool surface (FullAccess permission, default ON):** `fs.read/write/list`
-  with exact size/count metadata, `process.run` with allowlisted direct-argv
+  through the multi-root granted-folder fence (the workspace root plus
+  user-approved folders, each grant validated — absolute, existing, never a
+  drive root, never inside the encrypted package — and audited as a vault
+  `AuditRecord`; revocable from Settings), `doc.create` writing real
+  PDF/DOCX/MD/TXT documents through the same fence (the pure-Rust writers
+  are round-trip tested against the built-in parsers, so a writer bug cannot
+  pass its own reader), `process.run` with allowlisted direct-argv
   execution and 10 s foreground deadlines (background deploys supported),
   `workspace.search` (content grep) and `workspace.patch` (anchored edits),
-  `browser.act` typed browser actions over the audited WebView bridge, and
+  `browser.act` typed browser actions over the audited WebView bridge,
+  `web.preview` (a live preview window of a site the agent is building,
+  reloaded as the agent keeps editing — no web server anywhere), and
   `agent.spawn` sub-agents (Codex/GLM-style multi-agent lane).
 - **Vision attachments:** chat can attach images through the audited
   attachment pipeline (mmproj vision), with CSP-permitted previews.
 - **Browser lane:** the agent opens and drives a real frontend-created
   WebView window (`github.com`, `google.com` verified live), with
   session-aware status, focus ACL, and truthful no-browser refusals.
+  Web sessions persist honestly: every browser-lane window shares the
+  host's WebView2 user-data profile, so one manual login survives app
+  restarts on that machine — the status is surfaced in the Browser
+  Workspace and recorded once in the vault as an encrypted
+  `BROWSER_RESEARCH` note carrying the status and its honest boundary
+  (host-local, not vault-encrypted; `ClearSession` clears page storage
+  only). No cookie values or credentials are ever stored.
+- **Live website preview (2026-10-02):** `web.preview` mirrors the site
+  the agent is building into a bounded `%TEMP%\unoone-preview` tree (the
+  only path the asset protocol gains scope for) and opens it in its own
+  capability-less window; a ~1.5 s heartbeat re-stages the mirror and
+  reloads the window whenever the site's file signature changes — the user
+  watches the site build live, with no web server, no port, and no
+  file-watcher dependency.
 - Honest-failure design throughout: sub-agent timeouts, tool failures, and
   budget exhaustion surface in the UI instead of silent fallbacks. Evidence:
   `docs/verification/2026-09-14/` and `2026-09-15/` (docs 105–116).
@@ -147,14 +169,14 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 | Desktop frontend embedding | **VERIFIED** — root cause of the historic "localhost refused to connect" drive is fixed (`tauri/custom-protocol` default feature; without it `generate_context!` embeds zero assets). Byte-level gate passes in CI and on the staged drive binary |
 | Mobile app (Android) | V2 agent pipeline + Pocket AI USB auto-open; M1-M3 truthful fixes (USB detection reasons, Room TTL/clear-on-detach cache, unused permission removed). Compiles, lints, tests, and `assembleDebug` passes; **cross-platform vault contract proven bidirectionally in CI** (Kotlin↔Rust Argon2id + AES-GCM record layer AND XChaCha20 master-key wrap — `packages/vault-core/test-vectors/`, `VaultCryptoCrossPlatformTest`). Physical phone test pending |
 | Desktop frontend (React) | BUILDS — Vite build passes, oxlint clean, real Tauri API calls, no mock data |
-| Desktop backend (Rust) | BUILDS AND TESTS — fmt/check/test/clippy clean on **both windows-latest and macos-latest**; 70/70+ vault-core (Wave-1 regressions + cross-platform vectors), 20/20 recording-policy, 16/16 text-util, 16/16 usb-manifest, 9/9 document-migration, 13/13 browser-policy, 2/2 chat-memory round-trip (vault `MESSAGE` record persistence: ordering + limit tail, tombstones and foreign records skipped). The deferred dead-code sweep landed: `wait_for_exit()`, `get_backend()`, the never-read config/model_info fields and `is_confirmation_required()` are gone with clippy `-D warnings` still clean |
+| Desktop backend (Rust) | BUILDS AND TESTS — fmt/check/test/clippy clean on **both windows-latest and macos-latest**; 70/70+ vault-core (Wave-1 regressions + cross-platform vectors), 20/20 recording-policy, 16/16 text-util, 16/16 usb-manifest, 9/9 document-migration, 13/13 browser-policy, 2/2 chat-memory round-trip (vault `MESSAGE` record persistence: ordering + limit tail, tombstones and foreign records skipped), 8/8 granted-folder fence (multi-root longest-prefix routing, `C:\root` vs `C:\rootx` boundary, grant validation), 5/5 doc-writer round-trips (pure-Rust PDF/DOCX/MD/TXT writers re-parsed by the built-in readers), 5/5 live-preview (bounded mirror walk, reload-only-on-change, honest end when the site folder vanishes), 44/44 browser workspace (now including the vault web-session note: round-trip, dedupe, tombstones, honest persistence facts). The deferred dead-code sweep landed: `wait_for_exit()`, `get_backend()`, the never-read config/model_info fields and `is_confirmation_required()` are gone with clippy `-D warnings` still clean |
 | Windows Dock / Starter | **INTEGRITY-VERIFIED ON DRIVE** — manifest-declared, hash-verified, native `--verify-only` exits 0; transactional staging with automatic rollback proven live |
 | Vault encryption (`packages/vault-core`) | IMPLEMENTED AND CORRECTNESS-HARDENED — Argon2id (256 MiB / t=3 / p=4) + AES-256-GCM for new records (legacy XChaCha20-Poly1305 stays readable, identified by nonce length) + HKDF-SHA-256 + BIP-39 recovery + write-ahead journal; transactional first-use setup refuses re-initialisation and preserves packaged `vault.id` bytes. Per-vault random salts on both the password and recovery paths. The KDF parameters are pinned as a cross-platform contract with the Kotlin `encrypted-vault` package (`SPEC_ARGON2_*` plus a `const` assertion that makes drift a compile error in release builds), because the test profile deliberately uses reduced parameters and would not catch a change that broke Android↔Windows unlock. **Wave 1** additionally fixed four release blockers: header slot selection now picks the newest committed generation (a password change written to the inactive slot used to be silently discarded on restart), record metadata is authenticated and re-verified on every read (privacy level, tombstone, type, revision and timestamps were previously editable on disk while content still decrypted), record writes are wrapped in real journal transactions with fsync-and-verify before promotion, and record IDs must be canonical UUID v4 before touching a path |
 | Model inference | Bundled llama.cpp only; direct runtime test verified (real answer, 127.0.0.1-only, clean stop) — see `docs/verification/2026-07-30/59_DIRECT_GEMMA.md` |
 | Offline voice | VERIFIED pipeline — bundled Piper synth → bundled Whisper transcribe round trip is verbatim; see `docs/verification/2026-07-30/62_OFFLINE_VOICE.md` |
 | InBharat Audio speech plane | ACCEPTANCE-GATED + DEPLOYED 2026-08-26 — `vendor/Inbharat-audiocpp/` (audio.cpp @ `26dcb5c4`); Qwen3-ASR-0.6B Q8_0 + omnivoice Q8_0 GGUF deployed at `SPEECH/models/`; deployed `audiocpp_cli` runs real ASR (exit 0) + TTS (exit 0, 24 kHz); 30/30 hash-bound acceptance gate green (re-hash of 2 CLIs + 2 models). **Speech-architecture hardening (2026-09):** the production Tauri voice path now goes through a `SpeechRouter` (`apps/desktop/src-tauri/src/speech.rs`) with the explicit `InbharatAudioThenLegacy` policy — production code never talks to a backend module directly. The InBharat route hash-verifies its CLIs/models before first execution and reports buffered-final (not stateful-streaming) semantics; the legacy Whisper/Piper route is wrapped behind the same trait, gains binary/model hash verification, deadline timeouts, and `error:` separation from transcript text. Language tags are canonicalized through the shared `packages/speech-contracts` table (`languages.v1.json`), byte-sync-checked against the Android `VoiceLanguage` mirror by `scripts/check_speech_language_sync.py` in CI; Assamese (`as-IN`) routes only to the IndicConformer family and fails closed when its assets are absent — it is never served by Qwen3. **Live speech matrix on the staged drive 2026-09-15: 19/19 pass** — OmniVoice TTS speaks 15 languages, Qwen3-ASR understands en/hi/hinglish (hinglish transcribes back as correct Hindi in Devanagari), unstaged languages are refused with the truthful provider-table message; full speech-to-speech loop passed with exactly ONE model call (`docs/verification/2026-09-15/116_SPEECH_LANGUAGE_MATRIX.md`) |
 | Recording | IMPLEMENTED WITH ENFORCED PRIVACY — `unoone-recording-policy` crate makes retention decisions exhaustive (20/20 tests); TRANSCRIPT_ONLY/SUMMARY_ONLY retain no audio; temp WAV deleted + verify-checked; zero-samples reports an error. **SUMMARY_ONLY is disabled in the UI** (no summariser exists) until one is implemented |
-| Browser workspace | IMPLEMENTED AS TYPED, VERIFIED ACTIONS — no arbitrary script execution; scheme allowlist; JSON-literal escaping; submit/upload/download require explicit confirmation; real PNG screenshots with SHA-256; 35 deterministic tests. Live-page acceptance journeys are human-gated |
+| Browser workspace | IMPLEMENTED AS TYPED, VERIFIED ACTIONS — no arbitrary script execution; scheme allowlist; JSON-literal escaping; submit/upload/download require explicit confirmation; real PNG screenshots with SHA-256; 44 deterministic tests. Web-session persistence is surfaced honestly (host WebView2 profile shared across windows and restarts, recorded as a status-only vault note — the dead `BrowserConfig`/`confirmation_tokens` fields are gone). Live-page acceptance journeys are human-gated |
 | Text handling (Indic scripts) | HARDENED — `packages/text-util` provides grapheme-cluster-safe truncation. Eight sites previously sliced `&str` at raw byte offsets, which **panics** mid-character; Devanagari and Bengali code points are 3 bytes, so this crashed on ordinary Hindi/Bengali/Assamese documents. Byte budgets for the model context window remain byte budgets (snapped to cluster boundaries) and truncation notices now report real character counts instead of byte counts |
 | Plaintext elimination (Wave 3) | SHIPPED — migration core (PR #11) AND read-path (PR #15): migrated records are listed with legacy titles, TF-IDF-searched when unlocked, and read via agent fallback. `migrate_plaintext_documents_to_vault` runs against the real drive in a human session (backup first); the drive has not yet been migrated |
 | Document parsing | IMPLEMENTED — PDF (lopdf), DOCX/XLSX/PPTX (zip+quick-xml), TXT/MD/CSV/HTML; TF-IDF keyword search (explicitly NOT described as "semantic") |
