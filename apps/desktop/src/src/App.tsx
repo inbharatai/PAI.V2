@@ -15,6 +15,7 @@ import { AccessibilityView } from './components/AccessibilityView';
 import { tauriApi, type StartupPhase } from './lib/tauri';
 import { listen } from '@tauri-apps/api/event';
 import { ensureBrowserWorkspaceWindow } from './lib/browserWorkspaceWindow';
+import { ensurePreviewWindow } from './lib/previewWindow';
 
 type AppScreen = 'unlock' | 'main';
 
@@ -282,6 +283,32 @@ function App() {
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
+
+  // The agent's live website preview (web.preview): the backend stages a
+  // bounded mirror of the site and emits 'unoone:ensure-preview-window' with
+  // the entry path; this listener opens the window through the same proven
+  // JS path, and a ~1.5s heartbeat polls the backend so the mirror re-stages
+  // and the preview window reloads whenever the agent keeps editing the
+  // site — no web server anywhere. The heartbeat stops when the backend
+  // reports the session is no longer active.
+  const [previewActive, setPreviewActive] = useState(false);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<{ path: string }>('unoone:ensure-preview-window', event => {
+      setPreviewActive(true);
+      void ensurePreviewWindow(event.payload.path);
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+  useEffect(() => {
+    if (!previewActive) return;
+    const id = window.setInterval(() => {
+      void tauriApi.previewPoll()
+        .then(result => { if (!result.active) setPreviewActive(false); })
+        .catch(() => {});
+    }, 1500);
+    return () => { window.clearInterval(id); };
+  }, [previewActive]);
 
   // Auto-lock on window blur (timer from settings)
   useEffect(() => {

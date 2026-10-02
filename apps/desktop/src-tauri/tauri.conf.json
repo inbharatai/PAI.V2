@@ -28,7 +28,8 @@
         "scope": [
           "$TEMP/unoone-tts/**",
           "$TEMP/unoone-vision/**",
-          "$TEMP/unoone-browser/**"
+          "$TEMP/unoone-browser/**",
+          "$TEMP/unoone-preview/**"
         ]
       }
     }

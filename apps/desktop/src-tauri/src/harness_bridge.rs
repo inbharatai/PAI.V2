@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use unoone_vault_core::Vault;
 
 #[derive(Debug, serde::Serialize)]
@@ -85,6 +85,10 @@ pub struct AgentProgressEvent {
     /// AI"). Bounded by the event, not the run: each line carries its own
     /// time so a long run reads like a timeline.
     pub at: String,
+    /// The result's presentation kind (e.g. "web-preview"), so the chat
+    /// feed can offer the affordances that belong to it — call events and
+    /// plain results carry `None`.
+    pub kind: Option<String>,
 }
 
 /// Local wall-clock "HH:MM:SS" for a progress event.
@@ -165,6 +169,14 @@ fn progress_detail(tool: &str, arguments: &ToolArguments) -> String {
                 "Creating a document".to_owned()
             } else {
                 format!("Creating document {filename}")
+            }
+        }
+        "web.preview" => {
+            let path = arg("path");
+            if path.is_empty() {
+                "Opening a live preview".to_owned()
+            } else {
+                format!("Opening a live preview of {path}")
             }
         }
         "agent.spawn" => {
@@ -304,6 +316,7 @@ impl Tool for ProgressTool {
                 detail: detail.clone(),
                 code_preview: preview,
                 at: progress_timestamp(),
+                kind: None,
             },
         );
         match self.inner.execute(arguments, context) {
@@ -322,6 +335,7 @@ impl Tool for ProgressTool {
                         detail: format!("Done: {summary}"),
                         code_preview: None,
                         at: progress_timestamp(),
+                        kind: output.presentation.get("kind").map(|kind| kind.to_string()),
                     },
                 );
                 Ok(output)
@@ -336,6 +350,7 @@ impl Tool for ProgressTool {
                         detail: format!("Failed: {failure}"),
                         code_preview: None,
                         at: progress_timestamp(),
+                        kind: None,
                     },
                 );
                 Err(failure)
@@ -863,6 +878,10 @@ fn desktop_system_prefix(full_access: bool) -> String {
              - Create real downloadable documents (PDF, DOCX, MD, TXT) from plain \
              text via doc.create — give `filename` plus the full `content`; the \
              user can open the result immediately\n\
+             - Open a live website preview via web.preview — write the site \
+             files first, then give the entry .html path; the preview window \
+             reloads itself as you keep editing, the user watches it build, \
+             and no web server is started\n\
              - Spawn sub-agents via agent.spawn to complete complex work: give \
              each one a COMPLETE, self-contained task (every path and detail, \
              because it sees nothing else — not even this conversation) and \
@@ -2291,11 +2310,111 @@ impl Tool for DesktopBrowserTool {
     }
 }
 
+/// The live website preview tool (web.preview): the agent writes a site with
+/// fs.write and the user watches it render in its own window — NO web
+/// server anywhere. `preview::start_preview` mirrors the entry's folder
+/// (bounded) into the asset-protocol-scoped `$TEMP` dir, the frontend
+/// creates the window (Rust cannot — defects #40/#41), and the frontend's
+/// `preview_poll` heartbeat re-stages + reloads as the agent keeps editing.
+/// The preview window carries NO Tauri capabilities, so scripts inside the
+/// previewed page can never touch the IPC surface.
+struct DesktopPreviewTool {
+    manifest: ToolManifest,
+    folders: GrantedFolders,
+    app: tauri::AppHandle,
+}
+
+impl DesktopPreviewTool {
+    fn new(folders: GrantedFolders, app: tauri::AppHandle) -> Self {
+        Self {
+            manifest: ToolManifest {
+                id: "web.preview".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: "Open a live preview window of an HTML page you wrote (a website, a report, an app UI). Give `path` of the entry .html file, relative to the workspace or an absolute path inside a granted folder; the page and every file next to it (css, js, images) shows in its own window and RELOADS ITSELF as you keep editing the site — the user watches it build. No web server is started. Call it again with another .html to point the preview at a different page.".to_owned(),
+                input_schema: r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#.to_owned(),
+                output_schema: r#"{"type":"string"}"#.to_owned(),
+                required_capabilities: CapabilitySet::from_slice(&[Capability::Workspace]),
+                supported_levels: vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
+                determinism: Determinism::NonIdempotent,
+                side_effect: SideEffect::Process,
+                confirmation: ConfirmationMode::OnSideEffect,
+                concurrency_safe: false,
+                default_timeout: Duration::from_secs(30),
+                max_output_bytes: 4 * 1024,
+                verification: "preview-mirror-v1".to_owned(),
+                compensation: "close-window-v1".to_owned(),
+            },
+            folders,
+            app,
+        }
+    }
+}
+
+impl Tool for DesktopPreviewTool {
+    fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        let allowed = ["path"];
+        if arguments.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "pai.tool.arguments",
+                "web.preview call contains an unsupported argument",
+            ));
+        }
+        required_string(arguments, "path")?;
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        context.cancel.check("pai.web_preview")?;
+        let path = required_string(arguments, "path")?;
+        // The fence resolves the entry to its canonical absolute path; a
+        // path outside every granted folder is refused here.
+        let entry = self.folders.resolve_existing(path)?;
+        let state = self.app.state::<crate::preview::PreviewState>();
+        let info = crate::preview::start_preview(&state, &entry).map_err(|message| {
+            inbharat_harness_core::Failure::invalid("web.preview.stage", message)
+        })?;
+        self.app
+            .emit(
+                "unoone:ensure-preview-window",
+                crate::preview::EnsurePreviewPayload {
+                    path: info.mirror_entry.to_string_lossy().to_string(),
+                },
+            )
+            .map_err(|error| {
+                inbharat_harness_core::Failure::new(
+                    ErrorCode::Internal,
+                    FailureClass::Internal,
+                    "web.preview.window",
+                    format!("could not request the preview window: {error}"),
+                )
+            })?;
+        let summary = format!(
+            "opened a live preview of {path} — {} file(s), {} bytes mirrored; the \
+             preview window reloads itself as you edit the site's files, and the user \
+             can watch it build",
+            info.file_count, info.total_bytes
+        );
+        Ok(ToolOutput {
+            value: Value::String(summary.clone()),
+            model_content: summary,
+            presentation: BTreeMap::from([("kind".to_owned(), "web-preview".to_owned())]),
+        })
+    }
+}
+
 /// The full-access tool set: the harness built-ins (fenced fs.read/fs.list/
 /// fs.write + allowlisted direct-argv process.run), plus the desktop search,
-/// patch and browser adapters. Every tool stays behind the harness pipeline.
-/// The fs tools are fenced to the granted-folder set — the workspace root
-/// plus every additional user-granted folder.
+/// patch, document, preview and browser adapters. Every tool stays behind
+/// the harness pipeline. The fs tools are fenced to the granted-folder set —
+/// the workspace root plus every additional user-granted folder.
 fn desktop_workspace_tools(
     folders: GrantedFolders,
     app: tauri::AppHandle,
@@ -2311,6 +2430,7 @@ fn desktop_workspace_tools(
         Arc::new(DesktopSearchTool::new(folders.clone())),
         Arc::new(DesktopPatchTool::new(folders.clone())),
         Arc::new(DesktopDocCreateTool::new(folders.clone())),
+        Arc::new(DesktopPreviewTool::new(folders.clone(), app.clone())),
         Arc::new(DesktopBrowserTool::new(app, browser, safety)),
     ]
 }
@@ -2390,6 +2510,7 @@ fn subagent_system_prefix() -> String {
          - Deploy long-running processes with background:true on process.run\n\
          - Drive the real web browser via browser.act\n\
          - Create real documents (PDF, DOCX, MD, TXT) via doc.create\n\
+         - Open a live website preview via web.preview (the entry .html path)\n\
          Do the whole task yourself: create the real files, run the real \
          commands, read the exact error output when something fails, fix it \
          and re-run until it genuinely works. Never claim a task is complete \

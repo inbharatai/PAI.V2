@@ -1214,6 +1214,33 @@
       }
     },
     {
+      "id": "web.preview",
+      "description": "Open a live preview window of an HTML page the agent wrote; edits reload the preview (no web server).",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "capability:Workspace",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}",
+      "timeout_ms": 30000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "bounded mirror staged and the preview window opened before the tool returns",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Process",
+        "confirmation_mode": "OnSideEffect",
+        "capabilities": [
+          "Workspace"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
       "id": "agent.spawn",
       "description": "Spawn a sub-agent with narrowed authority inside the parent budget (L3 only).",
       "platforms": [

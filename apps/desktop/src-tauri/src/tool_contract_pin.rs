@@ -3,9 +3,9 @@
 //!
 //! This is the Rust half of the tool-contract drift gate. The Kotlin half is
 //! `scripts/check_tool_contract_sync.py` (android tables), run in both CI workflows.
-//! `browser.act` and `agent.spawn` construct their manifests inline behind an
-//! `AppHandle` (not constructible in a unit test), so this test pins their ids in the
-//! contract and fully pins manifest facts for the other 11 desktop tools.
+//! `browser.act`, `web.preview` and `agent.spawn` construct their manifests inline
+//! behind an `AppHandle` (not constructible in a unit test), so this test pins their
+//! ids in the contract and fully pins manifest facts for the other 12 desktop tools.
 
 #[cfg(test)]
 mod tests {
@@ -121,6 +121,7 @@ mod tests {
         registered.extend(constructible.iter().map(|t| t.manifest().id.clone()));
         registered.push("browser.act".to_owned());
         registered.push("agent.spawn".to_owned());
+        registered.push("web.preview".to_owned());
         registered.sort();
         let mut declared = contract.desktop_active_ids();
         declared.sort();

@@ -543,6 +543,16 @@ export const tauriApi = {
   removeAgentFolder: (path: string) =>
     invoke<AgentWorkspaceInfo>('remove_agent_folder', { path }),
 
+  // Live website preview (web.preview). The window itself is created by the
+  // frontend (previewWindow.ts); these drive the backend's bounded mirror:
+  // `previewPoll` is the ~1.5s heartbeat that re-stages + reloads the
+  // preview when the site's files change (no web server anywhere),
+  // `previewStop` closes the window and clears the mirror, and
+  // `previewFocus` focuses (or re-opens) the window — the chat affordance.
+  previewPoll: () => invoke<{ active: boolean }>('preview_poll'),
+  previewStop: () => invoke<boolean>('preview_stop'),
+  previewFocus: () => invoke<boolean>('preview_focus'),
+
   // Security
   generateManifest: (vaultRoot: string) => invoke<VaultInfo & { entries: number; manifest_sha256: string }>('generate_manifest', { vault_root: vaultRoot }),
   recoverFromCrash: (vaultRoot: string) => invoke<{ state: string; recovered_files: number; rolled_back_files: number; errors: string[] }>('recover_from_crash', { vault_root: vaultRoot }),

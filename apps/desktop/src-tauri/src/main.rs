@@ -35,6 +35,10 @@ mod gguf_meta;
 mod granted_fs;
 mod harness_bridge;
 mod llama;
+// Live website preview (web.preview): a bounded mirror of the agent's site
+// under $TEMP (asset-protocol scoped), a frontend-created preview window,
+// and a heartbeat poll that re-stages + reloads — no web server anywhere.
+mod preview;
 mod recording;
 mod safety;
 mod security;
@@ -179,6 +183,8 @@ fn main() {
         .manage(safety_state)
         .manage(model_state)
         .manage(agent_state)
+        // The live website preview's bounded mirror + reload session.
+        .manage(preview::PreviewState::default())
         // Stop control for in-flight harness runs, keyed by conversation.
         .manage(harness_bridge::HarnessRunRegistry::new())
         .invoke_handler(tauri::generate_handler![
@@ -272,6 +278,10 @@ fn main() {
             harness_bridge::set_agent_workspace_root,
             harness_bridge::add_agent_folder,
             harness_bridge::remove_agent_folder,
+            // Live website preview (web.preview)
+            preview::preview_poll,
+            preview::preview_stop,
+            preview::preview_focus,
             bharat_audio::get_bharat_audio_status,
         ])
         .setup(|app| {

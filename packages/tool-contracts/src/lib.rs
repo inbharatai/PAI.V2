@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn contract_parses_and_holds_invariants() {
         let c = ToolContract::parse().expect("contract must parse");
-        assert_eq!(c.tools.len(), 61);
+        assert_eq!(c.tools.len(), 62);
     }
 
     #[test]
@@ -271,10 +271,11 @@ mod tests {
                 "pai.search_notes",
                 "pai.verify_vault",
                 "process.run",
+                "web.preview",
                 "workspace.patch",
                 "workspace.search",
             ],
-            "14 desktop tools: 4 read-lane, 5 harness builtins, 5 bridge tools"
+            "15 desktop tools: 4 read-lane, 5 harness builtins, 6 bridge tools"
         );
     }
 

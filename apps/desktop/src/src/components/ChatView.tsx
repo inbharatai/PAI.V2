@@ -15,6 +15,9 @@ interface AgentProgressEvent {
    * (defect #37, live-caught 2026-09-14: the user could not tell when each
    * step happened — other agent tools like Codex/GLM timestamp activity). */
   at: string;
+  /** The result's presentation kind (e.g. 'web-preview') so the feed can
+   * offer the affordances that belong to it; call events carry null. */
+  kind: string | null;
 }
 
 /** Report agent-run activity so App.tsx can defer the window-blur auto-lock
@@ -55,6 +58,9 @@ interface AgentStep {
   approved?: boolean;
   /** Local wall-clock "HH:MM:SS" from the backend event (defect #37). */
   at?: string;
+  /** The result's presentation kind (e.g. 'web-preview') — powers the
+   * step's affordances (focus/stop the live preview window). */
+  kind?: string | null;
 }
 
 /** Extensions parsed by the backend's audited document extractors. */
@@ -651,7 +657,7 @@ export function ChatView() {
         const progressSteps: AgentStep[] = liveProgressRef.current.map(ev =>
           ev.phase === 'call'
             ? { type: 'ToolCall', tool: ev.tool, text: ev.detail, at: ev.at }
-            : { type: 'ToolResult', tool: ev.tool, result: ev.detail, at: ev.at }
+            : { type: 'ToolResult', tool: ev.tool, result: ev.detail, at: ev.at, kind: ev.kind }
         );
         if (telemetry) {
           progressSteps.unshift({ type: 'Thinking', text: telemetry });
@@ -683,7 +689,7 @@ export function ChatView() {
           const progressSteps: AgentStep[] = liveProgressRef.current.map(ev =>
             ev.phase === 'call'
               ? { type: 'ToolCall', tool: ev.tool, text: ev.detail, at: ev.at }
-              : { type: 'ToolResult', tool: ev.tool, result: ev.detail, at: ev.at }
+              : { type: 'ToolResult', tool: ev.tool, result: ev.detail, at: ev.at, kind: ev.kind }
           );
           assistantMessage = {
             id: crypto.randomUUID(),
@@ -796,6 +802,43 @@ export function ChatView() {
     return `Used: ${toolNames.join(', ')}`;
   };
 
+  /** The live-preview affordance rendered next to a web.preview result:
+   * focus (or re-open) the preview window, or end the session. */
+  const renderPreviewAffordance = () => (
+    <span style={{ marginLeft: '8px', display: 'inline-flex', gap: '6px' }}>
+      <button
+        type="button"
+        onClick={() => { void tauriApi.previewFocus(); }}
+        style={{
+          padding: '1px 10px',
+          fontSize: '12px',
+          borderRadius: '6px',
+          border: '1px solid var(--accent, #4ade80)',
+          background: 'transparent',
+          color: 'var(--accent, #4ade80)',
+          cursor: 'pointer',
+        }}
+      >
+        ◱ Preview
+      </button>
+      <button
+        type="button"
+        onClick={() => { void tauriApi.previewStop(); }}
+        style={{
+          padding: '1px 10px',
+          fontSize: '12px',
+          borderRadius: '6px',
+          border: '1px solid var(--border, #333)',
+          background: 'transparent',
+          color: 'var(--text-secondary, #888)',
+          cursor: 'pointer',
+        }}
+      >
+        Stop preview
+      </button>
+    </span>
+  );
+
   const renderExpandedSteps = (steps: AgentStep[]) => (
     <div style={{
       marginTop: '8px',
@@ -835,6 +878,7 @@ export function ChatView() {
                 <span style={{ color: 'var(--text-secondary, #888)', marginLeft: '6px' }}>
                   {step.result?.slice(0, 120)}{step.result && step.result.length > 120 ? '…' : ''}
                 </span>
+                {step.kind === 'web-preview' && renderPreviewAffordance()}
               </div>
             );
           case 'InvalidToolCall':
@@ -1059,6 +1103,7 @@ export function ChatView() {
                           {ev.code_preview}
                         </pre>
                       )}
+                      {ev.phase === 'result' && ev.kind === 'web-preview' && renderPreviewAffordance()}
                     </div>
                   ))}
                   {streamedAnswer && (
