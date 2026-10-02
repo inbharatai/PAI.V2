@@ -364,6 +364,139 @@ fn sweep_stale_tts_outputs(dir: &Path) {
     sweep_tts_outputs_older_than(dir, TTS_OUTPUT_TTL)
 }
 
+/// Character target per synthesized chunk (see `synthesize`). ~280 chars is
+/// roughly 20 s of speech; at the measured CPU RTF ≈ 7.2 that is ~145 s of
+/// generation — inside the 180 s process deadline with margin, while short
+/// messages still synthesize as a single chunk.
+const TTS_CHUNK_CHAR_TARGET: usize = 280;
+
+/// Split `text` into sentence-bounded chunks of at most `target` characters
+/// (counted in chars, since synthesized languages include Devanagari and
+/// other non-ASCII scripts). Sentences accumulate into the current chunk
+/// until adding the next would overflow; a sentence longer than the target
+/// is hard-split on spaces. Chunk text keeps its sentence-ending
+/// punctuation (`.`, `!`, `?`, `।`, `॥`) so prosody survives the split.
+fn split_tts_chunks(text: &str, target: usize) -> Vec<String> {
+    let normalized = text.trim();
+    if normalized.is_empty() || normalized.chars().count() <= target {
+        return vec![normalized.to_string()];
+    }
+
+    let sentence_ends: &[char] = &['.', '!', '?', '।', '॥', ';', '\n'];
+    let mut sentences: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in normalized.chars() {
+        current.push(ch);
+        if sentence_ends.contains(&ch) {
+            sentences.push(std::mem::take(&mut current).trim().to_string());
+        }
+    }
+    if !current.trim().is_empty() {
+        sentences.push(current.trim().to_string());
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut chunk = String::new();
+    for sentence in sentences.into_iter().filter(|s| !s.is_empty()) {
+        let sentence_len = sentence.chars().count();
+        if sentence_len > target {
+            // Flush what we have, then hard-split the oversized sentence on
+            // spaces — never mid-word.
+            if !chunk.is_empty() {
+                chunks.push(std::mem::take(&mut chunk));
+            }
+            let mut piece = String::new();
+            for word in sentence.split(' ').filter(|w| !w.is_empty()) {
+                let addition = word.chars().count() + if piece.is_empty() { 0 } else { 1 };
+                if !piece.is_empty() && piece.chars().count() + addition > target {
+                    chunks.push(std::mem::take(&mut piece));
+                }
+                if !piece.is_empty() {
+                    piece.push(' ');
+                }
+                piece.push_str(word);
+            }
+            if !piece.is_empty() {
+                chunks.push(piece);
+            }
+            continue;
+        }
+        let addition = sentence_len + if chunk.is_empty() { 0 } else { 1 };
+        if !chunk.is_empty() && chunk.chars().count() + addition > target {
+            chunks.push(std::mem::take(&mut chunk));
+        }
+        if !chunk.is_empty() {
+            chunk.push(' ');
+        }
+        chunk.push_str(&sentence);
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks.retain(|c| !c.trim().is_empty());
+    chunks
+}
+
+/// Splice sequentially synthesized WAV parts into one playable file. All
+/// parts must share the first part's spec (sample rate, channels, bit
+/// depth, sample format) — the CLI synthesizes every chunk of one request
+/// from the same model, so a mismatch means a part is corrupt and the whole
+/// result is refused rather than producing glitched audio.
+fn concatenate_wav_chunks(parts: &[PathBuf], dest: &Path) -> Result<(), String> {
+    if parts.is_empty() {
+        return Err("no TTS chunk outputs to splice".to_string());
+    }
+    let first = hound::WavReader::open(&parts[0])
+        .map_err(|e| format!("cannot open first TTS chunk ({}): {e}", parts[0].display()))?;
+    let spec = first.spec();
+    if spec.sample_rate == 0 || spec.channels == 0 {
+        return Err("first TTS chunk has an invalid WAV spec".to_string());
+    }
+    if spec.bits_per_sample != 16 || spec.sample_format != hound::SampleFormat::Int {
+        // The shipped engine emits 16-bit int PCM (the acceptance attestation
+        // pins it); anything else means the engine changed and the splicer
+        // must refuse rather than guess a conversion.
+        return Err(format!(
+            "TTS chunks are not 16-bit int PCM ({}-bit {:?}) — refusing to splice",
+            spec.bits_per_sample, spec.sample_format
+        ));
+    }
+    let mut writer = hound::WavWriter::create(dest, spec)
+        .map_err(|e| format!("cannot create the spliced TTS output ({}): {e}", dest.display()))?;
+    for part in parts {
+        let reader = hound::WavReader::open(part)
+            .map_err(|e| format!("cannot open TTS chunk ({}): {e}", part.display()))?;
+        if reader.spec() != spec {
+            let _ = std::fs::remove_file(dest);
+            return Err(format!(
+                "TTS chunk {} does not share the request's WAV spec — refusing to splice",
+                part.display()
+            ));
+        }
+        if reader.duration() == 0 {
+            let _ = std::fs::remove_file(dest);
+            return Err(format!(
+                "TTS chunk {} produced an empty WAV stream",
+                part.display()
+            ));
+        }
+        for sample in reader.into_samples::<i16>() {
+            match sample {
+                Ok(value) => writer
+                    .write_sample(value)
+                    .map_err(|e| format!("cannot append TTS samples: {e}"))?,
+                Err(e) => {
+                    let _ = std::fs::remove_file(dest);
+                    return Err(format!("corrupt sample in TTS chunk {}: {e}", part.display()));
+                }
+            }
+        }
+    }
+    writer
+        .finalize()
+        .map_err(|e| format!("cannot finalize the spliced TTS output: {e}"))
+}
+
 fn read_manifest(vault_root: &str) -> Result<(PathBuf, InBharatAudioManifest), String> {
     let root = canonical_root(vault_root)?;
     let path = canonical_under(&root, CONFIG_RELATIVE_PATH, true)?;
@@ -1162,19 +1295,6 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
     // at our generated name would make the CLI write elsewhere).
     let _ = std::fs::remove_file(&output);
 
-    let mut cmd = Command::new(cli);
-    cmd.arg("--task")
-        .arg("tts")
-        .arg("--family")
-        .arg(&task.family)
-        .arg("--model")
-        .arg(model)
-        .arg("--backend")
-        .arg(&manifest.backend)
-        .arg("--text")
-        .arg(text)
-        .arg("--out")
-        .arg(&output);
     let trimmed = language.trim();
     let (cli_language, language_tag) = if trimmed.is_empty() {
         // Pack default (see transcribe): canonicalized but exempt from the
@@ -1198,14 +1318,72 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
     };
     // Same InBharat-route coverage rule as transcription.
     ensure_provider_coverage(task, SpeechTask::Tts, &language_tag)?;
-    cmd.arg("--language").arg(&cli_language);
-    crate::boot_trace::mark("synthesize: spawning audiocpp CLI");
-    if let Err(error) = run_command_timeout(cmd, INFERENCE_TIMEOUT) {
-        // A failed run may still have written a partial WAV — remove it so
-        // the vault scratch area never accumulates broken output.
-        let _ = std::fs::remove_file(&output);
-        crate::boot_trace::mark_detail("synthesize: CLI FAILED", &error);
-        return Err(error);
+
+    // Long text cannot make one CLI run: generation is RTF-bound on the
+    // CPU-only speech engine (measured RTF ≈ 7.2), so a chat-sized reply
+    // would blow past the 180 s process deadline and the user would get
+    // silence after three minutes of waiting (live-caught 2026-10-02: a
+    // real chat reply timed out). Synthesize sentence-bounded chunks, each
+    // sized so its generation fits the deadline with margin, and splice
+    // the WAVs — the caller still gets one file and never a dead end.
+    let chunks = split_tts_chunks(text, TTS_CHUNK_CHAR_TARGET);
+    let total_chunks = chunks.len();
+    crate::boot_trace::mark_detail(
+        "synthesize: spawning audiocpp CLI",
+        &format!(
+            "chunks={total_chunks} chunk_target={TTS_CHUNK_CHAR_TARGET} chars"
+        ),
+    );
+    let mut chunk_paths = Vec::with_capacity(chunks.len());
+    for (index, chunk) in chunks.iter().enumerate() {
+        let chunk_output = output_dir.join(format!(
+            "inbharat_tts_{}_part{}.wav",
+            uuid::Uuid::new_v4().simple(),
+            index
+        ));
+        let _ = std::fs::remove_file(&chunk_output);
+        let mut cmd = Command::new(&cli);
+        cmd.arg("--task")
+            .arg("tts")
+            .arg("--family")
+            .arg(&task.family)
+            .arg("--model")
+            .arg(&model)
+            .arg("--backend")
+            .arg(&manifest.backend)
+            .arg("--text")
+            .arg(chunk)
+            .arg("--out")
+            .arg(&chunk_output)
+            .arg("--language")
+            .arg(&cli_language);
+        if let Err(error) = run_command_timeout(cmd, INFERENCE_TIMEOUT) {
+            // A failed run may still have written partial WAVs — remove
+            // every part so the scratch area never accumulates broken
+            // output.
+            for path in chunk_paths.iter().chain(std::iter::once(&chunk_output)) {
+                let _ = std::fs::remove_file(path);
+            }
+            crate::boot_trace::mark_detail(
+                "synthesize: CLI FAILED",
+                &format!("chunk {index}/{total_chunks}: {error}"),
+            );
+            return Err(error);
+        }
+        crate::boot_trace::mark_detail(
+            "synthesize: chunk done",
+            &format!(
+                "{}/{} total={:.1}s",
+                index + 1,
+                chunks.len(),
+                start.elapsed().as_secs_f32()
+            ),
+        );
+        chunk_paths.push(chunk_output);
+    }
+    concatenate_wav_chunks(&chunk_paths, &output)?;
+    for path in &chunk_paths {
+        let _ = std::fs::remove_file(path);
     }
     crate::boot_trace::mark_detail(
         "synthesize: CLI done",
@@ -1407,6 +1585,121 @@ mod tests {
             model_path.canonicalize().unwrap(),
             "without the marker the resolver must serve the drive path"
         );
+    }
+
+    #[test]
+    fn split_tts_chunks_keeps_short_text_whole() {
+        assert_eq!(
+            split_tts_chunks("Hello there.", TTS_CHUNK_CHAR_TARGET),
+            vec!["Hello there.".to_string()]
+        );
+        assert_eq!(split_tts_chunks("   ", TTS_CHUNK_CHAR_TARGET), vec!["".to_string()]);
+        // Exactly at the target: one chunk, unmodified.
+        let exact: String = "a".repeat(TTS_CHUNK_CHAR_TARGET);
+        assert_eq!(
+            split_tts_chunks(&exact, TTS_CHUNK_CHAR_TARGET),
+            vec![exact.clone()]
+        );
+    }
+
+    #[test]
+    fn split_tts_chunks_bounds_and_preserves_sentences() {
+        // Devanagari danda must end a sentence too (the pack speaks hi).
+        let sentence = "यह एक वाक्य है।";
+        let text = sentence.repeat(40); // ~600 chars, well over the target
+        let chunks = split_tts_chunks(&text, TTS_CHUNK_CHAR_TARGET);
+        assert!(chunks.len() > 1, "must split into several chunks");
+        for chunk in &chunks {
+            assert!(
+                chunk.chars().count() <= TTS_CHUNK_CHAR_TARGET,
+                "chunk exceeds the target: {} chars",
+                chunk.chars().count()
+            );
+            assert!(!chunk.trim().is_empty());
+        }
+        // Every sentence must survive into exactly one chunk, punctuation
+        // attached (never mid-sentence boundaries). Sentences accumulate
+        // space-joined within chunks, so the space-join of all chunks
+        // reconstructs the full sentence list.
+        let joined: String = chunks.join(" ");
+        let expected: String = vec![sentence; 40].join(" ");
+        assert_eq!(
+            joined, expected,
+            "splicing the chunks must reconstruct the full text"
+        );
+    }
+
+    #[test]
+    fn split_tts_chunks_hard_splits_unbroken_runs() {
+        // One giant "sentence" with spaces but no sentence enders.
+        let words = "word ".repeat(200); // 1000 chars, no punctuation
+        let chunks = split_tts_chunks(words.trim(), TTS_CHUNK_CHAR_TARGET);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(
+                chunk.chars().count() <= TTS_CHUNK_CHAR_TARGET,
+                "hard-split chunk exceeds the target: {}",
+                chunk.chars().count()
+            );
+            assert!(!chunk.ends_with(' '), "no dangling half-word spacing");
+        }
+        let reconstructed: Vec<&str> = chunks
+            .iter()
+            .flat_map(|c| c.split(' '))
+            .filter(|w| !w.is_empty())
+            .collect();
+        assert_eq!(
+            reconstructed.len(),
+            200,
+            "every word must survive the hard split, whole"
+        );
+    }
+
+    #[test]
+    fn concatenate_wav_chunks_splices_and_refuses_mismatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 24000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let write_part = |name: &str, samples: &[i16]| -> std::path::PathBuf {
+            let path = dir.path().join(name);
+            let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+            for sample in samples {
+                writer.write_sample(*sample).unwrap();
+            }
+            writer.finalize().unwrap();
+            path
+        };
+        let part1 = write_part("p1.wav", &[100, -100, 300]);
+        let part2 = write_part("p2.wav", &[5, -5, 5000]);
+        let dest = dir.path().join("joined.wav");
+
+        concatenate_wav_chunks(&[part1.clone(), part2.clone()], &dest).expect("splice must work");
+        let reader = hound::WavReader::open(&dest).unwrap();
+        assert_eq!(reader.spec(), spec);
+        let joined: Vec<i16> = reader.into_samples().map(|s| s.unwrap()).collect();
+        assert_eq!(joined, vec![100, -100, 300, 5, -5, 5000]);
+
+        // A spec mismatch refuses the whole splice and leaves no output.
+        let other_spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let odd = dir.path().join("odd.wav");
+        let mut writer = hound::WavWriter::create(&odd, other_spec).unwrap();
+        writer.write_sample(1_i16).unwrap();
+        writer.finalize().unwrap();
+        let dest2 = dir.path().join("joined2.wav");
+        assert!(
+            concatenate_wav_chunks(&[part1, odd], &dest2).is_err(),
+            "mismatched spec must be refused"
+        );
+        assert!(!dest2.is_file(), "a refused splice must leave no output");
     }
 
     /// The 1 MiB read buffer in `sha256_file` MUST be heap allocated: a stack
