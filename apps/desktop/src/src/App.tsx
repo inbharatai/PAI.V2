@@ -133,8 +133,15 @@ function App() {
     if (!bootRoot) return;
     if (screen !== 'unlock' && screen !== 'main') return;
     if (bootstrappedRoot.current === bootRoot) return;
+    // The chain is deliberately NOT cancelled by effect cleanup: the user
+    // can unlock (screen unlock->main, vaultRoot set) while the BootGate
+    // poll is still pending, and the bootstrappedRoot guard above blocks
+    // any re-run — aborting the in-flight chain on that transition would
+    // leave the model server permanently unstarted with no retry. The
+    // chain only ever runs once per root; a failed step lands in the
+    // catch below (Limited mode), and a drive removal locks the app
+    // independently of this chain.
     bootstrappedRoot.current = bootRoot;
-    let cancelled = false;
     void (async () => {
       try {
         setBootError('');
@@ -162,7 +169,6 @@ function App() {
             poll();
           });
         }
-        if (cancelled) return;
         await tauriApi.getHardwareProfile();
         const models = await tauriApi.listModels(bootRoot);
         const desktopModel = models.find(model =>
@@ -197,14 +203,10 @@ function App() {
           throw new Error('The model server responded without a verified model identity.');
         }
       } catch (e) {
-        if (cancelled) return;
         await tauriApi.setStartupLimited().catch(() => undefined);
         setBootError(`Limited mode: ${e instanceof Error ? e.message : String(e)}`);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
   }, [screen, vaultRoot, preUnlockRoot]);
 
   useEffect(() => {
