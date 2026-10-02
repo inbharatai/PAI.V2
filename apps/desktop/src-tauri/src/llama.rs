@@ -1098,6 +1098,10 @@ impl ModelManager {
         // The derivation and its reasons are recorded in the session log so
         // the panel and the log agree on why the session runs at this size.
         let gguf_meta = crate::gguf_meta::read_metadata(&model_path).ok();
+        crate::boot_trace::mark_detail(
+            "start_server: gguf meta read",
+            &format!("ctx_len={:?}", gguf_meta.as_ref().and_then(|m| m.context_length)),
+        );
         let context_budget = crate::gguf_meta::derive_context_budget(
             gguf_meta.as_ref(),
             config.context_size,
@@ -1117,9 +1121,15 @@ impl ModelManager {
         //       while the UI is stuck showing "no model loaded" even though
         //       the server is up and healthy.
         *self.status.lock().unwrap() = ModelStatus::Loading;
+        let hash_started = std::time::Instant::now();
+        crate::boot_trace::mark_detail("start_server: model hash begin", &config.model_path);
         let disk_sha256 = Some(Self::sha256_file(&model_path).inspect_err(|_e| {
             *self.status.lock().unwrap() = ModelStatus::Error;
         })?);
+        crate::boot_trace::mark_detail(
+            "start_server: model hash end",
+            &format!("elapsed={:.1}s", hash_started.elapsed().as_secs_f32()),
+        );
 
         // Find an available port dynamically so multiple runs cannot collide.
         let port = Self::find_free_port()?;
@@ -1283,6 +1293,7 @@ impl ModelManager {
         }
 
         // Start the process — DO NOT mark as Loaded until identity verification passes.
+        crate::boot_trace::mark_detail("start_server: spawning llama-server", &format!("port={port}"));
         let mut child = cmd.spawn().map_err(|e| {
             *self.status.lock().unwrap() = ModelStatus::Error;
             format!("Failed to start llama-server: {}", e)
@@ -1332,6 +1343,10 @@ impl ModelManager {
                         *self.server_identity.lock().unwrap() = Some(identity);
                         *self.llama_process.lock().unwrap() = Some(child);
                         *self.status.lock().unwrap() = ModelStatus::Loaded;
+                        crate::boot_trace::mark_detail(
+                            "start_server: VERIFIED LOADED",
+                            &format!("port={port} pid={pid}"),
+                        );
                         return Ok(port);
                     }
                     Err(e) => {
@@ -2396,6 +2411,7 @@ mod tests {
 
 #[tauri::command]
 pub fn list_models(vault_root: String) -> Result<Vec<ModelInfo>, String> {
+    let _probe = crate::boot_trace::step("list_models");
     let manager = ModelManager::new();
     Ok(manager.find_models(&vault_root))
 }
@@ -2404,6 +2420,7 @@ pub fn list_models(vault_root: String) -> Result<Vec<ModelInfo>, String> {
 pub fn detect_acceleration(
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Vec<AccelerationBackend> {
+    let _probe = crate::boot_trace::step("detect_acceleration");
     startup.set_phase_if_booting(crate::startup::StartupPhase::SelectingBackend);
     let manager = ModelManager::new();
     manager.detect_backends()
@@ -2494,13 +2511,19 @@ pub async fn start_model_server(
     state: tauri::State<'_, ModelManagerState>,
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Result<u16, String> {
+    crate::boot_trace::mark_detail(
+        "start_model_server: entry",
+        &config.model_path,
+    );
     // The model server is the inference gate: refuse to start until the
     // background DesktopLaunch asset sweep has actually completed, so
     // inference is never served on unverified binaries/models.
     if !startup.is_asset_validation_complete() {
+        crate::boot_trace::mark("start_model_server: REFUSED — assets not validated");
         startup.set_phase(crate::startup::StartupPhase::LimitedMode);
         return Err("Pocket AI assets have not completed DesktopLaunch validation.".to_string());
     }
+    crate::boot_trace::mark("start_model_server: gate passed (assets verified)");
     startup.set_phase(crate::startup::StartupPhase::StartingModel);
     let manager = ModelManager::new();
     // Default to the best detected backend.
@@ -2777,6 +2800,10 @@ pub async fn model_cache_status(
     let cached = cache_dir.join(format!("{}.gguf", expected_sha));
     let marker = cache_dir.join(format!("{}.verified", expected_sha));
     let staged = model_cache_is_verified(&cached, &marker);
+    crate::boot_trace::mark_detail(
+        "model_cache_status",
+        &format!("staged={staged}"),
+    );
     Ok(serde_json::json!({
         "staged": staged,
         "cached_path": if staged {

@@ -71,6 +71,7 @@ impl StartupCoordinator {
     }
 
     pub fn set_phase(&self, phase: StartupPhase) {
+        crate::boot_trace::mark(&format!("phase -> {phase:?}"));
         if let Ok(mut current) = self.phase.lock() {
             *current = phase;
         }
@@ -97,6 +98,7 @@ impl StartupCoordinator {
                     | StartupPhase::ScanningHost
             ) {
                 *current = phase;
+                crate::boot_trace::mark(&format!("phase(if_booting) -> {phase:?}"));
             }
         }
     }

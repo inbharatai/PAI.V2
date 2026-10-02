@@ -693,7 +693,13 @@ fn verify_acceptance(
 }
 
 fn verify_pocket_ai_package(root: &Path) -> Result<(), String> {
-    let result = crate::security::verify_manifest(root.to_string_lossy().to_string())?;
+    let started = Instant::now();
+    let result = crate::security::verify_manifest(root.to_string_lossy().to_string());
+    crate::boot_trace::mark_detail(
+        "speech preflight: package verify done",
+        &format!("elapsed={:.1}s", started.elapsed().as_secs_f32()),
+    );
+    let result = result?;
     if !result.manifest_valid || !result.hmac_valid || result.entries_failed != 0 {
         return Err(format!(
             "Pocket AI package integrity gate failed: manifest_valid={} hmac_valid={} entries_failed={}; {}",
@@ -772,7 +778,12 @@ fn preflight_speech_gate(
     let ibaudio_path = ibaudio_cli(root)?;
     let audiocpp_path = audio_cpp_cli(root)?;
     // Hash-verify the executables and models BEFORE the first spawn.
+    let acceptance_started = Instant::now();
     let acceptance = verify_acceptance(root, manifest, &ibaudio_path, &audiocpp_path)?;
+    crate::boot_trace::mark_detail(
+        "speech preflight: acceptance hashes done",
+        &format!("elapsed={:.1}s", acceptance_started.elapsed().as_secs_f32()),
+    );
     let status = query_readiness(root)?;
     Ok((ibaudio_path, audiocpp_path, acceptance, status))
 }
@@ -1042,11 +1053,16 @@ pub fn transcribe(
 
 pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<BharatTtsResult, String> {
     let start = Instant::now();
+    crate::boot_trace::mark("synthesize: begin");
     if text.trim().is_empty() || text.len() > MAX_TTS_TEXT_BYTES {
         return Err("TTS text must be non-empty and at most 32 KiB".to_string());
     }
     let (root, manifest) = read_manifest(vault_root)?;
     ensure_production_ready(&root, &manifest)?;
+    crate::boot_trace::mark_detail(
+        "synthesize: preflight gate passed",
+        &format!("elapsed={:.1}s", start.elapsed().as_secs_f32()),
+    );
     let task = manifest
         .tts
         .as_ref()
@@ -1107,12 +1123,18 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
     // Same InBharat-route coverage rule as transcription.
     ensure_provider_coverage(task, SpeechTask::Tts, &language_tag)?;
     cmd.arg("--language").arg(&cli_language);
+    crate::boot_trace::mark("synthesize: spawning audiocpp CLI");
     if let Err(error) = run_command_timeout(cmd, INFERENCE_TIMEOUT) {
         // A failed run may still have written a partial WAV — remove it so
         // the vault scratch area never accumulates broken output.
         let _ = std::fs::remove_file(&output);
+        crate::boot_trace::mark_detail("synthesize: CLI FAILED", &error);
         return Err(error);
     }
+    crate::boot_trace::mark_detail(
+        "synthesize: CLI done",
+        &format!("total={:.1}s", start.elapsed().as_secs_f32()),
+    );
     if !output.is_file() {
         return Err(
             "audio.cpp TTS completed without producing its declared output file".to_string(),

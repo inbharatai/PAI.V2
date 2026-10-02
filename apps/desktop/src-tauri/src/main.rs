@@ -11,6 +11,9 @@ mod agent;
 // `recording` — the legacy Whisper/Piper plane is the explicit fallback, not
 // the default.
 mod bharat_audio;
+// Boot waterfall tracing — see boot_trace.rs. Marks every long boot step so
+// a slow launch is attributed to the exact blocking call, not guessed at.
+mod boot_trace;
 mod browser;
 mod capability;
 mod document_migration;
@@ -395,6 +398,8 @@ fn scan_removable_drives() -> Vec<String> {
 /// Validate that a directory is a legitimate UnoOne vault by checking
 /// manifest.json, VERSION, and vault.id — not just the directory name.
 fn validate_vault_root(vault_root: &str) -> Result<(String, String), String> {
+    let started = std::time::Instant::now();
+    boot_trace::mark_detail("validate_vault_root: begin", vault_root);
     let root = startup::normalize_candidate_root(std::path::Path::new(vault_root))
         .ok_or_else(|| "No UNOONE directory or manifest.json found".to_string())?;
     let report = unoone_usb_manifest::validate_package(
@@ -409,6 +414,10 @@ fn validate_vault_root(vault_root: &str) -> Result<(String, String), String> {
             .collect::<Vec<_>>()
             .join("; ")
     })?;
+    boot_trace::mark_detail(
+        "validate_vault_root: end",
+        &format!("elapsed={:.1}s", started.elapsed().as_secs_f32()),
+    );
     Ok((package.root.to_string_lossy().to_string(), package.vault_id))
 }
 
@@ -423,13 +432,25 @@ static ASSET_VALIDATION_RUNNING: AtomicBool = AtomicBool::new(false);
 /// start until it completes (see `llama::start_model_server`).
 fn start_background_asset_validation(app_handle: tauri::AppHandle, root: &std::path::Path) {
     if ASSET_VALIDATION_RUNNING.swap(true, Ordering::SeqCst) {
+        boot_trace::mark("background sweep: skipped (already running)");
         return;
     }
     let root = root.to_path_buf();
     std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        boot_trace::mark("background sweep: begin (DesktopLaunch)");
         let report = unoone_usb_manifest::validate_package(
             &root,
             unoone_usb_manifest::ValidationScope::DesktopLaunch,
+        );
+        boot_trace::mark_detail(
+            "background sweep: end",
+            &format!(
+                "elapsed={:.1}s valid={} failures={}",
+                started.elapsed().as_secs_f32(),
+                report.package.is_some(),
+                report.failures.len()
+            ),
         );
         let startup_state = app_handle.state::<startup::StartupCoordinator>();
         if let Some(package) = report.package {
@@ -452,6 +473,7 @@ fn detect_vault(
     // without re-scanning drives (and without blocking on the background
     // asset sweep, whose progress the UI observes via get_startup_status).
     if let Some(status) = startup_state.connected_status() {
+        boot_trace::mark("detect_vault: short-circuit (already connected)");
         return Ok(VaultInfo {
             detected: true,
             vault_root: status.vault_root.unwrap_or_default(),
@@ -497,7 +519,9 @@ fn detect_vault(
 
     // Scan removable drives for a valid UnoOne vault
     // using the same strict schema and hashes as Dock and Start UnoOne.
+    boot_trace::mark("detect_vault: full path (not yet connected)");
     let drives = scan_removable_drives();
+    boot_trace::mark_detail("detect_vault: drives scanned", &format!("{drives:?}"));
 
     for drive_root in drives {
         let Some(candidate) = startup::normalize_candidate_root(std::path::Path::new(&drive_root))
@@ -1001,6 +1025,7 @@ fn vault_write_record(
 
 #[tauri::command]
 fn get_hardware_profile() -> Result<HardwareProfile, String> {
+    let _hw_step = boot_trace::step("get_hardware_profile");
     let total_ram_bytes = sys_info::mem_info().map(|m| m.total * 1024).unwrap_or(0);
     let total_ram_gb = total_ram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
 
@@ -1011,9 +1036,14 @@ fn get_hardware_profile() -> Result<HardwareProfile, String> {
 
     let os_name = sys_info::os_type().unwrap_or_else(|_| "Unknown".to_string());
     let os_version = sys_info::os_release().unwrap_or_else(|_| "Unknown".to_string());
+    boot_trace::mark("get_hardware_profile: mem+os probed");
 
     // Detect GPU via nvidia-smi
     let (gpu_name, gpu_vram_gb, has_cuda) = detect_gpu();
+    boot_trace::mark_detail(
+        "get_hardware_profile: gpu probed",
+        &format!("cuda={has_cuda} name={gpu_name}"),
+    );
 
     // Detect Vulkan via DLL/so presence
     let has_vulkan = if cfg!(target_os = "windows") {
@@ -1027,12 +1057,16 @@ fn get_hardware_profile() -> Result<HardwareProfile, String> {
 
     // Detect USB speed by checking the vault drive
     let usb_speed = detect_usb_speed();
+    boot_trace::mark_detail("get_hardware_profile: usb probed", &usb_speed);
+
+    let cpu_speed = detect_cpu_speed();
+    boot_trace::mark_detail("get_hardware_profile: cpu-speed probed", &format!("{cpu_speed}"));
 
     Ok(HardwareProfile {
         total_ram_gb: (total_ram_gb * 10.0).round() / 10.0,
         available_ram_gb: (available_ram_gb * 10.0).round() / 10.0,
         cpu_count,
-        cpu_speed_ghz: detect_cpu_speed(),
+        cpu_speed_ghz: cpu_speed,
         gpu_name,
         gpu_vram_gb,
         os_name,
@@ -1125,6 +1159,7 @@ fn detect_cpu_speed() -> f64 {
 fn detect_usb_speed() -> String {
     // On Windows, check USB drive speed via WMI
     if cfg!(target_os = "windows") {
+        let wmi_started = std::time::Instant::now();
         if let Ok(output) = std::process::Command::new("powershell")
             .args([
                 "-NoProfile",
@@ -1137,13 +1172,28 @@ fn detect_usb_speed() -> String {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let speed = stdout.trim();
                 if !speed.is_empty() {
+                    boot_trace::mark_detail(
+                        "detect_usb_speed: wmi hit",
+                        &format!(
+                            "elapsed={:.1}s speed={speed}",
+                            wmi_started.elapsed().as_secs_f32()
+                        ),
+                    );
                     return speed.to_string();
                 }
             }
         }
+        boot_trace::mark_detail(
+            "detect_usb_speed: wmi miss → fallback sweep path",
+            &format!("elapsed={:.1}s", wmi_started.elapsed().as_secs_f32()),
+        );
 
         // Fallback: check if a validated UNOONE vault exists on any drive
         let drives = scan_removable_drives();
+        boot_trace::mark_detail(
+            "detect_usb_speed: scan_removable_drives done",
+            &format!("drives={drives:?}"),
+        );
         for drive in &drives {
             if let Ok((vault_root, _)) = validate_vault_root(drive) {
                 // Found a valid vault — report as USB 3.0+
