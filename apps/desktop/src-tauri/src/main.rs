@@ -425,11 +425,16 @@ fn validate_vault_root(vault_root: &str) -> Result<(String, String), String> {
 /// expensive (it hashes every package asset), so only one may run at a time.
 static ASSET_VALIDATION_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// Run the full DesktopLaunch asset sweep on a background thread. The launch
-/// path only validates package identity (`ValidationScope::PackageIdentity`)
-/// so the unlock screen appears fast; this thread is what actually verifies
-/// every runtime, model, and voice asset — and the model server refuses to
-/// start until it completes (see `llama::start_model_server`).
+/// Run the BootGate first (identity + runtime executables — seconds, not the
+/// multi-GB asset sweep), release model boot via
+/// `StartupCoordinator::boot_gate_passed`, then continue with the full
+/// DesktopLaunch sweep and flip the strong gate
+/// (`full_sweep_completed`). The launch path only validates package identity
+/// (`ValidationScope::PackageIdentity`) so the unlock screen appears fast;
+/// this thread is what actually verifies every runtime, model, and voice
+/// asset — and the model server refuses to start off the DRIVE until the
+/// full sweep completes (a digest-verified host-cache copy may start at the
+/// BootGate — see `llama::start_model_server`).
 fn start_background_asset_validation(app_handle: tauri::AppHandle, root: &std::path::Path) {
     if ASSET_VALIDATION_RUNNING.swap(true, Ordering::SeqCst) {
         boot_trace::mark("background sweep: skipped (already running)");
@@ -437,7 +442,39 @@ fn start_background_asset_validation(app_handle: tauri::AppHandle, root: &std::p
     }
     let root = root.to_path_buf();
     std::thread::spawn(move || {
-        let started = std::time::Instant::now();
+        let startup_state = app_handle.state::<startup::StartupCoordinator>();
+
+        // Phase A — BootGate: verify identity and the binaries inference will
+        // spawn before releasing model boot. Fail-closed on any failure.
+        let boot_started = std::time::Instant::now();
+        boot_trace::mark("boot gate: begin (identity + runtimes)");
+        let boot_report = unoone_usb_manifest::validate_package(
+            &root,
+            unoone_usb_manifest::ValidationScope::BootGate,
+        );
+        match boot_report.package {
+            Some(package) => {
+                // Identity connected early so the UI short-circuits detection.
+                startup_state.connect(&package);
+                startup_state.set_phase(startup::StartupPhase::CheckingAssets);
+                startup_state.boot_gate_passed();
+                boot_trace::mark_detail(
+                    "boot gate: PASSED",
+                    &format!("elapsed={:.1}s", boot_started.elapsed().as_secs_f32()),
+                );
+            }
+            None => {
+                startup_state.reject(boot_report.failures.clone());
+                boot_trace::mark("boot gate: FAILED — package rejected");
+                ASSET_VALIDATION_RUNNING.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+
+        // Phase B — the full DesktopLaunch sweep (models, voice, speech)
+        // continues in the background while the model boots from the
+        // digest-verified host cache.
+        let sweep_started = std::time::Instant::now();
         boot_trace::mark("background sweep: begin (DesktopLaunch)");
         let report = unoone_usb_manifest::validate_package(
             &root,
@@ -447,15 +484,14 @@ fn start_background_asset_validation(app_handle: tauri::AppHandle, root: &std::p
             "background sweep: end",
             &format!(
                 "elapsed={:.1}s valid={} failures={}",
-                started.elapsed().as_secs_f32(),
+                sweep_started.elapsed().as_secs_f32(),
                 report.package.is_some(),
                 report.failures.len()
             ),
         );
-        let startup_state = app_handle.state::<startup::StartupCoordinator>();
         if let Some(package) = report.package {
             startup_state.connect(&package);
-            startup_state.set_phase(startup::StartupPhase::PaiConnected);
+            startup_state.full_sweep_completed();
         } else {
             startup_state.reject(report.failures.clone());
         }
@@ -1188,17 +1224,27 @@ fn detect_usb_speed() -> String {
             &format!("elapsed={:.1}s", wmi_started.elapsed().as_secs_f32()),
         );
 
-        // Fallback: check if a validated UNOONE vault exists on any drive
+        // Fallback: check if a UNOONE vault exists on any drive.
+        // Structural check only (manifest.json + VERSION + vault.id): this
+        // feeds a hardware-profile LABEL, not a security gate — the old code
+        // called validate_vault_root here, re-running the FULL DesktopLaunch
+        // hash sweep (a second pass over 11 GB of assets) just to print
+        // "USB 3.0+". Live-measured 2026-10-02: that redundant sweep was
+        // 7.6s warm / ~49s cold per launch, and Defender-crippled on a
+        // freshly staged drive.
         let drives = scan_removable_drives();
         boot_trace::mark_detail(
             "detect_usb_speed: scan_removable_drives done",
             &format!("drives={drives:?}"),
         );
         for drive in &drives {
-            if let Ok((vault_root, _)) = validate_vault_root(drive) {
-                // Found a valid vault — report as USB 3.0+
-                let _ = vault_root; // used for validation only
-                return "USB 3.0+".to_string();
+            if let Some(root) =
+                startup::normalize_candidate_root(std::path::Path::new(drive))
+            {
+                let structural = ["manifest.json", "VERSION", "VAULT\\identity\\vault.id"];
+                if structural.iter().all(|rel| root.join(rel).is_file()) {
+                    return "USB 3.0+".to_string();
+                }
             }
         }
     }

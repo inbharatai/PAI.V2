@@ -15,6 +15,12 @@ pub enum StartupPhase {
     ValidatingPai,
     PaiInvalid,
     PaiConnected,
+    /// The BootGate passed: identity AND every required runtime executable
+    /// (the binaries the model server spawns) are verified. The model may
+    /// start NOW from the digest-verified host cache; the full DesktopLaunch
+    /// sweep of models/voice/speech continues in the background and flips
+    /// the phase to PAI_CONNECTED when it finishes.
+    BootAssetsVerified,
     CheckingAssets,
     WaitingForUnlock,
     Unlocking,
@@ -43,17 +49,29 @@ pub struct StartupCoordinator {
     connected_root: Mutex<Option<PathBuf>>,
     vault_id: Mutex<Option<String>>,
     validation_failures: Mutex<Vec<ValidationFailure>>,
+    /// BootGate (identity + runtime executables) passed. Authority for
+    /// `is_boot_gate_complete`; the StartupPhase remains UI display state.
+    boot_gate_complete: Mutex<bool>,
+    /// Full DesktopLaunch sweep completed. Authority for
+    /// `is_asset_validation_complete` (the model-server gate).
+    asset_sweep_complete: Mutex<bool>,
 }
 
 impl StartupCoordinator {
     pub fn from_process_args() -> Self {
         let args: Vec<String> = std::env::args().collect();
+        Self::with_supplied_root(parse_vault_root(&args))
+    }
+
+    pub fn with_supplied_root(supplied_root: Option<PathBuf>) -> Self {
         Self {
             phase: Mutex::new(StartupPhase::Starting),
-            supplied_root: Mutex::new(parse_vault_root(&args)),
+            supplied_root: Mutex::new(supplied_root),
             connected_root: Mutex::new(None),
             vault_id: Mutex::new(None),
             validation_failures: Mutex::new(Vec::new()),
+            boot_gate_complete: Mutex::new(false),
+            asset_sweep_complete: Mutex::new(false),
         }
     }
 
@@ -92,6 +110,7 @@ impl StartupCoordinator {
                     | StartupPhase::WaitingForPai
                     | StartupPhase::ValidatingPai
                     | StartupPhase::PaiConnected
+                    | StartupPhase::BootAssetsVerified
                     | StartupPhase::CheckingAssets
                     | StartupPhase::WaitingForUnlock
                     | StartupPhase::Unlocking
@@ -113,7 +132,10 @@ impl StartupCoordinator {
         if let Ok(mut failures) = self.validation_failures.lock() {
             failures.clear();
         }
-        self.set_phase(StartupPhase::PaiConnected);
+        // Non-regressing: when the background sweep finishes after the model
+        // is already serving, the phase must stay at READY/STARTING_MODEL —
+        // only the sweep-complete flag (set by full_sweep_completed) advances.
+        self.set_phase_if_booting(StartupPhase::PaiConnected);
     }
 
     pub fn reject(&self, problems: Vec<ValidationFailure>) {
@@ -168,20 +190,49 @@ impl StartupCoordinator {
     /// True once the background DesktopLaunch asset sweep has finished
     /// (successfully or in limited mode). The model server refuses to start
     /// before this, so inference is never served on unverified assets.
+    /// Flag-based, not phase-based: host probes legally advance the phase
+    /// (SELECTING_BACKEND, STARTING_MODEL…) while the sweep is still running,
+    /// so the phase alone must never be read as "the full sweep completed".
     pub fn is_asset_validation_complete(&self) -> bool {
-        matches!(
-            self.phase
-                .lock()
-                .map(|phase| *phase)
-                .unwrap_or(StartupPhase::Error),
-            StartupPhase::PaiConnected
-                | StartupPhase::ScanningHost
-                | StartupPhase::SelectingBackend
-                | StartupPhase::StartingModel
-                | StartupPhase::VerifyingModel
-                | StartupPhase::Ready
-                | StartupPhase::LimitedMode
-        )
+        self.asset_sweep_complete
+            .lock()
+            .map(|flag| *flag)
+            .unwrap_or(false)
+    }
+
+    /// The BootGate (identity + runtime executables) has passed. This is a
+    /// strictly weaker guarantee than `is_asset_validation_complete` (the
+    /// full DesktopLaunch sweep): the model server may start under it ONLY
+    /// when the model is served from the digest-verified host cache — the
+    /// model's own bytes are hash-verified by `start_server` at load time
+    /// either way, so nothing is served on unverified bytes.
+    pub fn is_boot_gate_complete(&self) -> bool {
+        self.boot_gate_complete
+            .lock()
+            .map(|flag| *flag || self.is_asset_validation_complete())
+            .unwrap_or(false)
+    }
+
+    /// Announce the BootGate result from the background validation thread.
+    /// Fail-closed: a failed BootGate rejects the package outright — the
+    /// model must never start against binaries that failed verification.
+    pub fn boot_gate_passed(&self) {
+        if let Ok(mut flag) = self.boot_gate_complete.lock() {
+            *flag = true;
+        }
+        // Announce for the UI, without regressing a phase the boot chain may
+        // already have advanced past (the gate flag above is the authority).
+        self.set_phase_if_booting(StartupPhase::BootAssetsVerified);
+    }
+
+    /// Announce the full DesktopLaunch sweep result from the background
+    /// validation thread. This is the strong gate: from here the model may
+    /// also be served straight off the drive.
+    pub fn full_sweep_completed(&self) {
+        if let Ok(mut flag) = self.asset_sweep_complete.lock() {
+            *flag = true;
+        }
+        self.set_phase_if_booting(StartupPhase::PaiConnected);
     }
 
     pub fn limited(&self) {
@@ -198,6 +249,14 @@ impl StartupCoordinator {
         }
         if let Ok(mut vault_id) = self.vault_id.lock() {
             *vault_id = None;
+        }
+        // Gate flags reset with the connection: a replug re-runs the BootGate
+        // and the full sweep before inference is allowed again.
+        if let Ok(mut boot_gate) = self.boot_gate_complete.lock() {
+            *boot_gate = false;
+        }
+        if let Ok(mut sweep) = self.asset_sweep_complete.lock() {
+            *sweep = false;
         }
         self.set_phase(StartupPhase::Disconnected);
     }
@@ -293,6 +352,8 @@ mod set_phase_if_booting_tests {
             connected_root: Mutex::new(None),
             vault_id: Mutex::new(None),
             validation_failures: Mutex::new(Vec::new()),
+            boot_gate_complete: Mutex::new(false),
+            asset_sweep_complete: Mutex::new(false),
         }
     }
 
@@ -337,5 +398,64 @@ mod set_phase_if_booting_tests {
             c.set_phase_if_booting(StartupPhase::SelectingBackend);
             assert_eq!(phase_of(&c), advanced);
         }
+    }
+}
+
+#[cfg(test)]
+mod boot_gate_tests {
+    use super::*;
+
+    #[test]
+    fn gates_start_closed() {
+        let c = StartupCoordinator::with_supplied_root(None);
+        assert!(!c.is_boot_gate_complete());
+        assert!(!c.is_asset_validation_complete());
+    }
+
+    #[test]
+    fn boot_gate_opens_before_the_full_sweep() {
+        let c = StartupCoordinator::with_supplied_root(None);
+        c.boot_gate_passed();
+        assert!(c.is_boot_gate_complete());
+        // The weaker gate must never imply the full DesktopLaunch sweep.
+        assert!(!c.is_asset_validation_complete());
+        // The phase is announced for the UI without regressing probes.
+        assert_eq!(phase_of(&c), StartupPhase::BootAssetsVerified);
+    }
+
+    #[test]
+    fn full_sweep_satisfies_both_gates() {
+        let c = StartupCoordinator::with_supplied_root(None);
+        c.full_sweep_completed();
+        assert!(c.is_asset_validation_complete());
+        assert!(c.is_boot_gate_complete());
+    }
+
+    #[test]
+    fn late_sweep_end_never_regresses_a_serving_phase() {
+        // The BootGate flow: model boots (phase advances past PAI_CONNECTED)
+        // while the background sweep is still hashing. When it finishes, the
+        // phase must not clobber the serving state.
+        let c = StartupCoordinator::with_supplied_root(None);
+        c.boot_gate_passed();
+        c.set_phase(StartupPhase::Ready);
+        c.full_sweep_completed();
+        assert_eq!(phase_of(&c), StartupPhase::Ready);
+        assert!(c.is_asset_validation_complete());
+    }
+
+    #[test]
+    fn host_probes_do_not_forge_the_full_sweep_gate() {
+        // A probe legally advances the phase mid-sweep (e.g. SELECTING_BACKEND
+        // from the Model panel); the phase must NOT read back as "full sweep
+        // complete" — that inference was the old phase-based gate's hole.
+        let c = StartupCoordinator::with_supplied_root(None);
+        c.set_phase(StartupPhase::CheckingAssets);
+        c.set_phase_if_booting(StartupPhase::SelectingBackend);
+        assert!(!c.is_asset_validation_complete());
+    }
+
+    fn phase_of(c: &StartupCoordinator) -> StartupPhase {
+        c.phase.lock().map(|p| *p).unwrap_or(StartupPhase::Error)
     }
 }

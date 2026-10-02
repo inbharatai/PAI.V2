@@ -304,6 +304,7 @@ export function ChatView() {
           'STARTING',
           'VALIDATING_PAI',
           'PAI_CONNECTED',
+          'BOOT_ASSETS_VERIFIED',
           'CHECKING_ASSETS',
           'WAITING_FOR_UNLOCK',
           'UNLOCKING',
@@ -325,9 +326,10 @@ export function ChatView() {
   }, []);
 
   useEffect(() => {
-    // Poll until the model server is actually up (it now starts only after
-    // the background asset sweep completes), instead of probing once and
-    // leaving the input permanently disabled.
+    // Poll until the model server is actually up (it starts once the BootGate
+    // releases it — model served from the verified host cache while the full
+    // asset sweep continues), instead of probing once and leaving the input
+    // permanently disabled.
     let cancelled = false;
     let timer: number | undefined;
 
@@ -816,7 +818,7 @@ export function ChatView() {
             </p>
             {(modelStatus === 'loading' || modelStatus === 'unknown') && (
               <div style={{ marginTop: '12px', padding: '12px 16px', background: 'var(--bg-tertiary, #1a1a2e)', borderRadius: '8px', fontSize: '13px', color: 'var(--text-secondary, #888)' }}>
-                Model loading… validating the USB package and starting Gemma 4. First load can take a few minutes.
+                Model loading… verifying the runtime and starting Gemma 4 from the verified host cache. The full USB package check keeps running in the background.
               </div>
             )}
             {modelStatus === 'not_loaded' && (

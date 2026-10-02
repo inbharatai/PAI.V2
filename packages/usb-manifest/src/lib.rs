@@ -148,6 +148,16 @@ pub enum ValidationScope {
     /// and Dock for a fast launch; the full asset sweep runs separately in the
     /// desktop app's background DesktopLaunch validation.
     PackageIdentity,
+    /// Identity plus every REQUIRED runtime executable — the binaries the
+    /// model server will actually spawn (llama-server and its DLLs). This is
+    /// the BootGate: once it passes, the model may start from the
+    /// digest-verified host cache while the full DesktopLaunch sweep of
+    /// models, voice, and speech assets continues in the background. The
+    /// model's own bytes are still hash-verified at load time by
+    /// `start_server` (disk hash compared against the manifest), so nothing
+    /// is served on unverified bytes — the gate only moves WHEN the
+    /// multi-GB asset sweep must finish relative to model boot.
+    BootGate,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -436,6 +446,11 @@ pub fn validate_package(root: &Path, scope: ValidationScope) -> ValidationReport
                     .filter(|asset| asset.required),
             );
         }
+    }
+    if scope == ValidationScope::BootGate {
+        // Only the binaries inference will spawn: the full multi-GB sweep of
+        // models/voice/speech continues in the background DesktopLaunch pass.
+        assets.extend(windows.runtimes.iter().filter(|asset| asset.required));
     }
     if let Some(starter) = windows.starter.as_ref() {
         assets.push(starter);
@@ -866,7 +881,11 @@ mod tests {
     fn accepts_mobile_apk_declaration_in_all_scopes() {
         // The APK is a tracked arm64 asset: it must never fail (or be
         // hash-swept) on an x86_64 Windows host, in either scope.
-        for scope in [ValidationScope::PackageIdentity, ValidationScope::DesktopLaunch] {
+        for scope in [
+            ValidationScope::PackageIdentity,
+            ValidationScope::DesktopLaunch,
+            ValidationScope::BootGate,
+        ] {
             let (temp, mut manifest) = fixture();
             stage_mobile_apk(&temp, &mut manifest);
             write_manifest(temp.path(), &manifest);
@@ -1019,6 +1038,59 @@ mod tests {
                 ValidationFailureCode::AssetSizeMismatch | ValidationFailureCode::AssetHashMismatch
             )
         }));
+    }
+
+    #[test]
+    fn boot_gate_passes_while_a_model_asset_is_tampered() {
+        // The BootGate exists to release model boot from the multi-GB sweep:
+        // it verifies identity + the runtimes inference will spawn, and leaves
+        // models/voice/speech to the background DesktopLaunch pass. A tampered
+        // MODEL must not fail the BootGate (the model's own bytes are
+        // hash-checked at load time by start_server), but must still fail the
+        // full sweep.
+        let (temp, _manifest) = fixture();
+        write_manifest(temp.path(), &_manifest);
+        fs::write(temp.path().join("MODELS/DESKTOP/model.gguf"), b"swapped").unwrap();
+        let report = validate_package(temp.path(), ValidationScope::BootGate);
+        assert!(report.valid, "{:?}", report.failures);
+        let report = validate_package(temp.path(), ValidationScope::DesktopLaunch);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == ValidationFailureCode::AssetSizeMismatch));
+    }
+
+    #[test]
+    fn boot_gate_rejects_a_tampered_runtime() {
+        // The binaries the model server spawns are exactly what the BootGate
+        // exists to verify — a tampered llama-server must block model boot.
+        let (temp, _manifest) = fixture();
+        write_manifest(temp.path(), &_manifest);
+        fs::write(
+            temp.path().join("RUNTIMES/WINDOWS/CPU/llama-server.exe"),
+            b"swapped-runtime",
+        )
+        .unwrap();
+        let report = validate_package(temp.path(), ValidationScope::BootGate);
+        assert!(report.failures.iter().any(|failure| {
+            matches!(
+                failure.code,
+                ValidationFailureCode::AssetSizeMismatch
+                    | ValidationFailureCode::AssetHashMismatch
+            )
+        }));
+    }
+
+    #[test]
+    fn boot_gate_rejects_a_missing_runtime() {
+        let (temp, _manifest) = fixture();
+        write_manifest(temp.path(), &_manifest);
+        fs::remove_file(temp.path().join("RUNTIMES/WINDOWS/CPU/llama-server.exe")).unwrap();
+        let report = validate_package(temp.path(), ValidationScope::BootGate);
+        assert!(report
+            .failures
+            .iter()
+            .any(|failure| failure.code == ValidationFailureCode::AssetMissing));
     }
 
     #[test]

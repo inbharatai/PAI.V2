@@ -22,6 +22,10 @@ export type StartupPhase =
   | 'VALIDATING_PAI'
   | 'PAI_INVALID'
   | 'PAI_CONNECTED'
+  // BootGate passed: identity + runtime executables verified. The model may
+  // start now from the digest-verified host cache while the full asset sweep
+  // continues in the background (it ends in PAI_CONNECTED).
+  | 'BOOT_ASSETS_VERIFIED'
   | 'CHECKING_ASSETS'
   | 'WAITING_FOR_UNLOCK'
   | 'UNLOCKING'

@@ -2389,6 +2389,47 @@ mod tests {
     }
 
     #[test]
+    fn verified_host_cache_release_is_path_and_marker_bound() {
+        // The BootGate may release model boot ONLY for a path inside the
+        // digest-verified host cache whose marker is intact. A drive path or
+        // an unmarked cache file must not pass — those still require the
+        // full DesktopLaunch sweep.
+        let (vault_dir, model_path) = cache_test_fixture("unoone-cache-release-test", None);
+        // Unique bytes so this test cannot collide with the other cache
+        // tests' entries (the cache is keyed by content sha256).
+        std::fs::write(&model_path, b"boot-gate release test bytes").unwrap();
+        let sha = ModelManager::sha256_file(&model_path).unwrap();
+        write_cache_test_manifest(&vault_dir, Some(&sha));
+
+        let (cached, _size) =
+            stage_model_to_host_cache(model_path.to_str().unwrap(), vault_dir.to_str().unwrap())
+                .expect("staging should succeed");
+        assert!(model_served_from_verified_host_cache(
+            cached.to_str().unwrap()
+        ));
+        // The drive copy is not a host-cache path.
+        assert!(!model_served_from_verified_host_cache(
+            model_path.to_str().unwrap()
+        ));
+        // A random path outside the cache never passes.
+        assert!(!model_served_from_verified_host_cache(
+            "C:\\Windows\\System32\\drivers\\etc\\hosts"
+        ));
+        // Losing the marker (e.g. manual tampering) revokes release.
+        let marker = cached.parent().unwrap().join(format!("{sha}.verified"));
+        let backup = cached.parent().unwrap().join(format!("{sha}.verified.bak"));
+        std::fs::rename(&marker, &backup).unwrap();
+        assert!(!model_served_from_verified_host_cache(
+            cached.to_str().unwrap()
+        ));
+        std::fs::rename(&backup, &marker).unwrap();
+
+        let _ = std::fs::remove_dir_all(&vault_dir);
+        let _ = std::fs::remove_file(&cached);
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
     fn stage_model_rejects_digest_mismatch_and_leaves_nothing_behind() {
         let (vault_dir, model_path) =
             cache_test_fixture("unoone-cache-mismatch-test", Some(&"0".repeat(64)));
@@ -2515,15 +2556,33 @@ pub async fn start_model_server(
         "start_model_server: entry",
         &config.model_path,
     );
-    // The model server is the inference gate: refuse to start until the
-    // background DesktopLaunch asset sweep has actually completed, so
-    // inference is never served on unverified binaries/models.
-    if !startup.is_asset_validation_complete() {
-        crate::boot_trace::mark("start_model_server: REFUSED — assets not validated");
+    // The model server is the inference gate, in two tiers:
+    //   1. Full DesktopLaunch sweep complete → any model (drive or cache).
+    //   2. BootGate complete (identity + runtime executables verified) → only
+    //      a digest-verified host-cache copy. The cached copy's own bytes are
+    //      hash-verified by `start_server` (disk sha256 compared against the
+    //      manifest) before the server is trusted, so inference still never
+    //      runs on unverified bytes — the gate only moves WHEN the multi-GB
+    //      asset sweep must finish relative to model boot.
+    let serving_verified_host_cache = model_served_from_verified_host_cache(&config.model_path);
+    if !startup.is_asset_validation_complete()
+        && !(startup.is_boot_gate_complete() && serving_verified_host_cache)
+    {
+        crate::boot_trace::mark(
+            "start_model_server: REFUSED — assets not validated (and model is not on the verified host cache)",
+        );
         startup.set_phase(crate::startup::StartupPhase::LimitedMode);
         return Err("Pocket AI assets have not completed DesktopLaunch validation.".to_string());
     }
-    crate::boot_trace::mark("start_model_server: gate passed (assets verified)");
+    crate::boot_trace::mark_detail(
+        "start_model_server: gate passed",
+        &format!(
+            "full_sweep={} boot_gate={} host_cache={}",
+            startup.is_asset_validation_complete(),
+            startup.is_boot_gate_complete(),
+            serving_verified_host_cache
+        ),
+    );
     startup.set_phase(crate::startup::StartupPhase::StartingModel);
     let manager = ModelManager::new();
     // Default to the best detected backend.
@@ -2699,6 +2758,28 @@ fn model_cache_is_verified(cached: &std::path::Path, marker: &std::path::Path) -
         Ok(recorded) => recorded.trim() == current,
         Err(_) => false,
     }
+}
+
+/// True when `model_path` points at a digest-verified copy in the host model
+/// cache: the file lives in the cache directory, is keyed by its manifest
+/// sha256 (the filename), and carries a `.verified` marker matching its
+/// current size+mtime. `start_server` still re-hashes the actual bytes
+/// against the manifest before the server is trusted, so this is a
+/// release-timing fact, not the integrity check itself — it decides whether
+/// the BootGate may start the model before the full asset sweep finishes.
+fn model_served_from_verified_host_cache(model_path: &str) -> bool {
+    let Ok(cache_dir) = model_cache_dir() else {
+        return false;
+    };
+    let path = PathBuf::from(model_path);
+    if !path.starts_with(&cache_dir) {
+        return false;
+    }
+    let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let marker = cache_dir.join(format!("{name}.verified"));
+    model_cache_is_verified(&path, &marker)
 }
 
 /// Stream a manifest-vouched model from the drive to the host cache, hashing
