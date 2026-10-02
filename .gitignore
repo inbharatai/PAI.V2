@@ -71,3 +71,5 @@ screenshots/
 # Playwright local run artifacts
 web-runtime/page-agent-unoone/test-results/
 web-runtime/page-agent-unoone/playwright-report/
+
+pai-bundle-dl/

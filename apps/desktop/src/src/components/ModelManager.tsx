@@ -178,8 +178,13 @@ export function ModelManager() {
                   {!model.available && ' · Not downloaded'}
                 </div>
               </div>
+              {/* Badge states ON-DISK truth only: "Available" = present and
+                  manifest-verified, NOT loaded. The server-load truth is the
+                  LOADING/LOADED pill in the header — never say "Ready" here;
+                  a live-caught mismatch (2026-10-02) showed the card claiming
+                  Ready while llama-server hadn't even spawned. */}
               <span className={`hw-badge ${model.available ? 'available' : 'unavailable'}`}>
-                {model.available ? 'Ready' : 'Missing'}
+                {model.available ? 'Available' : 'Missing'}
               </span>
             </div>
           ))}
