@@ -24,6 +24,9 @@ mod capability;
 mod chat_memory;
 mod document_migration;
 mod documents;
+// Pure-Rust document renderers behind doc.create (PDF via lopdf, DOCX via
+// zip); every renderer round-trips through the real readers in `documents`.
+mod doc_writer;
 // P1-C: desktop producer of the shared ProcedureOutcome contract record —
 // every completed harness agent run leaves honest, never-promotable
 // telemetry in the canonical vault.

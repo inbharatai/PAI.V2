@@ -159,6 +159,14 @@ fn progress_detail(tool: &str, arguments: &ToolArguments) -> String {
         }
         "workspace.search" => "Searching the workspace".to_owned(),
         "workspace.patch" => "Patching a workspace file".to_owned(),
+        "doc.create" => {
+            let filename = arg("filename");
+            if filename.is_empty() {
+                "Creating a document".to_owned()
+            } else {
+                format!("Creating document {filename}")
+            }
+        }
         "agent.spawn" => {
             let task = arg("task");
             if task.is_empty() {
@@ -852,6 +860,9 @@ fn desktop_system_prefix(full_access: bool) -> String {
              your answer so the user can stop it later.\n\
              - Drive a real web browser (navigate, click, type, fill forms, screenshot) \
              via browser.act\n\
+             - Create real downloadable documents (PDF, DOCX, MD, TXT) from plain \
+             text via doc.create — give `filename` plus the full `content`; the \
+             user can open the result immediately\n\
              - Spawn sub-agents via agent.spawn to complete complex work: give \
              each one a COMPLETE, self-contained task (every path and detail, \
              because it sees nothing else — not even this conversation) and \
@@ -1847,6 +1858,173 @@ impl Tool for DesktopPatchTool {
     }
 }
 
+/// The document-creation tool (doc.create): the user's "agent creates
+/// downloadable PDF/DOCX" capability, pure Rust through the same fence.
+/// PDF and DOCX render through `doc_writer` (lopdf + zip, zero new
+/// dependencies) and write as BINARY through the fence; MD and TXT are
+/// plain text. Every output is round-trip tested against the real document
+/// readers in `documents.rs` — a writer bug cannot pass the reader gate.
+pub(crate) struct DesktopDocCreateTool {
+    manifest: ToolManifest,
+    folders: GrantedFolders,
+}
+
+impl DesktopDocCreateTool {
+    pub(crate) fn new(folders: GrantedFolders) -> Self {
+        Self {
+            manifest: ToolManifest {
+                id: "doc.create".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: "Create a document file (PDF, DOCX, MD or TXT) from plain text. Renders real PDF/DOCX binaries — round-trip readable by this same product's document reader — or writes plain text for MD/TXT. Give `filename` relative to the workspace folder or as an absolute path inside any granted folder; the format comes from the extension unless `format` says otherwise. `content` is the full document text, one line per paragraph; `title` (PDF only) heads the first page. PDF rendering is text-only with Latin fonts; non-Latin text extracts correctly but will not display as glyphs.".to_owned(),
+                input_schema: r#"{"type":"object","properties":{"filename":{"type":"string"},"format":{"type":"string","enum":["pdf","docx","md","txt"]},"title":{"type":"string"},"content":{"type":"string"}},"required":["filename","content"],"additionalProperties":false}"#.to_owned(),
+                output_schema: r#"{"type":"string"}"#.to_owned(),
+                required_capabilities: CapabilitySet::from_slice(&[Capability::FileWrite]),
+                supported_levels: vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
+                determinism: Determinism::NonIdempotent,
+                side_effect: SideEffect::Write,
+                confirmation: ConfirmationMode::OnSideEffect,
+                concurrency_safe: false,
+                default_timeout: Duration::from_secs(30),
+                max_output_bytes: 16 * 1024,
+                verification: "fenced-binary-write-v1".to_owned(),
+                compensation: "delete-v1".to_owned(),
+            },
+            folders,
+        }
+    }
+
+    /// The format for one call: explicit argument wins, else the filename
+    /// extension, else plain text. Unknown extensions are refused rather
+    /// than silently guessed.
+    fn resolve_format(arguments: &ToolArguments, filename: &str) -> Result<DocFormat, String> {
+        if let Some(explicit) = arguments.get("format").and_then(Value::as_str) {
+            return match explicit {
+                "pdf" => Ok(DocFormat::Pdf),
+                "docx" => Ok(DocFormat::Docx),
+                "md" => Ok(DocFormat::Md),
+                "txt" => Ok(DocFormat::Txt),
+                other => Err(format!(
+                    "unsupported format {other:?} — use pdf, docx, md or txt"
+                )),
+            };
+        }
+        match filename.rsplit('.').next() {
+            Some("pdf") => Ok(DocFormat::Pdf),
+            Some("docx") => Ok(DocFormat::Docx),
+            Some("md") => Ok(DocFormat::Md),
+            Some("txt") | Some("") | None => Ok(DocFormat::Txt),
+            Some(other) => Err(format!(
+                "unknown extension .{other} — pass format explicitly (pdf, docx, md or txt)"
+            )),
+        }
+    }
+}
+
+/// The concrete document kinds doc.create writes — an enum (not bare
+/// strings) so the execute match is exhaustively checked at compile time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocFormat {
+    Pdf,
+    Docx,
+    Md,
+    Txt,
+}
+
+impl Tool for DesktopDocCreateTool {
+    fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        let allowed = ["filename", "format", "title", "content"];
+        if arguments.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "pai.tool.arguments",
+                "doc.create call contains an unsupported argument",
+            ));
+        }
+        let filename = required_string(arguments, "filename")?;
+        if Self::resolve_format(arguments, filename).is_err() {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "doc.create.format",
+                "format must be pdf, docx, md or txt (the filename extension is used when omitted)",
+            ));
+        }
+        let content = arguments
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                inbharat_harness_core::Failure::invalid(
+                    "doc.create.content",
+                    "content must be the full document text",
+                )
+            })?;
+        if content.len() > 256 * 1024 {
+            return Err(inbharat_harness_core::Failure::invalid(
+                "doc.create.content",
+                "content is limited to 256 KiB per document",
+            ));
+        }
+        Ok(())
+    }
+
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        context.cancel.check("pai.doc_create")?;
+        let filename = required_string(arguments, "filename")?;
+        let content = required_string(arguments, "content")?;
+        let format = Self::resolve_format(arguments, filename).map_err(|message| {
+            inbharat_harness_core::Failure::invalid("doc.create.format", message)
+        })?;
+        let title = arguments
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("UnoOne Document");
+
+        let lines: Vec<String> = content
+            .lines()
+            .map(|line| line.to_owned())
+            .collect::<Vec<_>>();
+        let summary = match format {
+            DocFormat::Pdf => {
+                let bytes =
+                    crate::doc_writer::render_pdf_bytes(title, &lines).map_err(|message| {
+                        inbharat_harness_core::Failure::invalid("doc.create.render", message)
+                    })?;
+                self.folders.write_bytes_atomic(filename, &bytes)?;
+                format!(
+                    "created {filename} — a real PDF ({} bytes, {} line(s), title {title:?})",
+                    bytes.len(),
+                    lines.len()
+                )
+            }
+            DocFormat::Docx => {
+                let bytes = crate::doc_writer::render_docx_bytes(&lines).map_err(|message| {
+                    inbharat_harness_core::Failure::invalid("doc.create.render", message)
+                })?;
+                self.folders.write_bytes_atomic(filename, &bytes)?;
+                format!(
+                    "created {filename} — a real DOCX ({} bytes, {} paragraph(s))",
+                    bytes.len(),
+                    lines.len()
+                )
+            }
+            DocFormat::Md | DocFormat::Txt => {
+                self.folders.write_text_atomic(filename, content)?;
+                format!("created {filename} — plain text ({} bytes)", content.len())
+            }
+        };
+        Ok(ToolOutput {
+            value: Value::String(summary.clone()),
+            model_content: summary,
+            presentation: BTreeMap::from([("kind".to_owned(), "doc-create".to_owned())]),
+        })
+    }
+}
+
 /// Model-driven browser lane: the same typed actions, session state and
 /// verified result contract as the user-driven BrowserWorkspace buttons,
 /// exposed to the model as one tool. `confirmed` is always true here — this
@@ -2132,6 +2310,7 @@ fn desktop_workspace_tools(
         Arc::new(RunProcessTool::default()),
         Arc::new(DesktopSearchTool::new(folders.clone())),
         Arc::new(DesktopPatchTool::new(folders.clone())),
+        Arc::new(DesktopDocCreateTool::new(folders.clone())),
         Arc::new(DesktopBrowserTool::new(app, browser, safety)),
     ]
 }
@@ -2210,6 +2389,7 @@ fn subagent_system_prefix() -> String {
          dotnet, go, java, cmake, make, gcc, clang, powershell)\n\
          - Deploy long-running processes with background:true on process.run\n\
          - Drive the real web browser via browser.act\n\
+         - Create real documents (PDF, DOCX, MD, TXT) via doc.create\n\
          Do the whole task yourself: create the real files, run the real \
          commands, read the exact error output when something fails, fix it \
          and re-run until it genuinely works. Never claim a task is complete \
@@ -3972,6 +4152,78 @@ mod workspace_tool_tests {
             filesystem.read_text("root.txt").expect("re-read"),
             "present\n"
         );
+    }
+
+    #[test]
+    fn doc_create_writes_real_readable_documents_through_the_fence() {
+        let (_dir, filesystem) = temp_workspace();
+        let tool = DesktopDocCreateTool::new(granted(&filesystem));
+        let broker = harness_broker(&filesystem);
+        let cancel = CancellationToken::new();
+        let context = tool_context(&filesystem, &cancel, &broker);
+
+        // A real PDF: binary through the fence, readable by the real reader.
+        let pdf_args = string_args(&[
+            ("filename", "reports/field.pdf"),
+            ("title", "Field Report"),
+            (
+                "content",
+                "The agent wrote this PDF itself.\nSecond paragraph verifies the round trip.",
+            ),
+        ]);
+        tool.execute(&pdf_args, &context).expect("create pdf");
+        let pdf_bytes = std::fs::read(_dir.join("reports").join("field.pdf"))
+            .expect("pdf landed inside the fence");
+        assert!(pdf_bytes.starts_with(b"%PDF"), "the file is a real PDF");
+        let copy = std::env::temp_dir().join(format!(
+            "unoone-doc-create-{}.pdf",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&copy, &pdf_bytes).expect("stage for the reader");
+        let text = crate::documents::extract_pdf_text(&copy).expect("reader round trip");
+        assert!(text.contains("The agent wrote this PDF itself."));
+        std::fs::remove_file(&copy).ok();
+
+        // A real DOCX: readable by the real reader, one paragraph per line.
+        let docx_args = string_args(&[
+            ("filename", "reports/field.docx"),
+            ("content", "Docx line one.\nDocx line two."),
+        ]);
+        tool.execute(&docx_args, &context).expect("create docx");
+        let docx_bytes = std::fs::read(_dir.join("reports").join("field.docx"))
+            .expect("docx landed inside the fence");
+        let copy = std::env::temp_dir().join(format!(
+            "unoone-doc-create-{}.docx",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&copy, &docx_bytes).expect("stage for the reader");
+        let text = crate::documents::extract_docx_text(&copy).expect("reader round trip");
+        assert!(text.contains("Docx line one."));
+        assert!(text.contains("Docx line two."));
+        std::fs::remove_file(&copy).ok();
+
+        // Plain text: md and txt write the text verbatim.
+        let txt_args = string_args(&[("filename", "notes/todo.md"), ("content", "# Todo\n- ship")]);
+        tool.execute(&txt_args, &context).expect("create md");
+        assert_eq!(
+            filesystem.read_text("notes/todo.md").expect("re-read"),
+            "# Todo\n- ship"
+        );
+
+        // The format guards refuse unknown formats and unknown arguments
+        // without touching the filesystem.
+        let bad_format = string_args(&[("filename", "x.pptx"), ("content", "no")]);
+        assert!(tool.execute(&bad_format, &context).is_err());
+        let unknown_arg = args(&[
+            ("filename", Value::String("x.txt".to_owned())),
+            ("content", Value::String("no".to_owned())),
+            ("styles", Value::Bool(true)),
+        ]);
+        assert!(tool.validate_arguments(&unknown_arg).is_err());
+
+        // Escape attempts die at the fence, outside the granted folders.
+        let escape = string_args(&[("filename", "../outside.txt"), ("content", "no")]);
+        assert!(tool.execute(&escape, &context).is_err());
     }
 
     #[test]

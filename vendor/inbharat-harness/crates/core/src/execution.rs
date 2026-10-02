@@ -342,6 +342,89 @@ impl RootedFs {
         Ok(())
     }
 
+    /// Atomically replaces a file with BINARY contents. Identical fence,
+    /// byte limits and parent-creation semantics to [`RootedFs::write_text_atomic`];
+    /// the document-creation tools need this to write real PDF/DOCX files
+    /// through the fence — text writes alone cannot carry binary formats.
+    pub fn write_bytes_atomic(
+        &self,
+        relative: impl AsRef<Path>,
+        contents: &[u8],
+    ) -> HarnessResult<()> {
+        if contents.len() > self.max_write_bytes {
+            return Err(Failure::new(
+                ErrorCode::BudgetExceeded,
+                FailureClass::Resource,
+                "fs.write",
+                "write exceeds configured byte limit",
+            ));
+        }
+        let joined = self.lexical_join(relative.as_ref())?;
+        if joined == self.root {
+            return Err(Failure::invalid(
+                "fs.write",
+                "cannot replace root directory",
+            ));
+        }
+        if joined.exists() {
+            let canonical = fs::canonicalize(&joined).map_err(|error| {
+                io_failure(
+                    ErrorCode::FilesystemDenied,
+                    "fs.write",
+                    "cannot canonicalize target",
+                    error,
+                )
+            })?;
+            self.ensure_inside(&canonical)?;
+            if canonical.is_dir() {
+                return Err(Failure::invalid("fs.write", "target is a directory"));
+            }
+        }
+        let parent = joined
+            .parent()
+            .ok_or_else(|| Failure::invalid("fs.write", "target must have an in-root parent"))?;
+        // Same defect-#29 rule as the text write: create missing parents
+        // through the fenced component walk.
+        if !parent.exists() {
+            self.create_dir_all(parent)?;
+        }
+        let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+            io_failure(
+                ErrorCode::FilesystemDenied,
+                "fs.write",
+                "target parent does not exist",
+                error,
+            )
+        })?;
+        self.ensure_inside(&canonical_parent)?;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_nanos();
+        let temp = canonical_parent.join(format!(".inbharat-tmp-{}-{nonce}", std::process::id()));
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temp)?;
+            file.write_all(contents)?;
+            file.sync_all()?;
+            fs::rename(&temp, &joined)?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            let _remove_result = fs::remove_file(&temp);
+            return Err(io_failure(
+                ErrorCode::FilesystemDenied,
+                "fs.write",
+                "atomic write failed",
+                error,
+            ));
+        }
+        Ok(())
+    }
+
     fn lexical_join(&self, path: &Path) -> HarnessResult<PathBuf> {
         // Live-caught (2026-09-12 long-coding acceptance, defect #22): agent
         // models naturally emit absolute host paths for workspace files
@@ -1372,6 +1455,28 @@ mod tests {
         // A relative spelling with missing parents works the same way.
         fs.write_text_atomic("rel/deep/file.txt", "relative ok")?;
         assert_eq!(fs.read_text("rel/deep/file.txt")?, "relative ok");
+        Ok(())
+    }
+
+    #[test]
+    fn write_bytes_atomic_round_trips_binary_and_shares_the_fence() -> HarnessResult<()> {
+        // The binary lane behind document creation: non-UTF-8 bytes must
+        // survive verbatim, missing parents auto-create exactly like the
+        // text lane, escape probes stay denied, and the write limit applies.
+        let (root, _cleanup, fs) = abs_fs("binwrite")?;
+        let payload: &[u8] = &[0x50, 0x4b, 0x03, 0x04, 0xFF, 0x00, 0xFE, 0x1a];
+        fs.write_bytes_atomic("docs/report.bin", payload)?;
+        assert_eq!(
+            std::fs::read(root.join("docs").join("report.bin")).map_err(|e| {
+                Failure::invalid("test.setup", format!("cannot re-read binary: {e}"))
+            })?,
+            payload
+        );
+        assert!(fs.write_bytes_atomic("new/../escape.bin", b"no").is_err());
+        // Byte limit: a fence with a tiny write budget refuses a bigger blob.
+        let tiny = RootedFs::new(&root)?.with_limits(1024, 4);
+        assert!(tiny.write_bytes_atomic("big.bin", b"12345").is_err());
+        assert!(!root.join("big.bin").exists());
         Ok(())
     }
 

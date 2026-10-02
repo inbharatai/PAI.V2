@@ -1160,6 +1160,33 @@
       }
     },
     {
+      "id": "doc.create",
+      "description": "Create a document file (PDF, DOCX, MD or TXT) from plain text through the audited file fence.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "capability:FileWrite",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"filename\":{\"type\":\"string\"},\"format\":{\"type\":\"string\",\"enum\":[\"pdf\",\"docx\",\"md\",\"txt\"]},\"title\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"filename\",\"content\"],\"additionalProperties\":false}",
+      "timeout_ms": 30000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "writer output round-trips through the product's own document readers (lopdf/zip extractors)",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Write",
+        "confirmation_mode": "OnSideEffect",
+        "capabilities": [
+          "FileWrite"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
       "id": "browser.act",
       "description": "Drive the real WebView2 browser: navigate, extract, click, type, scroll.",
       "platforms": [

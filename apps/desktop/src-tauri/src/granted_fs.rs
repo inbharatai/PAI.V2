@@ -141,6 +141,17 @@ impl GrantedFolders {
         fenced.write_text_atomic(remainder, contents)
     }
 
+    /// Atomically writes binary contents inside any granted folder — the
+    /// document-creation lane (real PDF/DOCX files), same fence as text.
+    pub(crate) fn write_bytes_atomic(
+        &self,
+        path: impl AsRef<Path>,
+        contents: &[u8],
+    ) -> HarnessResult<()> {
+        let (fenced, remainder) = self.route(path.as_ref())?;
+        fenced.write_bytes_atomic(remainder, contents)
+    }
+
     /// Creates a directory tree inside any granted folder.
     pub(crate) fn create_dir_all(&self, path: impl AsRef<Path>) -> HarnessResult<()> {
         let (fenced, remainder) = self.route(path.as_ref())?;

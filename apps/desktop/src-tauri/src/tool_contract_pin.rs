@@ -9,7 +9,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::harness_bridge::{desktop_read_tools, DesktopPatchTool, DesktopSearchTool};
+    use crate::harness_bridge::{
+        desktop_read_tools, DesktopDocCreateTool, DesktopPatchTool, DesktopSearchTool,
+    };
     use crate::safety::DesktopSafetyGuard;
     use inbharat_harness_core::tools::{
         ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool,
@@ -105,6 +107,7 @@ mod tests {
             Box::new(RunProcessTool::default()),
             Box::new(DesktopSearchTool::new(folders.clone())),
             Box::new(DesktopPatchTool::new(folders.clone())),
+            Box::new(DesktopDocCreateTool::new(folders.clone())),
         ];
         for t in &constructible {
             assert_matches_contract(t.as_ref(), &contract);
