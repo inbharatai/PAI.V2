@@ -203,7 +203,10 @@ pub(crate) fn stage_speech_models_to_host_cache(vault_root: &str) -> Result<Vec<
     let (root, manifest) = read_manifest(vault_root)?;
     let mut staged = Vec::new();
     // TTS before ASR: the spoken-chat path is the one the user waits on.
-    for task in [manifest.tts.as_ref(), manifest.asr.as_ref()].into_iter().flatten() {
+    for task in [manifest.tts.as_ref(), manifest.asr.as_ref()]
+        .into_iter()
+        .flatten()
+    {
         let drive_path = canonical_under(&root, &task.model_relative_path, true)?;
         match crate::llama::stage_model_to_host_cache(
             &drive_path.to_string_lossy(),
@@ -461,8 +464,12 @@ fn concatenate_wav_chunks(parts: &[PathBuf], dest: &Path) -> Result<(), String> 
             spec.bits_per_sample, spec.sample_format
         ));
     }
-    let mut writer = hound::WavWriter::create(dest, spec)
-        .map_err(|e| format!("cannot create the spliced TTS output ({}): {e}", dest.display()))?;
+    let mut writer = hound::WavWriter::create(dest, spec).map_err(|e| {
+        format!(
+            "cannot create the spliced TTS output ({}): {e}",
+            dest.display()
+        )
+    })?;
     for part in parts {
         let reader = hound::WavReader::open(part)
             .map_err(|e| format!("cannot open TTS chunk ({}): {e}", part.display()))?;
@@ -487,7 +494,10 @@ fn concatenate_wav_chunks(parts: &[PathBuf], dest: &Path) -> Result<(), String> 
                     .map_err(|e| format!("cannot append TTS samples: {e}"))?,
                 Err(e) => {
                     let _ = std::fs::remove_file(dest);
-                    return Err(format!("corrupt sample in TTS chunk {}: {e}", part.display()));
+                    return Err(format!(
+                        "corrupt sample in TTS chunk {}: {e}",
+                        part.display()
+                    ));
                 }
             }
         }
@@ -1330,9 +1340,7 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
     let total_chunks = chunks.len();
     crate::boot_trace::mark_detail(
         "synthesize: spawning audiocpp CLI",
-        &format!(
-            "chunks={total_chunks} chunk_target={TTS_CHUNK_CHAR_TARGET} chars"
-        ),
+        &format!("chunks={total_chunks} chunk_target={TTS_CHUNK_CHAR_TARGET} chars"),
     );
     let mut chunk_paths = Vec::with_capacity(chunks.len());
     for (index, chunk) in chunks.iter().enumerate() {
@@ -1533,7 +1541,11 @@ mod tests {
         std::fs::create_dir_all(root.join("SPEECH/models/tts")).unwrap();
         let model_path = root.join(model_rel);
         // Unique bytes so the cache key can never collide with other tests.
-        std::fs::write(&model_path, b"omnivoice bytes unique to the serving-path test").unwrap();
+        std::fs::write(
+            &model_path,
+            b"omnivoice bytes unique to the serving-path test",
+        )
+        .unwrap();
         let sha = crate::llama::ModelManager::sha256_file(&model_path).unwrap();
         let size = std::fs::metadata(&model_path).unwrap().len();
 
@@ -1593,7 +1605,10 @@ mod tests {
             split_tts_chunks("Hello there.", TTS_CHUNK_CHAR_TARGET),
             vec!["Hello there.".to_string()]
         );
-        assert_eq!(split_tts_chunks("   ", TTS_CHUNK_CHAR_TARGET), vec!["".to_string()]);
+        assert_eq!(
+            split_tts_chunks("   ", TTS_CHUNK_CHAR_TARGET),
+            vec!["".to_string()]
+        );
         // Exactly at the target: one chunk, unmodified.
         let exact: String = "a".repeat(TTS_CHUNK_CHAR_TARGET);
         assert_eq!(

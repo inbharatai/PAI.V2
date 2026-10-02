@@ -1144,10 +1144,7 @@ pub fn list_migrated_documents(vault_root: &str, vault: Option<&Vault>) -> Vec<D
         .filter(|e| {
             !e.tombstone
                 && e.parent_record_id.is_none()
-                && matches!(
-                    e.record_type,
-                    RecordType::Document | RecordType::Transcript
-                )
+                && matches!(e.record_type, RecordType::Document | RecordType::Transcript)
         })
         .map(|e| {
             // Prefer the decrypted Android envelope when we can read it.
@@ -1356,7 +1353,8 @@ pub fn search_migrated_contents(
             continue; // a record we cannot decrypt is omitted, not broken over
         };
         if maybe_env_fact {
-            let Some(env) = parse_android_envelope(&bytes).filter(|env| env.kind == "envobs") else {
+            let Some(env) = parse_android_envelope(&bytes).filter(|env| env.kind == "envobs")
+            else {
                 continue; // an ordinary document original — not memory search material
             };
             // Only a phone's user-confirmed facts/corrections ever mirror,
@@ -1371,8 +1369,8 @@ pub fn search_migrated_contents(
             continue;
         }
         if maybe_procedure_outcome {
-            let Some(env) = parse_android_envelope(&bytes)
-                .filter(|env| env.kind == "procedure_outcome")
+            let Some(env) =
+                parse_android_envelope(&bytes).filter(|env| env.kind == "procedure_outcome")
             else {
                 continue; // an ordinary tool result — not memory search material
             };
@@ -1820,7 +1818,12 @@ mod migrated_readpath_tests {
         // Telemetry never leaks into the agent's four-type memory filter.
         let agent_typed = MemorySearchQuery {
             query: "harness".to_string(),
-            memory_types: vec!["note".to_string(), "document".to_string(), "memory".to_string(), "transcript".to_string()],
+            memory_types: vec![
+                "note".to_string(),
+                "document".to_string(),
+                "memory".to_string(),
+                "transcript".to_string(),
+            ],
             limit: 10,
             min_relevance: 0.0,
         };
@@ -1970,12 +1973,17 @@ mod migrated_readpath_tests {
             limit: 10,
             min_relevance: 0.0,
         };
-        assert_eq!(search_migrated_contents(&typed, &root, Some(&vault)).len(), 1);
+        assert_eq!(
+            search_migrated_contents(&typed, &root, Some(&vault)).len(),
+            1
+        );
 
         // Read back through the same id the listing surfaced.
         let bytes = read_migrated_document_content(&root, &turn_id, &vault)
             .expect("Android conversation turn must be readable by its record id");
-        assert!(String::from_utf8(bytes).unwrap().contains("call ravi please"));
+        assert!(String::from_utf8(bytes)
+            .unwrap()
+            .contains("call ravi please"));
     }
 
     #[test]

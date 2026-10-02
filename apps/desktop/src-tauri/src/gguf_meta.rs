@@ -184,7 +184,10 @@ pub fn read_metadata<P: AsRef<Path>>(path: P) -> Result<GgufMeta, String> {
         .len();
     let file = std::fs::File::open(path)
         .map_err(|e| format!("cannot open GGUF artifact {}: {e}", path.display()))?;
-    let mut cursor = Cursor { reader: std::io::BufReader::new(file), remaining: file_size };
+    let mut cursor = Cursor {
+        reader: std::io::BufReader::new(file),
+        remaining: file_size,
+    };
 
     const MAGIC: u32 = 0x4655_4747; // "GGUF" little-endian
     if cursor.u32("magic")? != MAGIC {
@@ -379,7 +382,8 @@ mod tests {
             self.string(key);
             self.buf.extend_from_slice(&TYPE_ARRAY.to_le_bytes());
             self.buf.extend_from_slice(&TYPE_U32.to_le_bytes());
-            self.buf.extend_from_slice(&(values.len() as u64).to_le_bytes());
+            self.buf
+                .extend_from_slice(&(values.len() as u64).to_le_bytes());
             for v in values {
                 self.buf.extend_from_slice(&v.to_le_bytes());
             }
@@ -388,8 +392,7 @@ mod tests {
         fn finish(self, path: &std::path::Path) {
             let mut buf = self.buf;
             let count_offset = 4 + 4 + 8;
-            buf[count_offset..count_offset + 8]
-                .copy_from_slice(&self.kv_count.to_le_bytes());
+            buf[count_offset..count_offset + 8].copy_from_slice(&self.kv_count.to_le_bytes());
             std::fs::write(path, &buf).expect("write test gguf");
         }
     }
@@ -437,8 +440,7 @@ mod tests {
         let p = dir.path().join("model.gguf");
         gemma_header(&p, 8_192);
         let meta = read_metadata(&p).expect("parse");
-        let budget =
-            derive_context_budget(Some(&meta), 131_072, Some(64), Some("q8_0"));
+        let budget = derive_context_budget(Some(&meta), 131_072, Some(64), Some("q8_0"));
         assert_eq!(budget.granted_context, 8_192);
         assert_eq!(budget.native_context, Some(8_192));
         assert!(budget.limiting_reason().contains("trained context"));
@@ -451,8 +453,7 @@ mod tests {
         gemma_header(&p, 131_072); // a genuinely 131K-trained artifact
         let meta = read_metadata(&p).expect("parse");
         // A 131K artifact on a 16 GiB host: RAM is the honest limit.
-        let budget =
-            derive_context_budget(Some(&meta), 131_072, Some(16), Some("q8_0"));
+        let budget = derive_context_budget(Some(&meta), 131_072, Some(16), Some("q8_0"));
         assert_eq!(budget.granted_context, 16_384);
         assert!(budget.limiting_reason().contains("host RAM tier"));
     }
@@ -473,10 +474,7 @@ mod tests {
         let budget = derive_context_budget(Some(&meta), 8_192, Some(64), Some("f16"));
         // 2 (K+V) * 48 layers * 8 heads * 320 dim * 2 B = 491,520 B/token
         // → * 8192 tokens = 4,026,531,840 B (~3.75 GiB).
-        assert_eq!(
-            budget.kv_estimate_bytes,
-            Some(2 * 48 * 8 * 320 * 2 * 8_192)
-        );
+        assert_eq!(budget.kv_estimate_bytes, Some(2 * 48 * 8 * 320 * 2 * 8_192));
     }
 
     #[test]
@@ -500,13 +498,17 @@ mod tests {
             return; // not a failure: no artifact named for this run
         };
         let meta = read_metadata(&path).expect("the real artifact must parse");
-        let native = meta.context_length.expect("real models declare context_length");
+        let native = meta
+            .context_length
+            .expect("real models declare context_length");
         // On a big host the RAM tier (32K) can sit below a genuinely larger
         // trained context (e.g. a 131K-class artifact) — that clamp is the
         // derivation working as designed, not a failure.
         let budget = derive_context_budget(Some(&meta), 1_000_000, Some(64), Some("q8_0"));
         assert!(budget.granted_context <= native);
-        let kv = budget.kv_estimate_bytes.expect("shape metadata must be complete");
+        let kv = budget
+            .kv_estimate_bytes
+            .expect("shape metadata must be complete");
         println!(
             "real artifact: native ctx {native}, granted {} at the 64 GiB tier, kv estimate {:.2} GiB at q8_0, layers={:?} kv_heads={:?} head_dim={:?}",
             budget.granted_context,

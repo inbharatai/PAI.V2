@@ -805,10 +805,7 @@ pub fn read_spoken_audio(path: String, vault_root: String) -> Result<Vec<u8>, St
                     .to_path_buf(),
             );
         }
-        roots
-            .iter()
-            .filter_map(|r| r.canonicalize().ok())
-            .collect()
+        roots.iter().filter_map(|r| r.canonicalize().ok()).collect()
     };
 
     let confined = allowed.iter().any(|root| {
@@ -818,9 +815,7 @@ pub fn read_spoken_audio(path: String, vault_root: String) -> Result<Vec<u8>, St
             .unwrap_or(false)
     });
     if !confined {
-        return Err(
-            "Refused to read spoken audio from outside the TTS output areas.".to_string(),
-        );
+        return Err("Refused to read spoken audio from outside the TTS output areas.".to_string());
     }
 
     std::fs::read(&candidate_canon).map_err(|e| format!("failed to read spoken audio: {e}"))

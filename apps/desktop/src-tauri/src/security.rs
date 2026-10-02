@@ -609,7 +609,9 @@ mod baseline_tests {
         )
         .expect("recording");
         std::fs::write(
-            vault.join("records").join("11111111-2222-3332-4444-555555555555.enc.json"),
+            vault
+                .join("records")
+                .join("11111111-2222-3332-4444-555555555555.enc.json"),
             "{\"ciphertext\":\"baseline-record\"}",
         )
         .expect("vault record");

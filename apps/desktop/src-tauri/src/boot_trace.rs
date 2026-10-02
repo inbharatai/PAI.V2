@@ -14,7 +14,9 @@ use std::time::Instant;
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
 fn trace_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("unoone-logs").join("boot-trace.log")
+    std::env::temp_dir()
+        .join("unoone-logs")
+        .join("boot-trace.log")
 }
 
 /// Append a boot-step mark. The first mark in a process truncates the file so
@@ -45,7 +47,11 @@ pub fn mark_detail(stage: &str, detail: &str) {
     } else {
         format!("{ms:>7}ms {stage} | {detail}\n")
     };
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = file.write_all(line.as_bytes());
     }
 }

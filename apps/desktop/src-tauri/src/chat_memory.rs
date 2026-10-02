@@ -47,10 +47,7 @@ impl ChatTurn {
 
 /// Write one turn to the unlocked vault as an encrypted MESSAGE record.
 /// Returns the new record id.
-pub fn save_chat_turn_to_vault(
-    vault: &mut Vault,
-    turn: &ChatTurn,
-) -> Result<String, String> {
+pub fn save_chat_turn_to_vault(vault: &mut Vault, turn: &ChatTurn) -> Result<String, String> {
     let device_id = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "desktop-unknown".to_string());
@@ -161,7 +158,9 @@ mod tests {
         // A chat turn the user deleted — deletion sticks on every host.
         let deleted = ChatTurn::new("s1", "delete me", "deleted");
         let deleted_id = save_chat_turn_to_vault(&mut vault, &deleted).unwrap();
-        vault.delete_record(&deleted_id, "DESKTOP", "chat-memory-test").unwrap();
+        vault
+            .delete_record(&deleted_id, "DESKTOP", "chat-memory-test")
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
         let extra = ChatTurn::new("s2", "after delete", "still here");
         let extra_id = save_chat_turn_to_vault(&mut vault, &extra).unwrap();

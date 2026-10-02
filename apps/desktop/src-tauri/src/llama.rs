@@ -585,8 +585,7 @@ impl ModelManager {
                     .filter(|asset| asset.kind == unoone_usb_manifest::AssetKind::SpeechModel)
                 {
                     let full = vault_root_path.join(&asset.path);
-                    let full =
-                        Self::normalize_path(&std::fs::canonicalize(&full).unwrap_or(full));
+                    let full = Self::normalize_path(&std::fs::canonicalize(&full).unwrap_or(full));
                     if full == requested {
                         return Some(asset.sha256.clone());
                     }
@@ -811,8 +810,7 @@ impl ModelManager {
                     .filter(|asset| asset.kind == unoone_usb_manifest::AssetKind::Model)
                 {
                     let full_path = PathBuf::from(vault_root).join(model.path.replace('/', "\\"));
-                    let (native_context, context_verified) =
-                        native_context_or_default(&full_path);
+                    let (native_context, context_verified) = native_context_or_default(&full_path);
                     models.push(ModelInfo {
                         name: model.id.clone(),
                         model_type: "gemma-4-12b".to_string(),
@@ -1117,7 +1115,10 @@ impl ModelManager {
         let gguf_meta = crate::gguf_meta::read_metadata(&model_path).ok();
         crate::boot_trace::mark_detail(
             "start_server: gguf meta read",
-            &format!("ctx_len={:?}", gguf_meta.as_ref().and_then(|m| m.context_length)),
+            &format!(
+                "ctx_len={:?}",
+                gguf_meta.as_ref().and_then(|m| m.context_length)
+            ),
         );
         let context_budget = crate::gguf_meta::derive_context_budget(
             gguf_meta.as_ref(),
@@ -1310,7 +1311,10 @@ impl ModelManager {
         }
 
         // Start the process — DO NOT mark as Loaded until identity verification passes.
-        crate::boot_trace::mark_detail("start_server: spawning llama-server", &format!("port={port}"));
+        crate::boot_trace::mark_detail(
+            "start_server: spawning llama-server",
+            &format!("port={port}"),
+        );
         let mut child = cmd.spawn().map_err(|e| {
             *self.status.lock().unwrap() = ModelStatus::Error;
             format!("Failed to start llama-server: {}", e)
@@ -1791,8 +1795,7 @@ mod tests {
     #[test]
     fn short_history_is_sent_untouched() {
         let history = vec![turn("user", "hello"), turn("assistant", "hi")];
-        let (trimmed, dropped) =
-            trim_history_to_budget(None, &history, None, 32_768, 4096);
+        let (trimmed, dropped) = trim_history_to_budget(None, &history, None, 32_768, 4096);
         assert_eq!(dropped, 0);
         assert_eq!(trimmed.len(), 2);
     }
@@ -1811,10 +1814,12 @@ mod tests {
                 history.push(turn(role, &filler));
             }
         }
-        let (trimmed, dropped) =
-            trim_history_to_budget(None, &history, None, 32_768, 4096);
+        let (trimmed, dropped) = trim_history_to_budget(None, &history, None, 32_768, 4096);
         assert!(dropped > 0, "a 36k-token history in a 28k budget must trim");
-        assert!(dropped < 60, "the budget must keep most turns, not empty the history");
+        assert!(
+            dropped < 60,
+            "the budget must keep most turns, not empty the history"
+        );
         // The LAST user turn (index 59) must survive.
         let last = trimmed.last().expect("history must never be empty");
         assert_eq!(last.role, "user");
@@ -1824,7 +1829,14 @@ mod tests {
         };
         assert!(last_text.contains("answer this:"));
         // Oldest turns went first.
-        assert_eq!(trimmed[0].role, if dropped % 2 == 0 { "user" } else { "assistant" });
+        assert_eq!(
+            trimmed[0].role,
+            if dropped % 2 == 0 {
+                "user"
+            } else {
+                "assistant"
+            }
+        );
     }
 
     #[test]
@@ -1837,8 +1849,7 @@ mod tests {
             history.push(turn("user", &format!("{} {}", i, filler)));
         }
         let sys = "s".repeat(30_000); // ~10k tokens
-        let (_, dropped_bare) =
-            trim_history_to_budget(None, &history, None, 32_768, 4096);
+        let (_, dropped_bare) = trim_history_to_budget(None, &history, None, 32_768, 4096);
         let (_, dropped_with_sys) =
             trim_history_to_budget(Some(&sys), &history, None, 32_768, 4096);
         assert!(dropped_with_sys > dropped_bare);
@@ -1848,10 +1859,13 @@ mod tests {
     fn a_single_turn_larger_than_the_window_is_kept_not_silently_dropped() {
         let huge = "x".repeat(300_000); // ~100k tokens > whole 32k window
         let history = vec![turn("user", &huge)];
-        let (trimmed, dropped) =
-            trim_history_to_budget(None, &history, None, 32_768, 4096);
+        let (trimmed, dropped) = trim_history_to_budget(None, &history, None, 32_768, 4096);
         assert_eq!(dropped, 0);
-        assert_eq!(trimmed.len(), 1, "the current task must still reach the model");
+        assert_eq!(
+            trimmed.len(),
+            1,
+            "the current task must still reach the model"
+        );
     }
 
     #[test]
@@ -2521,11 +2535,9 @@ mod tests {
         assert_eq!(resolved, sha);
 
         // And the model must stage into the host cache keyed by that sha.
-        let (cached, staged_size) = stage_model_to_host_cache(
-            model_path.to_str().unwrap(),
-            vault_dir.to_str().unwrap(),
-        )
-        .expect("speech model staging must succeed");
+        let (cached, staged_size) =
+            stage_model_to_host_cache(model_path.to_str().unwrap(), vault_dir.to_str().unwrap())
+                .expect("speech model staging must succeed");
         assert_eq!(staged_size, size);
         assert!(cached.is_file());
         assert_eq!(
@@ -2539,11 +2551,9 @@ mod tests {
             .join(format!("{sha}.verified"))
             .is_file());
         // Re-staging must take the cheap verified path and leave the file.
-        let (again, _) = stage_model_to_host_cache(
-            model_path.to_str().unwrap(),
-            vault_dir.to_str().unwrap(),
-        )
-        .expect("re-staging a verified speech copy must succeed");
+        let (again, _) =
+            stage_model_to_host_cache(model_path.to_str().unwrap(), vault_dir.to_str().unwrap())
+                .expect("re-staging a verified speech copy must succeed");
         assert_eq!(again, cached);
     }
 }
@@ -2652,10 +2662,7 @@ pub async fn start_model_server(
     state: tauri::State<'_, ModelManagerState>,
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Result<u16, String> {
-    crate::boot_trace::mark_detail(
-        "start_model_server: entry",
-        &config.model_path,
-    );
+    crate::boot_trace::mark_detail("start_model_server: entry", &config.model_path);
     // The model server is the inference gate, in two tiers:
     //   1. Full DesktopLaunch sweep complete → any model (drive or cache).
     //   2. BootGate complete (identity + runtime executables verified) → only
@@ -2985,10 +2992,7 @@ pub async fn model_cache_status(
     let cached = cache_dir.join(format!("{}.gguf", expected_sha));
     let marker = cache_dir.join(format!("{}.verified", expected_sha));
     let staged = model_cache_is_verified(&cached, &marker);
-    crate::boot_trace::mark_detail(
-        "model_cache_status",
-        &format!("staged={staged}"),
-    );
+    crate::boot_trace::mark_detail("model_cache_status", &format!("staged={staged}"));
     Ok(serde_json::json!({
         "staged": staged,
         "cached_path": if staged {
