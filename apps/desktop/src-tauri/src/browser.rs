@@ -13,41 +13,13 @@
 // script execution is not a feature, it is the defect being removed.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 use unoone_browser_policy::{evaluate as evaluate_redirect, RedirectVerdict};
+use unoone_vault_core::{Record, RecordType, Vault};
 
-/// Browser session configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserConfig {
-    pub headless: bool,
-    pub user_data_dir: Option<String>,
-    pub proxy: Option<String>,
-    pub viewport_width: u32,
-    pub viewport_height: u32,
-    pub disable_images: bool,
-    pub disable_javascript: bool,
-    pub accept_languages: String,
-    pub user_agent: Option<String>,
-}
-
-impl Default for BrowserConfig {
-    fn default() -> Self {
-        Self {
-            headless: false,
-            user_data_dir: None,
-            proxy: None,
-            viewport_width: 1280,
-            viewport_height: 800,
-            disable_images: false,
-            disable_javascript: false,
-            accept_languages: "en-US,en;q=0.9".to_string(),
-            user_agent: None,
-        }
-    }
-}
+use crate::documents;
 
 /// Typed browser actions. There is intentionally no arbitrary-script action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,18 +111,138 @@ pub struct BrowserSession {
 
 pub struct BrowserStateHolder {
     pub session: Mutex<Option<BrowserSession>>,
-    /// One-shot confirmation tokens granted by the user for risky actions
-    /// (form submission, file upload, download). A token is consumed on use.
-    pub confirmation_tokens: Mutex<HashSet<String>>,
 }
 
 impl BrowserStateHolder {
     pub fn new() -> Self {
         Self {
             session: Mutex::new(None),
-            confirmation_tokens: Mutex::new(HashSet::new()),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Web session persistence — honest status, recorded once in the vault.
+//
+// Every browser-lane window shares ONE WebView2 environment (the defect-#41
+// fix), whose default user-data folder lives on the HOST disk: cookies and
+// logins entered in the Browser Workspace persist there and survive app
+// restarts — that is what makes "log in once, later sessions reuse it" true
+// with no extra machinery. The honest boundary: the profile is host-local
+// and NOT vault-encrypted (WebView2 locks its profile while running, so its
+// bytes cannot be re-encrypted by us), and ClearSession clears page-scoped
+// storage only. The vault note below records that STATUS — never secrets:
+// no cookie values or credentials are stored.
+// ---------------------------------------------------------------------------
+
+/// The honest persistence facts, surfaced in `browser_session_status` and
+/// recorded in the vault note. Deterministic — unit-tested below.
+pub(crate) fn web_session_persistence_facts() -> serde_json::Value {
+    serde_json::json!({
+        "profile": "host-local WebView2 user-data folder (all browser-lane windows share it)",
+        "vault_encrypted": false,
+        "survives_app_restart": true,
+        "clear_session_clears": "page-scoped storage only (localStorage/sessionStorage) — not cookies or the profile",
+    })
+}
+
+/// Discriminator inside the decrypted BROWSER_RESEARCH content so recall
+/// never mistakes the session note for the lane's research records.
+pub(crate) const BROWSER_SESSION_NOTE_KIND: &str = "browser_session_note";
+/// Bump when the note content shape changes.
+pub(crate) const BROWSER_SESSION_NOTE_SCHEMA: u32 = 1;
+
+/// The vault note: the persistence status as one encrypted
+/// `BROWSER_RESEARCH` record — status, never secrets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BrowserSessionNote {
+    pub kind: String,
+    pub schema: u32,
+    pub note: String,
+    /// ISO 8601 (RFC 3339) — when the note was first recorded.
+    pub timestamp: String,
+}
+
+impl BrowserSessionNote {
+    fn new() -> Self {
+        Self {
+            kind: BROWSER_SESSION_NOTE_KIND.to_string(),
+            schema: BROWSER_SESSION_NOTE_SCHEMA,
+            note: "Web sessions persist: every browser-lane window shares the \
+                   host's WebView2 user-data profile, so cookies and logins \
+                   survive app restarts on this machine. The profile is \
+                   host-local and not vault-encrypted, and ClearSession \
+                   clears page-scoped storage only. This note records that \
+                   status — no cookies or credentials are stored here."
+                .to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+/// Write the session-persistence note to the unlocked vault. Returns the
+/// new record id.
+pub(crate) fn save_browser_session_note(vault: &mut Vault) -> Result<String, String> {
+    let device_id = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "desktop-unknown".to_string());
+    let record = Record::new(RecordType::BrowserResearch, "DESKTOP", &device_id);
+    let record_id = record.record_id.clone();
+    let content = serde_json::to_vec(&BrowserSessionNote::new())
+        .map_err(|e| format!("Browser session note encode failed: {}", e))?;
+    vault
+        .write_record(record, &content)
+        .map_err(|e| format!("Write failed: {}", e))?;
+    Ok(record_id)
+}
+
+/// Whether an un-deleted session note already exists. The note records a
+/// fact about the lane, so one live copy is enough: the session-creation
+/// paths call this before writing, and a locked vault simply skips (the
+/// note lands on a later session start).
+pub(crate) fn browser_session_note_exists(vault_root: &std::path::Path, vault: &Vault) -> bool {
+    documents::scan_record_metadata(vault_root)
+        .into_iter()
+        .filter(|entry| {
+            !entry.tombstone
+                && entry.parent_record_id.is_none()
+                && entry.record_type == RecordType::BrowserResearch
+        })
+        .any(|entry| {
+            vault
+                .read_record(&entry.record_id)
+                .ok()
+                .and_then(|(_, plaintext)| {
+                    serde_json::from_slice::<BrowserSessionNote>(&plaintext).ok()
+                })
+                .is_some_and(|note| note.kind == BROWSER_SESSION_NOTE_KIND)
+        })
+}
+
+/// Best-effort note write from a session-creation path. A locked vault or
+/// a write failure NEVER blocks a session — the note is a fact the user can
+/// read, not a gate.
+pub(crate) fn note_web_session_persistence(app: &tauri::AppHandle) {
+    let Some(vault_state) = app.try_state::<crate::DesktopVaultState>() else {
+        return;
+    };
+    // Same lock order as recall_chat_memory (vault, then vault_root) so
+    // the two can never deadlock each other.
+    let Ok(mut vault_opt) = vault_state.vault.lock() else {
+        return;
+    };
+    let Some(vault) = vault_opt.as_mut() else {
+        return; // locked vault — the note lands on a later session start
+    };
+    // Clone the root out from under its guard so the guard releases here.
+    let vault_root = match vault_state.vault_root.lock() {
+        Ok(root) => std::path::PathBuf::from(root.clone()),
+        Err(_) => return,
+    };
+    if browser_session_note_exists(&vault_root, vault) {
+        return;
+    }
+    let _ = save_browser_session_note(vault);
 }
 
 // ---------------------------------------------------------------------------
@@ -658,11 +750,10 @@ fn with_session<R>(
 
 #[tauri::command]
 pub fn browser_start_session(
-    config: Option<BrowserConfig>,
+    app: tauri::AppHandle,
     window_label: String,
     state: tauri::State<'_, Arc<BrowserStateHolder>>,
 ) -> Result<BrowserActionResult, String> {
-    let _config = config.unwrap_or_default();
     if window_label.trim().is_empty() {
         return Err("window_label is required".to_string());
     }
@@ -673,6 +764,9 @@ pub fn browser_start_session(
             title: None,
         });
     })?;
+    // Record the honest web-session persistence status in the vault, once
+    // (deduped) — best-effort: a locked vault never blocks the session.
+    note_web_session_persistence(&app);
     Ok(BrowserActionResult {
         success: true,
         verified: true,
@@ -692,9 +786,6 @@ pub fn browser_stop_session(
     state: tauri::State<'_, Arc<BrowserStateHolder>>,
 ) -> Result<BrowserActionResult, String> {
     let session_opt = with_session(&state, |session| session.take())?;
-    if let Ok(mut tokens) = state.confirmation_tokens.lock() {
-        tokens.clear();
-    }
     let mut window_closed = false;
     let mut note = "No active browser session.".to_string();
     if let Some(session) = session_opt {
@@ -704,12 +795,12 @@ pub fn browser_stop_session(
         };
         note = if window_closed {
             format!(
-                "Session closed; window '{}' destroyed; confirmation token store cleared.",
+                "Session closed; window '{}' destroyed.",
                 session.window_label
             )
         } else {
             format!(
-                "Session closed and confirmation tokens cleared; window '{}' was already gone.",
+                "Session closed; window '{}' was already gone.",
                 session.window_label
             )
         };
@@ -739,12 +830,16 @@ pub fn browser_session_status(
 ) -> Result<serde_json::Value, String> {
     let (current_url, current_title) = session_snapshot_url_title(&state);
     let session = with_session(&state, |session| session.clone())?;
+    // The persistence facts are a property of the lane, not of one
+    // session — surface them in both branches.
+    let persistence = web_session_persistence_facts();
     let Some(session) = session else {
         return Ok(serde_json::json!({
             "active": false,
             "window_label": null,
             "current_url": null,
             "current_title": null,
+            "persistence": persistence,
         }));
     };
     // Probe, don't trust existence: a defect #41 shell still satisfies
@@ -757,6 +852,7 @@ pub fn browser_session_status(
         "current_url": current_url,
         "current_title": current_title,
         "window_alive": window_alive,
+        "persistence": persistence,
     }))
 }
 
@@ -883,6 +979,7 @@ fn ensure_session(
                 current_url: None,
                 title: None,
             };
+            note_web_session_persistence(app);
             with_session(state, |slot| *slot = Some(session.clone()))?;
             return Ok((session.window_label, session.current_url, session.title));
         }
@@ -902,6 +999,7 @@ fn ensure_session(
                     current_url: None,
                     title: None,
                 };
+                note_web_session_persistence(app);
                 with_session(state, |slot| *slot = Some(session.clone()))?;
                 return Ok((session.window_label, session.current_url, session.title));
             }
@@ -1171,10 +1269,6 @@ pub(crate) fn browser_execute_sync(
                 },
                 Err(e) => (false, Some(e)),
             };
-            // Confirmation tokens are session-scoped: they die with a ClearSession too.
-            if let Ok(mut tokens) = state.confirmation_tokens.lock() {
-                tokens.clear();
-            }
             BrowserActionResult {
                 success: cleared,
                 verified: cleared,
@@ -1604,5 +1698,90 @@ mod tests {
         assert!(build_history_script(BrowserHistoryAction::Back).contains("history.back()"));
         assert!(build_history_script(BrowserHistoryAction::Forward).contains("history.forward()"));
         assert!(build_history_script(BrowserHistoryAction::Reload).contains("location.reload()"));
+    }
+
+    // -- web session persistence note (vault honesty) -------------------------
+    // The note records the lane's persistence STATUS as an encrypted
+    // BROWSER_RESEARCH record — deduped (one live copy), tombstone-aware
+    // (deletion sticks), and never mistaken for the lane's research records.
+
+    fn note_vault(dir_path: &std::path::Path) -> (Vault, std::path::PathBuf) {
+        let vault_root = dir_path.join("UNOONE");
+        let _ = Vault::create(&vault_root, b"synthetic-browser-note-pw").unwrap();
+        let mut vault = Vault::open(&vault_root).unwrap();
+        vault.unlock(b"synthetic-browser-note-pw").unwrap();
+        (vault, vault_root)
+    }
+
+    #[test]
+    fn session_note_round_trips_and_dedupes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, root) = note_vault(dir.path());
+        assert!(
+            !browser_session_note_exists(&root, &vault),
+            "no note before the first session"
+        );
+        let mut vault = vault;
+        let id = save_browser_session_note(&mut vault).expect("note write");
+        assert!(!id.is_empty(), "a real vault record id came back");
+        assert!(
+            browser_session_note_exists(&root, &vault),
+            "the note exists after the session created it"
+        );
+        // The stored record is an encrypted BROWSER_RESEARCH record whose
+        // decrypted content is exactly the note.
+        let (record, plaintext) = vault.read_record(&id).unwrap();
+        assert_eq!(record.record_type, RecordType::BrowserResearch);
+        let note: BrowserSessionNote = serde_json::from_slice(&plaintext).unwrap();
+        assert_eq!(note.kind, BROWSER_SESSION_NOTE_KIND);
+        assert!(note.note.contains("not vault-encrypted"));
+        assert!(note.note.contains("survive app restarts"));
+    }
+
+    #[test]
+    fn note_dedupe_skips_tombstones_and_foreign_research() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, root) = note_vault(dir.path());
+        let mut vault = vault;
+        // A research record from the lane's own writer — never a session note.
+        let foreign = Record::new(RecordType::BrowserResearch, "DESKTOP", "other");
+        vault
+            .write_record(foreign, br#"{"kind":"research_findings","schema":1}"#)
+            .unwrap();
+        assert!(
+            !browser_session_note_exists(&root, &vault),
+            "a foreign research record is not a session note"
+        );
+        // A note the user deleted — deletion sticks, a new session may
+        // record the fact again.
+        let deleted_id = save_browser_session_note(&mut vault).unwrap();
+        vault
+            .delete_record(&deleted_id, "DESKTOP", "browser-note-test")
+            .unwrap();
+        assert!(
+            !browser_session_note_exists(&root, &vault),
+            "a tombstoned note is gone"
+        );
+    }
+
+    #[test]
+    fn persistence_facts_state_the_honest_boundary() {
+        let facts = web_session_persistence_facts();
+        assert_eq!(
+            facts["vault_encrypted"], false,
+            "never claim vault encryption"
+        );
+        assert_eq!(facts["survives_app_restart"], true);
+        assert!(
+            facts["profile"].as_str().unwrap().contains("host-local"),
+            "names where the profile lives"
+        );
+        assert!(
+            facts["clear_session_clears"]
+                .as_str()
+                .unwrap()
+                .contains("not cookies"),
+            "ClearSession never claims to clear what it cannot"
+        );
     }
 }

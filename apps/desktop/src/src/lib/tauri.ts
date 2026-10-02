@@ -390,16 +390,24 @@ export interface DesktopCapabilityProfile {
   notes: string[];
 }
 
-export interface BrowserConfig {
-  headless?: boolean;
-  user_data_dir?: string;
-  proxy?: string;
-  viewport_width?: number;
-  viewport_height?: number;
-  disable_images?: boolean;
-  disable_javascript?: boolean;
-  accept_languages?: string;
-  user_agent?: string;
+// How the browser lane's web session persists: all browser-lane windows
+// share the host's WebView2 user-data profile, so cookies and logins
+// survive app restarts on this machine. The profile is host-local, not
+// vault-encrypted; ClearSession clears page-scoped storage only.
+export interface BrowserSessionPersistence {
+  profile: string;
+  vault_encrypted: boolean;
+  survives_app_restart: boolean;
+  clear_session_clears: string;
+}
+
+export interface BrowserSessionStatus {
+  active: boolean;
+  window_label: string | null;
+  current_url: string | null;
+  current_title: string | null;
+  window_alive?: boolean;
+  persistence: BrowserSessionPersistence;
 }
 
 // Typed browser actions. There is deliberately NO ExecuteScript variant:
@@ -625,12 +633,12 @@ export const tauriApi = {
 
   // Browser workspace — the backend executes actions against the real webview
   // window and reports what actually happened (verified only when the page
-  // returned a real success payload).
-  startBrowserSession: (config: BrowserConfig | undefined, windowLabel: string) =>
-    invoke<BrowserActionResult>('browser_start_session', { config, window_label: windowLabel }),
+  // returned a real success payload). The frontend owns window creation; the
+  // session bind carries no config (the old BrowserConfig was dead code).
+  startBrowserSession: (windowLabel: string) =>
+    invoke<BrowserActionResult>('browser_start_session', { window_label: windowLabel }),
   stopBrowserSession: () => invoke<BrowserActionResult>('browser_stop_session'),
-  browserSessionStatus: () =>
-    invoke<{ active: boolean; window_label: string | null; current_url: string | null; current_title: string | null }>('browser_session_status'),
+  browserSessionStatus: () => invoke<BrowserSessionStatus>('browser_session_status'),
   executeBrowserAction: (action: BrowserAction, confirmed = false) =>
     invoke<BrowserActionResult>('browser_execute', { action, confirmed }),
   getBrowserBridgeScript: () => invoke<string>('get_browser_bridge_script'),

@@ -49,7 +49,7 @@ export function BrowserWorkspace() {
     if (sessionActive) return true;
     setError('');
     try {
-      const bind = await tauriApi.startBrowserSession(undefined, WEBVIEW_LABEL);
+      const bind = await tauriApi.startBrowserSession(WEBVIEW_LABEL);
       if (!bind.success) {
         throw new Error(bind.error || 'Backend refused to bind a browser session');
       }
@@ -361,6 +361,7 @@ export function BrowserWorkspace() {
         >
           <p><strong>Controlled browser:</strong> typed actions only — there is no arbitrary-script execution.</p>
           <p><strong>Verification:</strong> results come from the live page; bad selectors fail; risky elements (submit/upload/download) require explicit confirmation.</p>
+          <p><strong>Web session:</strong> logins persist on this machine — every browser window shares the host's WebView2 profile, which survives app restarts. The profile is host-local, not vault-encrypted, and Clear Session clears page storage only (not cookies).</p>
         </div>
       </div>
     </div>
