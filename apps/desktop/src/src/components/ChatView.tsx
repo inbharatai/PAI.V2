@@ -100,6 +100,11 @@ export function ChatView() {
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [micError, setMicError] = useState('');
   const recordTimerRef = useRef<number | undefined>(undefined);
+  // True while a stop→transcribe→append is in flight. A second click during
+  // that window would re-fire stopRecording; before the backend consumed the
+  // session on stop, that re-served the same transcript and the message box
+  // showed the words twice (live-caught 2026-10-01).
+  const stoppingRef = useRef(false);
   // STS out: synthesize assistant replies through the offline speech lane.
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [autoSpeak, setAutoSpeak] = useState<boolean>(() => {
@@ -471,21 +476,27 @@ export function ChatView() {
         setRecordSeconds(0);
         recordTimerRef.current = window.setInterval(() => setRecordSeconds(s => s + 1), 1000);
       } else {
-        const session = await tauriApi.stopRecording();
-        if (recordTimerRef.current !== undefined) { window.clearInterval(recordTimerRef.current); recordTimerRef.current = undefined; }
-        setIsRecording(false);
-        const recordId = session.transcript_path?.replace('vault://records/', '');
-        if (!recordId) {
-          setMicError('No transcript was produced — nothing was heard. Try again closer to the mic, or type your message.');
-          return;
+        if (stoppingRef.current) return;
+        stoppingRef.current = true;
+        try {
+          const session = await tauriApi.stopRecording();
+          if (recordTimerRef.current !== undefined) { window.clearInterval(recordTimerRef.current); recordTimerRef.current = undefined; }
+          setIsRecording(false);
+          const recordId = session.transcript_path?.replace('vault://records/', '');
+          if (!recordId) {
+            setMicError('No transcript was produced — nothing was heard. Try again closer to the mic, or type your message.');
+            return;
+          }
+          const transcript = await tauriApi.vaultReadRecord(recordId);
+          const text = transcript.trim();
+          if (!text) {
+            setMicError('The transcript came back empty. Try again, or type your message.');
+            return;
+          }
+          setInput(prev => (prev.trim() ? `${prev.trim()} ${text}` : text));
+        } finally {
+          stoppingRef.current = false;
         }
-        const transcript = await tauriApi.vaultReadRecord(recordId);
-        const text = transcript.trim();
-        if (!text) {
-          setMicError('The transcript came back empty. Try again, or type your message.');
-          return;
-        }
-        setInput(prev => (prev.trim() ? `${prev.trim()} ${text}` : text));
       }
     } catch (err) {
       if (recordTimerRef.current !== undefined) { window.clearInterval(recordTimerRef.current); recordTimerRef.current = undefined; }

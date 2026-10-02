@@ -582,6 +582,13 @@ pub fn stop_recording(
         zeroize_audio(&mut samples);
         session.state = RecordingState::Error;
         session.vault_record_id = None;
+        // Live-caught 2026-10-01 (mic transcript duplication): a second
+        // stop_recording on the same lingering session returned the FIRST
+        // stop's transcript_path, so the frontend appended the same words
+        // again — a verbatim duplicate. Stale artifact pointers must never
+        // survive into a response for a stop that captured nothing.
+        session.transcript_path = None;
+        session.audio_path = None;
         outcome.retention_verified = true; // nothing persisted, nothing to violate
         outcome.warnings.push("ZERO_SAMPLES_CAPTURED".to_string());
         outcome.user_message = "No audio was captured, so nothing was saved. \
@@ -714,7 +721,14 @@ pub fn stop_recording(
         .lock()
         .map_err(|e| format!("State lock error: {}", e))? = Some(outcome);
 
-    Ok(session.clone())
+    // Consume the session: a stopped session must never be stopped twice.
+    // Until this line, a second call walked the same session again and
+    // re-served its transcript_path — the verbatim duplication the user
+    // caught live on 2026-10-01. Now the second stop fails honestly with
+    // "No active recording session".
+    let finished = session.clone();
+    *session_lock = None;
+    Ok(finished)
 }
 
 /// Build a plain-language summary of what was actually kept.
