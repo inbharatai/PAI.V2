@@ -167,6 +167,16 @@ export interface AgentWorkspaceInfo {
   folders: GrantedFolderInfo[];
 }
 
+/// One live in-chat folder-grant approval card: the agent hit a path
+/// outside every granted folder; `proposed_folder` is what the human is
+/// asked to grant.
+export interface PendingGrantInfo {
+  request_id: number;
+  path: string;
+  proposed_folder: string;
+  created_at_ms: number;
+}
+
 export type Content = string | ContentPart[];
 
 export interface ContentPart {
@@ -550,6 +560,19 @@ export const tauriApi = {
   addAgentFolder: (path: string) => invoke<AgentWorkspaceInfo>('add_agent_folder', { path }),
   removeAgentFolder: (path: string) =>
     invoke<AgentWorkspaceInfo>('remove_agent_folder', { path }),
+
+  // In-chat folder-grant approval (2026-10-03): when the agent's tools hit
+  // a denied folder, the backend shows an approval card
+  // (`unoone:folder-grant-request`). These answer it — the grant itself
+  // (validations, store write, vault audit) runs in the backend on the
+  // tool thread, exactly like the Settings lane — and re-sync the live
+  // cards (e.g. after a view switch).
+  agentPendingFolderGrants: () => invoke<PendingGrantInfo[]>('agent_pending_folder_grants'),
+  agentRespondFolderGrant: (requestId: number, approved: boolean) =>
+    invoke<void>('agent_respond_folder_grant', {
+      request_id: requestId,
+      approved,
+    }),
 
   // Live website preview (web.preview). The window itself is created by the
   // frontend (previewWindow.ts); these drive the backend's bounded mirror:

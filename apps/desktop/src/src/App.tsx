@@ -12,7 +12,7 @@ import { BrowserWorkspace } from './components/BrowserWorkspace';
 import { CapabilityProfile } from './components/CapabilityProfile';
 import { DocumentsView } from './components/DocumentsView';
 import { AccessibilityView } from './components/AccessibilityView';
-import { tauriApi, type StartupPhase } from './lib/tauri';
+import { tauriApi, type StartupPhase, type PendingGrantInfo } from './lib/tauri';
 import { listen } from '@tauri-apps/api/event';
 import { ensureBrowserWorkspaceWindow } from './lib/browserWorkspaceWindow';
 import { ensurePreviewWindow } from './lib/previewWindow';
@@ -310,6 +310,47 @@ function App() {
     return () => { window.clearInterval(id); };
   }, [previewActive]);
 
+  // In-chat folder-grant approval (2026-10-03): when an agent run hits a
+  // path outside every granted folder, the backend (running on a tool
+  // thread, bounded, deny-by-default) emits 'unoone:folder-grant-request'
+  // and waits for the human. This banner shows the card in EVERY view —
+  // the user may be on Settings or Browser when the agent asks — and the
+  // buttons only record the decision; the grant itself (validations, store
+  // write, vault audit) runs in the backend exactly like the Settings
+  // lane. 'unoone:folder-grant-resolved' clears a card whose wait ended
+  // (granted, declined, or timed out).
+  const [grantCards, setGrantCards] = useState<PendingGrantInfo[]>([]);
+  useEffect(() => {
+    let unlistenRequest: (() => void) | undefined;
+    let unlistenResolved: (() => void) | undefined;
+    // Re-sync on mount: a card may have been emitted before this listener
+    // attached.
+    void tauriApi.agentPendingFolderGrants()
+      .then(cards => setGrantCards(cards))
+      .catch(() => {});
+    void listen<PendingGrantInfo>('unoone:folder-grant-request', event => {
+      setGrantCards(prev =>
+        prev.some(card => card.request_id === event.payload.request_id)
+          ? prev
+          : [...prev, event.payload]
+      );
+    }).then(fn => { unlistenRequest = fn; });
+    void listen<{ request_id: number; outcome: string }>(
+      'unoone:folder-grant-resolved',
+      event => {
+        setGrantCards(prev =>
+          prev.filter(card => card.request_id !== event.payload.request_id)
+        );
+      }
+    ).then(fn => { unlistenResolved = fn; });
+    return () => { unlistenRequest?.(); unlistenResolved?.(); };
+  }, []);
+
+  const answerGrantCard = (requestId: number, approved: boolean) => {
+    setGrantCards(prev => prev.filter(card => card.request_id !== requestId));
+    void tauriApi.agentRespondFolderGrant(requestId, approved).catch(() => {});
+  };
+
   // Auto-lock on window blur (timer from settings)
   useEffect(() => {
     if (screen !== 'main') return;
@@ -402,6 +443,43 @@ function App() {
               ⚠️ {bootError}
             </div>
           )}
+          {grantCards.map(card => (
+            <div
+              key={card.request_id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                padding: '12px 16px',
+                background: 'var(--surface-secondary)',
+                borderBottom: '1px solid var(--border)',
+                fontSize: '13px',
+                flexWrap: 'wrap',
+              }}
+            >
+              <div style={{ flex: 1, minWidth: '220px' }}>
+                <strong>Agent folder access request</strong>
+                <div style={{ color: 'var(--text-secondary)' }}>
+                  The agent wants to reach <code>{card.path}</code>. Grant access to{' '}
+                  <code>{card.proposed_folder}</code>?
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => answerGrantCard(card.request_id, true)}
+                >
+                  Grant
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => answerGrantCard(card.request_id, false)}
+                >
+                  Deny
+                </button>
+              </div>
+            </div>
+          ))}
           <div
             style={currentView === 'chat' ? undefined : { display: 'none' }}
             aria-hidden={currentView !== 'chat'}

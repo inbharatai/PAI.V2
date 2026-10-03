@@ -8,7 +8,7 @@
 use crate::{
     browser::{self, BrowserAction, BrowserStateHolder, ScrollDirection},
     documents,
-    granted_fs::{GrantedFolderBroker, GrantedFolders},
+    granted_fs::{DeniedPathResolution, GrantedFolderBroker, GrantedFolders},
     llama::{Content, ConversationTurn, ModelManagerState},
     safety::{DesktopSafetyGuard, SafetyGuardState, ToolAction},
     security, DesktopVaultState,
@@ -865,6 +865,12 @@ fn desktop_system_prefix(full_access: bool) -> String {
              - Read/write/list/search/patch files in the workspace folder: {workspace}\n\
              (give tool paths relative to that folder, or as absolute paths inside \
              it — both are accepted and fenced to it){granted_lines}\n\
+             - A path outside every granted folder opens an approval card in \
+             the app where the user can Grant that folder: tell the user to \
+             click Grant there, wait for the tool call to finish, and it \
+             completes on the widened access. A decline (or no answer) means \
+             the folder stays off-limits — never claim a file outside the \
+             grants was read or written.\n\
              - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
              dotnet, go, java, cmake, make, gcc, clang, powershell) inside that workspace\n\
              - Deploy long-running processes (servers, watchers): pass \
@@ -1379,6 +1385,224 @@ pub async fn add_agent_folder(
         .map_err(|_| "vault-root state lock failed".to_owned())?
         .clone();
     let canonical = validate_grant_path(Path::new(path.trim()), &vault_root)?;
+    execute_folder_grant(canonical, &vault_state.vault)?;
+    agent_workspace_info()
+}
+
+/// Revoke one additional folder grant. Revoking the workspace root itself
+/// stays on `set_agent_workspace_root(None)`; this removes only from the
+/// folders list. A path not in the list is an error, never a silent no-op.
+#[tauri::command]
+pub async fn remove_agent_folder(
+    path: String,
+    vault_state: tauri::State<'_, DesktopVaultState>,
+) -> Result<AgentWorkspaceInfo, String> {
+    let key = PathBuf::from(path.trim()).to_string_lossy().to_lowercase();
+    let mut file = read_grants_file();
+    let before = file.folders.len();
+    file.folders
+        .retain(|grant| grant.root.trim().to_lowercase() != key);
+    if file.folders.len() == before {
+        return Err("that folder is not in the granted list".to_owned());
+    }
+    write_grants_file(&file)?;
+    audit_workspace_grant(&vault_state.vault, "folder_revoke", path.trim());
+    agent_workspace_info()
+}
+
+// ---------------------------------------------------------------------------
+// In-chat folder-grant approval (2026-10-03). Live-caught in the drive app:
+// the user asked the agent to review `C:\Users\reetu\Desktop\Stanford`, then
+// said "i give you permission" IN THE CHAT — and the agent still could not
+// act, because grants only existed as a Settings flow and the per-run fence
+// was frozen at run start. This block closes both gaps:
+//
+// - a routed path outside every grant asks the human with an approval CARD
+//   in the app UI (`unoone:folder-grant-request`), bounded and deny-by-
+//   default — Grant runs the SAME validations, store write and vault audit
+//   as the Settings lane, then the tool call completes on the widened
+//   fence;
+// - the re-check inside the request consults the CURRENT persisted grants
+//   on every denial, so grants made mid-run (Settings, an earlier tool
+//   call, a sibling agent) resolve without re-asking — the fence is no
+//   longer effectively frozen for the run.
+// ---------------------------------------------------------------------------
+
+/// How long an approval card waits for the human. No answer by then is a
+/// denial — deny by default, never block a run forever.
+const GRANT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The answer channel of one approval card: `None` while waiting,
+/// `Some(approved)` once the human answers; the condvar wakes the hook.
+type GrantDecisionChannel = Arc<(Mutex<Option<bool>>, std::sync::Condvar)>;
+
+/// One live approval card: the answer channel the hook waits on.
+struct PendingGrantRequest {
+    /// The path the agent tried to reach.
+    path: String,
+    /// The folder the human is asked to grant (see `propose_grant_folder`).
+    proposed_folder: String,
+    /// `None` while waiting; `Some(approved)` once the human answers.
+    decision: GrantDecisionChannel,
+    created_at_ms: u64,
+}
+
+/// The managed state for in-chat folder grants: the live requests the
+/// frontend renders as approval cards, plus the folders the human already
+/// DECLINED this app session — a declined folder never re-asks (the model
+/// is told why; the Settings lane still grants it any time).
+#[derive(Default)]
+pub struct PendingGrantRequests {
+    next_id: std::sync::atomic::AtomicU64,
+    pending: Mutex<Vec<(u64, PendingGrantRequest)>>,
+    declined: Mutex<Vec<String>>,
+}
+
+impl PendingGrantRequests {
+    /// Registers a new card and returns its id + the channel to wait on.
+    fn insert(&self, path: String, proposed_folder: String) -> (u64, GrantDecisionChannel) {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let decision = Arc::new((Mutex::new(None), std::sync::Condvar::new()));
+        let created_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut pending = self.lock_pending();
+        pending.push((
+            id,
+            PendingGrantRequest {
+                path,
+                proposed_folder,
+                decision: Arc::clone(&decision),
+                created_at_ms,
+            },
+        ));
+        (id, decision)
+    }
+
+    /// Records the human's answer and wakes the waiting hook. False when no
+    /// live request has that id (already answered or timed out).
+    fn answer(&self, id: u64, approved: bool) -> bool {
+        let mut pending = self.lock_pending();
+        let Some(position) = pending.iter().position(|(known, _)| *known == id) else {
+            return false;
+        };
+        let (_, request) = pending.remove(position);
+        if let Ok(mut slot) = request.decision.0.lock() {
+            *slot = Some(approved);
+        }
+        request.decision.1.notify_all();
+        true
+    }
+
+    /// Drops a request whose wait ended (timeout) so stale cards cannot be
+    /// answered later.
+    fn expire(&self, id: u64) {
+        self.lock_pending().retain(|(known, _)| *known != id);
+    }
+
+    /// The live cards, for the frontend's query command.
+    fn snapshot(&self) -> Vec<PendingGrantInfo> {
+        self.lock_pending()
+            .iter()
+            .map(|(id, request)| PendingGrantInfo {
+                request_id: *id,
+                path: request.path.clone(),
+                proposed_folder: request.proposed_folder.clone(),
+                created_at_ms: request.created_at_ms,
+            })
+            .collect()
+    }
+
+    fn lock_pending(&self) -> std::sync::MutexGuard<'_, Vec<(u64, PendingGrantRequest)>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn is_declined(&self, folder_key: &str) -> bool {
+        self.declined
+            .lock()
+            .map(|list| list.iter().any(|known| known == folder_key))
+            .unwrap_or(false)
+    }
+
+    fn mark_declined(&self, folder_key: String) {
+        let Ok(mut list) = self.declined.lock() else {
+            return;
+        };
+        if !list.contains(&folder_key) {
+            list.push(folder_key);
+        }
+    }
+
+    fn clear_declined(&self, folder_key: &str) {
+        if let Ok(mut list) = self.declined.lock() {
+            list.retain(|known| known != folder_key);
+        }
+    }
+}
+
+/// One approval card as the frontend renders it.
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct PendingGrantInfo {
+    pub request_id: u64,
+    pub path: String,
+    pub proposed_folder: String,
+    pub created_at_ms: u64,
+}
+
+/// The live approval cards (the frontend re-syncs on mount).
+#[tauri::command]
+pub fn agent_pending_folder_grants(
+    state: tauri::State<'_, PendingGrantRequests>,
+) -> Vec<PendingGrantInfo> {
+    state.snapshot()
+}
+
+/// The human's answer to an approval card. This records ONLY the decision;
+/// the grant itself (validations, store write, vault audit, fence widen)
+/// runs inside `request_folder_grant` on the tool thread, exactly like the
+/// Settings lane — the UI can never write a grant directly.
+#[tauri::command]
+pub fn agent_respond_folder_grant(
+    request_id: u64,
+    approved: bool,
+    state: tauri::State<'_, PendingGrantRequests>,
+) -> Result<(), String> {
+    if state.answer(request_id, approved) {
+        Ok(())
+    } else {
+        Err(format!(
+            "no pending folder-grant request with id {request_id} (already answered or timed out)"
+        ))
+    }
+}
+
+/// The folder an approval card proposes: the requested path itself when it
+/// names an existing directory, else the nearest EXISTING ancestor
+/// directory — the human grants FOLDERS, not files. Never a drive root
+/// (`validate_grant_path` refuses those anyway). None when no grantable
+/// folder exists on the path's ancestor chain.
+fn propose_grant_folder(path: &Path) -> Option<PathBuf> {
+    let mut candidate = path.to_path_buf();
+    loop {
+        if candidate.is_dir() && candidate.parent().is_some() {
+            return Some(candidate);
+        }
+        candidate = candidate.parent()?.to_path_buf();
+    }
+}
+
+/// The grant core the Settings lane and the in-chat approval share: refuse
+/// duplicates against the store, persist, audit. Returns the canonical path.
+fn execute_folder_grant(
+    canonical: PathBuf,
+    vault: &Arc<Mutex<Option<Vault>>>,
+) -> Result<PathBuf, String> {
     let key = canonical.to_string_lossy().to_lowercase();
     let mut file = read_grants_file();
     if file
@@ -1404,33 +1628,142 @@ pub async fn add_agent_folder(
         granted_at_ms,
     });
     write_grants_file(&file)?;
-    audit_workspace_grant(
-        &vault_state.vault,
-        "folder_grant",
-        &canonical.to_string_lossy(),
-    );
-    agent_workspace_info()
+    audit_workspace_grant(vault, "folder_grant", &canonical.to_string_lossy());
+    Ok(canonical)
 }
 
-/// Revoke one additional folder grant. Revoking the workspace root itself
-/// stays on `set_agent_workspace_root(None)`; this removes only from the
-/// folders list. A path not in the list is an error, never a silent no-op.
-#[tauri::command]
-pub async fn remove_agent_folder(
-    path: String,
-    vault_state: tauri::State<'_, DesktopVaultState>,
-) -> Result<AgentWorkspaceInfo, String> {
-    let key = PathBuf::from(path.trim()).to_string_lossy().to_lowercase();
-    let mut file = read_grants_file();
-    let before = file.folders.len();
-    file.folders
-        .retain(|grant| grant.root.trim().to_lowercase() != key);
-    if file.folders.len() == before {
-        return Err("that folder is not in the granted list".to_owned());
+/// The in-chat approval hook (see `granted_folders_with_approval`): runs on
+/// harness tool threads, blocks up to [`GRANT_REQUEST_TIMEOUT`], and never
+/// grants anything without the human clicking Grant on the card.
+fn request_folder_grant(app: &tauri::AppHandle, path: &Path) -> DeniedPathResolution {
+    // 1. Live truth first: a grant may have landed while this run's frozen
+    //    fence was being built (Settings, an earlier tool call, a sibling
+    //    agent) — consult the persisted store, never re-ask for a grant
+    //    that already exists.
+    if let Ok(fresh) = granted_folders() {
+        if let Some((fenced, remainder)) = fresh.try_route_absolute(path) {
+            return DeniedPathResolution::Granted(fenced, remainder);
+        }
     }
-    write_grants_file(&file)?;
-    audit_workspace_grant(&vault_state.vault, "folder_revoke", path.trim());
-    agent_workspace_info()
+    // 2. Propose the folder to grant. Pre-validate BEFORE showing the card:
+    //    the card must never offer a grant the validations would refuse
+    //    (inside the encrypted package, a drive root, a missing folder).
+    let Some(proposed) = propose_grant_folder(path) else {
+        return DeniedPathResolution::Denied(
+            "no existing folder could be proposed for a grant — the user can grant one via Settings"
+                .to_owned(),
+        );
+    };
+    let vault_state = app.state::<crate::DesktopVaultState>();
+    let vault_root = match vault_state
+        .vault_root
+        .lock()
+        .map_err(|_| "vault-root state lock failed".to_owned())
+        .map(|guard| guard.clone())
+    {
+        Ok(root) => root,
+        Err(reason) => return DeniedPathResolution::Denied(reason),
+    };
+    if let Err(reason) = validate_grant_path(&proposed, &vault_root) {
+        return DeniedPathResolution::Denied(format!("that folder cannot be granted: {reason}"));
+    }
+    let proposed_key = proposed.to_string_lossy().to_lowercase();
+    let requests = app.state::<PendingGrantRequests>();
+    if requests.is_declined(&proposed_key) {
+        return DeniedPathResolution::Denied(format!(
+            "the user already declined to grant '{}' in this session — the Settings lane can still grant it",
+            proposed.display()
+        ));
+    }
+    // 3. Show the card and wait, bounded, deny by default.
+    let (request_id, decision) =
+        requests.insert(path.display().to_string(), proposed.display().to_string());
+    let shown = app.emit(
+        "unoone:folder-grant-request",
+        serde_json::json!({
+            "request_id": request_id,
+            "path": path.display().to_string(),
+            "proposed_folder": proposed.display().to_string(),
+        }),
+    );
+    if shown.is_err() {
+        requests.expire(request_id);
+        return DeniedPathResolution::Denied(
+            "the approval card could not be shown to the user".to_owned(),
+        );
+    }
+    let (lock, cvar) = &*decision;
+    let mut slot = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let deadline = std::time::Instant::now() + GRANT_REQUEST_TIMEOUT;
+    while slot.is_none() {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let waited = cvar
+            .wait_timeout(slot, deadline - now)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        slot = waited.0;
+    }
+    let answer = slot.take();
+    requests.expire(request_id);
+    let _ = app.emit(
+        "unoone:folder-grant-resolved",
+        serde_json::json!({
+            "request_id": request_id,
+            "outcome": match answer {
+                Some(true) => "granted",
+                Some(false) => "declined",
+                None => "timeout",
+            },
+        }),
+    );
+    match answer {
+        Some(true) => {
+            // 4. Grant — the same validations, store write and vault audit
+            //    as the Settings lane — then route on the widened fence.
+            match execute_folder_grant(proposed.clone(), &vault_state.vault) {
+                Ok(_) => {
+                    requests.clear_declined(&proposed_key);
+                    match granted_folders().and_then(|fresh| {
+                        fresh.try_route_absolute(path).ok_or_else(|| {
+                            "the grant was recorded but the path still did not route".to_owned()
+                        })
+                    }) {
+                        Ok((fenced, remainder)) => DeniedPathResolution::Granted(fenced, remainder),
+                        Err(reason) => DeniedPathResolution::Denied(reason),
+                    }
+                }
+                Err(reason) => DeniedPathResolution::Denied(format!(
+                    "the user granted the folder but the grant failed: {reason}"
+                )),
+            }
+        }
+        Some(false) => {
+            requests.mark_declined(proposed_key);
+            DeniedPathResolution::Denied(format!(
+                "the user declined to grant '{}'",
+                proposed.display()
+            ))
+        }
+        None => DeniedPathResolution::Denied(
+            "the grant request timed out without an answer — deny by default".to_owned(),
+        ),
+    }
+}
+
+/// The per-run fence with the in-chat approval hook installed: a path
+/// outside every grant asks the human instead of failing outright. The
+/// hookless form (`granted_folders`) stays the test/sandbox baseline.
+fn granted_folders_with_approval(app: Option<&tauri::AppHandle>) -> Result<GrantedFolders, String> {
+    let mut folders = granted_folders()?;
+    if let Some(app) = app {
+        let hook_app = app.clone();
+        folders = folders.with_denied_request(std::sync::Arc::new(move |path| {
+            request_folder_grant(&hook_app, path)
+        }));
+    }
+    Ok(folders)
 }
 
 /// Vision lane: the image types llama.cpp accepts through an `image_url`
@@ -2622,7 +2955,7 @@ impl PaiSubagentProvider {
             // contract as the main lane).
             .with_lexical_rerank(self.model_id.clone(), self.port),
         );
-        let folders = granted_folders().map_err(|error| {
+        let folders = granted_folders_with_approval(self.app.as_ref()).map_err(|error| {
             Failure::new(
                 ErrorCode::FilesystemDenied,
                 FailureClass::Policy,
@@ -3248,7 +3581,11 @@ pub async fn harness_chat(
             CapabilitySet::from_slice(&[Capability::Model, Capability::FileRead])
         };
         let workspace_fs = if full_access {
-            Some(granted_folders().map_err(|error| error.to_string())?)
+            // The in-chat approval hook rides inside the set: a denied
+            // folder asks the human with a chat card (bounded, deny by
+            // default) and a granted folder is usable by every tool of this
+            // run, not only the one that triggered the ask.
+            Some(granted_folders_with_approval(Some(&app)).map_err(|error| error.to_string())?)
         } else {
             None
         };
@@ -3491,6 +3828,83 @@ pub async fn harness_chat(
     // reports false instead of cancelling a phantom run.
     run_registry.finish(&stop_conversation_id);
     worker_result?
+}
+
+#[cfg(test)]
+mod grant_approval_tests {
+    use super::*;
+
+    #[test]
+    fn proposal_is_the_path_when_it_names_an_existing_folder() {
+        let base = std::env::temp_dir().join(format!(
+            "unoone-grant-propose-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&base).expect("test dir");
+        let proposed = propose_grant_folder(&base).expect("the folder itself");
+        assert_eq!(proposed, base);
+    }
+
+    #[test]
+    fn proposal_for_a_missing_path_is_the_nearest_existing_ancestor() {
+        let base = std::env::temp_dir().join(format!(
+            "unoone-grant-ancestor-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&base).expect("test dir");
+        let missing = base.join("deep").join("never").join("file.txt");
+        let proposed =
+            propose_grant_folder(&missing).expect("an ancestor must exist (the temp dir)");
+        assert_eq!(proposed, base);
+    }
+
+    #[test]
+    fn proposal_never_offers_a_drive_root() {
+        // No ancestor of a missing path except the drive root exists: the
+        // proposal must be None, never `C:\` (validate_grant_path refuses
+        // drive roots — the card must never offer what a grant would refuse).
+        let missing = std::path::PathBuf::from(r"C:\__unoone_never_exists__\file.txt");
+        assert_eq!(propose_grant_folder(&missing), None);
+    }
+
+    #[test]
+    fn an_answered_card_wakes_exactly_once() {
+        let requests = PendingGrantRequests::default();
+        let (id, decision) = requests.insert("p".to_owned(), "f".to_owned());
+        assert_eq!(requests.snapshot().len(), 1);
+        let card = &requests.snapshot()[0];
+        assert_eq!(card.request_id, id);
+        assert_eq!(card.path, "p");
+        assert_eq!(card.proposed_folder, "f");
+        assert!(requests.answer(id, true));
+        // A card answers exactly once — a second answer is refused.
+        assert!(!requests.answer(id, true));
+        assert!(requests.snapshot().is_empty());
+        let slot = decision
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(*slot, Some(true));
+    }
+
+    #[test]
+    fn an_expired_card_cannot_be_answered() {
+        let requests = PendingGrantRequests::default();
+        let (id, _) = requests.insert("p".to_owned(), "f".to_owned());
+        requests.expire(id);
+        assert!(!requests.answer(id, false));
+        assert!(requests.snapshot().is_empty());
+    }
+
+    #[test]
+    fn declined_folders_are_remembered_and_clearable() {
+        let requests = PendingGrantRequests::default();
+        assert!(!requests.is_declined(r"c:\folder"));
+        requests.mark_declined(r"c:\folder".to_owned());
+        assert!(requests.is_declined(r"c:\folder"));
+        requests.clear_declined(r"c:\folder");
+        assert!(!requests.is_declined(r"c:\folder"));
+    }
 }
 
 #[cfg(test)]

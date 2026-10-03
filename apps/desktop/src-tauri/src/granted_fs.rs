@@ -41,12 +41,46 @@ use inbharat_harness_core::{
 };
 use std::path::{Path, PathBuf};
 
-/// The multi-root fence: one `RootedFs` per granted folder, workspace first.
+/// The outcome of the in-chat folder-grant approval (2026-10-03): when a
+/// routed absolute path lands outside every granted folder, the desktop
+/// approval layer (see `request_folder_grant` in harness_bridge.rs) asks
+/// the human with a chat-approval card and answers with one of these.
 #[derive(Clone, Debug)]
+pub(crate) enum DeniedPathResolution {
+    /// The human granted a folder containing the path: the routed
+    /// (fence, root-relative remainder) pair for THIS operation, built
+    /// from the current persisted grants.
+    Granted(RootedFs, PathBuf),
+    /// The human declined, never answered in time, or the proposal failed:
+    /// the reason becomes part of the failure the model sees.
+    Denied(String),
+}
+
+/// The approval hook stored inside a [`GrantedFolders`] set. Blocking is
+/// allowed: callers run on harness tool threads (`spawn_blocking`), and the
+/// approval layer bounds the wait itself (deny by default).
+pub(crate) type DeniedPathRequest =
+    std::sync::Arc<dyn Fn(&Path) -> DeniedPathResolution + Send + Sync>;
+
+/// The multi-root fence: one `RootedFs` per granted folder, workspace first.
+#[derive(Clone)]
 pub(crate) struct GrantedFolders {
     /// Index 0 is the workspace root (the primary); grants keep their
     /// persisted order after it.
     roots: Vec<RootedFs>,
+    /// The in-chat approval hook: a path outside every grant asks the human
+    /// (bounded, deny by default) instead of failing outright. `None` —
+    /// tests, and any consumer that wants denials to stand — answers
+    /// denials itself.
+    denied_request: Option<DeniedPathRequest>,
+}
+
+impl std::fmt::Debug for GrantedFolders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrantedFolders")
+            .field("roots", &self.roots)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GrantedFolders {
@@ -62,7 +96,16 @@ impl GrantedFolders {
                 "the granted-folder set is empty — the workspace root is always required",
             ));
         }
-        Ok(Self { roots })
+        Ok(Self {
+            roots,
+            denied_request: None,
+        })
+    }
+
+    /// Installs the in-chat approval hook (chainable builder).
+    pub(crate) fn with_denied_request(mut self, hook: DeniedPathRequest) -> Self {
+        self.denied_request = Some(hook);
+        self
     }
 
     /// The workspace root: the anchor for every relative path and the
@@ -75,7 +118,39 @@ impl GrantedFolders {
     /// Relative paths resolve against the workspace root; absolute paths
     /// match the longest boundary-aware root prefix. The returned path is
     /// ROOT-RELATIVE so the selected `RootedFs` re-fences it from scratch.
-    fn route(&self, path: &Path) -> HarnessResult<(&RootedFs, PathBuf)> {
+    ///
+    /// An absolute path no grant covers asks the human (the approval hook,
+    /// when installed): mid-run grants — the hook's own, a Settings grant,
+    /// or another tool's — all resolve through the same re-check inside the
+    /// approval layer without re-asking.
+    fn route(&self, path: &Path) -> HarnessResult<(RootedFs, PathBuf)> {
+        match self.route_once(path) {
+            Ok((fenced, remainder)) => Ok((fenced.clone(), remainder)),
+            Err(failure) => {
+                // Only an ABSOLUTE routing failure can be widened by a
+                // grant; a relative path escaping its root is a containment
+                // refusal, not a missing grant, and must stand.
+                if !path.is_absolute() {
+                    return Err(failure);
+                }
+                let Some(request) = self.denied_request.as_ref() else {
+                    return Err(failure);
+                };
+                match request(path) {
+                    DeniedPathResolution::Granted(fenced, remainder) => Ok((fenced, remainder)),
+                    DeniedPathResolution::Denied(reason) => {
+                        Err(self.outside_failure(path, &reason))
+                    }
+                }
+            }
+        }
+    }
+
+    /// The grant-independent routing step: longest boundary-aware prefix
+    /// match, no approval hook. The approval layer re-uses this against a
+    /// set rebuilt from the CURRENT persisted grants (it must not recurse
+    /// through its own hook).
+    fn route_once(&self, path: &Path) -> HarnessResult<(&RootedFs, PathBuf)> {
         if !path.is_absolute() {
             return Ok((&self.roots[0], path.to_path_buf()));
         }
@@ -97,23 +172,46 @@ impl GrantedFolders {
             }
         }
         best.map(|(_, fenced, remainder)| (fenced, remainder))
-            .ok_or_else(|| self.outside_failure(path))
+            .ok_or_else(|| self.outside_failure(path, ""))
+    }
+
+    /// Routes an absolute path WITHOUT the approval hook — the fresh-store
+    /// re-check inside the approval layer itself.
+    pub(crate) fn try_route_absolute(&self, path: &Path) -> Option<(RootedFs, PathBuf)> {
+        if !path.is_absolute() {
+            return None;
+        }
+        self.route_once(path)
+            .ok()
+            .map(|(fenced, remainder)| (fenced.clone(), remainder))
     }
 
     /// The honest denial for an absolute path no grant covers: names the
-    /// path and every granted root so a model can correct itself.
-    fn outside_failure(&self, path: &Path) -> Failure {
+    /// path (the message is all the model sees) and, in the details, every
+    /// granted root so the UI can show the current scope.
+    fn outside_failure(&self, path: &Path, reason: &str) -> Failure {
         let granted = self
             .roots
             .iter()
             .map(|fenced| fenced.root().display().to_string())
             .collect::<Vec<_>>()
             .join("; ");
+        let message = if reason.is_empty() {
+            format!(
+                "the path '{}' is outside every folder the user granted the agent",
+                path.display()
+            )
+        } else {
+            format!(
+                "the path '{}' is outside every folder the user granted the agent — {reason}",
+                path.display()
+            )
+        };
         Failure::new(
             inbharat_harness_core::ErrorCode::FilesystemDenied,
             FailureClass::Policy,
             "fs.route",
-            "the path is outside every folder the user granted the agent",
+            message,
         )
         .with_detail("path", path.display().to_string())
         .with_detail("granted_folders", granted)
@@ -473,5 +571,102 @@ mod tests {
     #[test]
     fn an_empty_grant_set_is_refused() {
         assert!(GrantedFolders::new(vec![]).is_err());
+    }
+
+    // -- in-chat approval hook (2026-10-03) --
+
+    /// A hook that "grants" the outside folder on first ask — the shape
+    /// `request_folder_grant` returns after a human clicks Grant.
+    #[test]
+    fn a_granted_denied_path_routes_through_the_hook() {
+        let layout = layout();
+        let folders = folders(&layout);
+        let hooked = folders.clone().with_denied_request({
+            let outside_root = RootedFs::new(&layout.outside).expect("outside fence");
+            let expected = layout.outside.join("asked.txt");
+            std::sync::Arc::new(move |path: &Path| {
+                assert_eq!(path, &expected);
+                DeniedPathResolution::Granted(outside_root.clone(), PathBuf::from("asked.txt"))
+            })
+        });
+        hooked
+            .write_text_atomic(layout.outside.join("asked.txt"), "after grant")
+            .expect("hook-granted write");
+        assert_eq!(
+            std::fs::read_to_string(layout.outside.join("asked.txt")).expect("written"),
+            "after grant"
+        );
+        // The plain denial without a hook keeps failing closed.
+        folders
+            .write_text_atomic(layout.outside.join("plain.txt"), "no")
+            .expect_err("no hook, no grant");
+        assert!(!layout.outside.join("plain.txt").exists());
+    }
+
+    #[test]
+    fn a_declined_denied_path_names_the_reason_the_model_sees() {
+        let layout = layout();
+        let folders = folders(&layout).with_denied_request(std::sync::Arc::new(|_| {
+            DeniedPathResolution::Denied("the user declined to grant the folder".to_owned())
+        }));
+        let error = folders
+            .read_text(layout.outside.join("secret.txt"))
+            .expect_err("declined");
+        assert_eq!(
+            error.code,
+            inbharat_harness_core::ErrorCode::FilesystemDenied
+        );
+        assert!(
+            error
+                .message
+                .contains("the user declined to grant the folder"),
+            "message carries the denial reason: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("secret.txt"),
+            "message names the path: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_relative_path_denial_never_asks_the_human() {
+        let layout = layout();
+        // A relative path escaping the root is a containment refusal, not a
+        // missing grant: the hook must never fire for it.
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&asked);
+        let folders = folders(&layout).with_denied_request(std::sync::Arc::new(move |_| {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            DeniedPathResolution::Denied("must not be asked".to_owned())
+        }));
+        let escaped = folders.read_text("../outside/escape.txt");
+        assert!(escaped.is_err());
+        assert!(
+            !asked.load(std::sync::atomic::Ordering::SeqCst),
+            "the hook must not fire for relative paths"
+        );
+    }
+
+    #[test]
+    fn try_route_absolute_never_fires_the_hook() {
+        let layout = layout();
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&fired);
+        let folders = folders(&layout).with_denied_request(std::sync::Arc::new(move |_| {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            DeniedPathResolution::Denied("must not be asked".to_owned())
+        }));
+        assert!(folders
+            .try_route_absolute(&layout.extra.join("x.txt"))
+            .is_some());
+        assert!(folders
+            .try_route_absolute(&layout.outside.join("x.txt"))
+            .is_none());
+        assert!(
+            !fired.load(std::sync::atomic::Ordering::SeqCst),
+            "the fresh-store re-check must not recurse through the hook"
+        );
     }
 }

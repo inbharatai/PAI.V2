@@ -187,6 +187,8 @@ fn main() {
         .manage(preview::PreviewState::default())
         // Stop control for in-flight harness runs, keyed by conversation.
         .manage(harness_bridge::HarnessRunRegistry::new())
+        // In-chat folder-grant approval cards (see harness_bridge.rs).
+        .manage(harness_bridge::PendingGrantRequests::default())
         .invoke_handler(tauri::generate_handler![
             // Vault commands
             detect_vault,
@@ -278,6 +280,8 @@ fn main() {
             harness_bridge::set_agent_workspace_root,
             harness_bridge::add_agent_folder,
             harness_bridge::remove_agent_folder,
+            harness_bridge::agent_pending_folder_grants,
+            harness_bridge::agent_respond_folder_grant,
             // Live website preview (web.preview)
             preview::preview_poll,
             preview::preview_stop,
