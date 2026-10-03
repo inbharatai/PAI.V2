@@ -7,8 +7,16 @@
 //! [`PreviewState::mirror_root`] — `%TEMP%\unoone-preview` in the app
 //! (bounded: ≤ [`MAX_FILES`] files, ≤ [`MAX_TOTAL_BYTES`] bytes, ≤
 //! [`MAX_DEPTH`] nesting, build dirs skipped), which is the only tree the
-//! asset protocol gains scope for. The
-//! frontend then creates the preview window on the mirror's entry file
+//! asset protocol gains scope for. Mirrored pages are patched with a
+//! `<base href>` pointing at their own mirror directory (see
+//! [`inject_preview_base`]) — the page URL carries the whole absolute file
+//! path as one percent-encoded segment, so a relative `src`/`href` would
+//! otherwise collapse to `asset.localhost/<relative>` and 403; with the
+//! base, every relative reference in the PAGE resolves through the asset
+//! protocol (references inside mirrored CSS subresources still do not —
+//! they resolve against the CSS file's own single-segment URL; inline
+//! `<style>` blocks are unaffected because they resolve against the page).
+//! The frontend then creates the preview window on the mirror's entry file
 //! through the proven JS path — a window built from Rust never starts its
 //! WebView2 content process (defects #40/#41, live-caught 2026-09-15), so
 //! the backend only EMITS `unoone:ensure-preview-window` with the staged
@@ -151,6 +159,12 @@ fn walk_dir(
 /// eval-ing reload), so the window never reads a half-written mirror. The
 /// root's path is stable for the whole session — that is what lets the
 /// reload be a plain `location.reload()` instead of a retarget.
+///
+/// Mirrored `.html`/`.htm` files are patched with a `<base href>` (see
+/// [`inject_preview_base`]) so the page's RELATIVE references resolve through
+/// the asset protocol — without it every relative `src`/`href` collapses to
+/// `asset.localhost/<relative>` and 403s, because the page's own URL carries
+/// the whole absolute file path as one percent-encoded segment.
 fn stage_mirror(root: &Path, files: &[SourceFile], mirror: &Path) -> Result<(), String> {
     if mirror.exists() {
         std::fs::remove_dir_all(mirror)
@@ -165,10 +179,112 @@ fn stage_mirror(root: &Path, files: &[SourceFile], mirror: &Path) -> Result<(), 
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
         }
+        if is_html(&file.rel) {
+            // Text pages get the base tag; a non-UTF-8 file with an .html
+            // extension is copied byte-for-byte instead (never a gate).
+            if let Ok(page) = std::fs::read_to_string(&source) {
+                let base_dir = dest.parent().unwrap_or(mirror);
+                let patched = inject_preview_base(&page, &preview_base_href(base_dir));
+                std::fs::write(&dest, patched)
+                    .map_err(|error| format!("cannot mirror {}: {error}", file.rel.display()))?;
+                continue;
+            }
+        }
         std::fs::copy(&source, &dest)
             .map_err(|error| format!("cannot mirror {}: {error}", file.rel.display()))?;
     }
     Ok(())
+}
+
+/// `.html`/`.htm` (ASCII case-insensitive) — the files the asset protocol
+/// renders as documents, and the only ones a `<base>` tag makes any sense in.
+fn is_html(rel: &Path) -> bool {
+    rel.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "html" | "htm"))
+}
+
+/// The asset-protocol URL of `path`, byte-for-byte the same URL the
+/// frontend's `convertFileSrc` builds for the entry page (tauri.conf.json
+/// `assetProtocol`): `http://asset.localhost/<encodeURIComponent(path)>` on
+/// Windows, `asset://localhost/<encodeURIComponent(path)>` elsewhere.
+fn asset_url(path: &Path) -> String {
+    let encoded = js_percent_encode(&path.to_string_lossy());
+    if cfg!(windows) {
+        format!("http://asset.localhost/{encoded}")
+    } else {
+        format!("asset://localhost/{encoded}")
+    }
+}
+
+/// The `<base href>` for a mirrored page's own directory. The trailing `/`
+/// is load-bearing: a base without it would make a relative reference
+/// replace the entire encoded path (whose only real `/` separates the host
+/// from it), instead of merging into the directory.
+fn preview_base_href(dir: &Path) -> String {
+    format!("{}/", asset_url(dir))
+}
+
+/// Percent-encode exactly like JavaScript's `encodeURIComponent` (every byte
+/// outside the unreserved set `A–Z a–z 0–9 - _ . ! ~ * ' ( )`), so the injected
+/// base URL matches what `convertFileSrc` produces for the same path.
+fn js_percent_encode(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')' => encoded.push(byte as char),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+/// Patch a mirrored page so its relative references resolve. The tag goes
+/// right after the `<head…>` open tag (per spec it must precede any element
+/// that carries a URL), or at the very start of a page with no `<head>`. A
+/// page that already declares its own `<base>` is copied unchanged — the
+/// author's base wins over the preview system's.
+fn inject_preview_base(page: &str, base_href: &str) -> String {
+    if page.to_ascii_lowercase().contains("<base") {
+        return page.to_owned();
+    }
+    let tag = format!("<base href=\"{base_href}\">");
+    let head_start = find_head_open_end(page);
+    match head_start {
+        Some(at) => format!("{}{}{}", &page[..at], tag, &page[at..]),
+        None => format!("{tag}{page}"),
+    }
+}
+
+/// Where the `<head>` OPEN TAG ends (`<head>`, `<head lang="en">`, `<head\n>`),
+/// or `None` when the page has no head open tag. `"<head"` alone is not a
+/// boundary — it also matches `<header>`, and the base must not land inside
+/// the body behind a page's own `<header>` element.
+fn find_head_open_end(page: &str) -> Option<usize> {
+    let lower = page.to_ascii_lowercase();
+    let mut from = 0;
+    loop {
+        let found = lower[from..].find("<head")? + from;
+        let after = lower.as_bytes().get(found + 5);
+        let is_open_tag = matches!(after, Some(b' ') | Some(b'>') | Some(b'/') | Some(b'\t') | Some(b'\n') | Some(b'\r'))
+            // End of input right after `<head` is a truncated open tag.
+            || after.is_none();
+        if is_open_tag {
+            return page[found..].find('>').map(|end| found + end + 1);
+        }
+        from = found + 5;
+    }
 }
 
 /// The active preview: which granted-folder site is being watched.
@@ -478,9 +594,10 @@ mod tests {
         // The walked site is exactly the four real files; build dirs skip.
         assert_eq!(info.file_count, 3, "index.html + style.css + assets/app.js");
         assert!(info.mirror_entry.ends_with("index.html"));
-        assert_eq!(
-            fs::read_to_string(&info.mirror_entry).expect("mirror read"),
-            "<h1>one</h1>"
+        let mirrored = fs::read_to_string(&info.mirror_entry).expect("mirror read");
+        assert!(
+            mirrored.starts_with("<base href=\"") && mirrored.contains("<h1>one</h1>"),
+            "the page carries the injected base tag and its content"
         );
         assert!(mirror.join("assets/app.js").is_file());
         assert!(
@@ -518,10 +635,15 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(30));
         fs::write(root.join("index.html"), "<h1>two</h1>").expect("edit");
         assert!(matches!(poll_once(&mut session), Ok(PollOutcome::Changed)));
-        assert_eq!(
-            fs::read_to_string(session.as_ref().expect("session").mirror_entry()).expect("mirror"),
-            "<h1>two</h1>",
+        let mirrored =
+            fs::read_to_string(session.as_ref().expect("session").mirror_entry()).expect("mirror");
+        assert!(
+            mirrored.contains("<h1>two</h1>"),
             "the re-staged mirror carries the edit"
+        );
+        assert!(
+            mirrored.starts_with("<base href=\""),
+            "the re-staged mirror still carries the base tag"
         );
         assert!(matches!(
             poll_once(&mut session),
@@ -621,5 +743,116 @@ mod tests {
         .expect_err("empty site");
         assert!(error.contains("empty"), "honest refusal: {error}");
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn js_percent_encode_matches_the_frontend_url_encoding() {
+        // Byte-for-byte what encodeURIComponent produces — the injected base
+        // must be the same URL space convertFileSrc serves the entry from.
+        assert_eq!(
+            js_percent_encode("C:\\Users\\reetu\\x y.png"),
+            "C%3A%5CUsers%5Creetu%5Cx%20y.png"
+        );
+        assert_eq!(js_percent_encode("a-b_c.d!~*'()"), "a-b_c.d!~*'()");
+        assert_eq!(js_percent_encode("héllo"), "h%C3%A9llo");
+    }
+
+    #[test]
+    fn preview_base_href_points_at_the_pages_own_directory_with_a_trailing_slash() {
+        // The trailing '/' is load-bearing: without it a relative reference
+        // would replace the entire encoded path instead of merging into it.
+        let href = preview_base_href(Path::new("C:\\Temp\\unoone-preview"));
+        assert!(href.ends_with('/'), "base must merge, not replace: {href}");
+        if cfg!(windows) {
+            assert_eq!(href, "http://asset.localhost/C%3A%5CTemp%5Cunoone-preview/");
+        } else {
+            // On Unix the path's own '/' characters encode as %2F, so the
+            // appended '/' is the merge point.
+            assert!(href.starts_with("asset://localhost/"));
+        }
+    }
+
+    #[test]
+    fn inject_preview_base_lands_after_the_head_open_tag() {
+        let page =
+            "<!DOCTYPE html><html><head lang=\"en\"><title>t</title></head><body></body></html>";
+        let patched = inject_preview_base(page, "http://asset.localhost/x%5C/");
+        assert!(
+            patched.contains("<head lang=\"en\"><base href=\"http://asset.localhost/x%5C/\">"),
+            "the base sits directly inside head, before any URL consumer: {patched}"
+        );
+        assert!(patched.ends_with("</html>"));
+    }
+
+    #[test]
+    fn inject_preview_base_prepends_when_there_is_no_head() {
+        let patched = inject_preview_base("<p>no head here</p>", "http://asset.localhost/x%5C/");
+        assert!(patched.starts_with("<base href=\"http://asset.localhost/x%5C/\"><p>"));
+    }
+
+    #[test]
+    fn inject_preview_base_respects_the_authors_own_base() {
+        let page = "<head><base href=\"https://example.com/\"></head>";
+        assert_eq!(
+            inject_preview_base(page, "http://asset.localhost/x%5C/"),
+            page
+        );
+    }
+
+    #[test]
+    fn inject_preview_base_never_lands_behind_a_header_element() {
+        // `<header>` also contains the string "<head"; the base belongs to
+        // the head open tag, not past a page's own header banner.
+        let page = "<body><header>banner</header></body>";
+        let patched = inject_preview_base(page, "http://asset.localhost/x%5C/");
+        assert!(
+            patched.starts_with("<base href="),
+            "no head tag → prepend, not the header"
+        );
+    }
+
+    #[test]
+    fn nested_pages_each_get_their_own_directory_base() {
+        let root = site();
+        fs::write(root.join("about.html"), "<p>about</p>").expect("about");
+        let mirror = mirror_root();
+        let state = PreviewState::with_mirror_root(mirror.clone());
+        start_preview(&state, &root.join("index.html")).expect("start");
+        let entry_base = fs::read_to_string(mirror.join("index.html")).expect("entry");
+        assert!(entry_base.contains(&format!("<base href=\"{}\">", preview_base_href(&mirror))));
+        fs::create_dir_all(root.join("docs")).expect("docs dir");
+        fs::write(root.join("docs/guide.html"), "<p>guide</p>").expect("guide");
+        // Force a re-stage with the new page in the walk.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let mut session = {
+            let taken = std::mem::take(&mut *state.session.lock().expect("lock"));
+            taken
+        };
+        assert!(matches!(poll_once(&mut session), Ok(PollOutcome::Changed)));
+        let guide = fs::read_to_string(mirror.join("docs/guide.html")).expect("guide mirror");
+        assert!(
+            guide.contains(&format!(
+                "<base href=\"{}\">",
+                preview_base_href(&mirror.join("docs"))
+            )),
+            "the nested page's base points at ITS directory, not the mirror root: {guide}"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&mirror);
+    }
+
+    #[test]
+    fn non_html_files_mirror_byte_for_byte() {
+        let root = site();
+        let mirror = mirror_root();
+        let state = PreviewState::with_mirror_root(mirror.clone());
+        start_preview(&state, &root.join("index.html")).expect("start");
+        assert_eq!(
+            fs::read_to_string(mirror.join("style.css")).expect("css mirror"),
+            "h1 { color: red }",
+            "only pages are patched — stylesheets copy unchanged"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&mirror);
     }
 }
