@@ -120,16 +120,31 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   through the multi-root granted-folder fence (the workspace root plus
   user-approved folders, each grant validated — absolute, existing, never a
   drive root, never inside the encrypted package — and audited as a vault
-  `AuditRecord`; revocable from Settings), `doc.create` writing real
+  `AuditRecord`; revocable from Settings; and a tool touching an ungranted
+  folder opens an **in-chat approval card** so the user can grant that folder
+  mid-run without leaving the chat — a decline or timeout hands the model the
+  honest off-limits reason, and a declined folder is never re-asked in that
+  session), `doc.create` writing real
   PDF/DOCX/MD/TXT documents through the same fence (the pure-Rust writers
   are round-trip tested against the built-in parsers, so a writer bug cannot
   pass its own reader), `process.run` with allowlisted direct-argv
   execution and 10 s foreground deadlines (background deploys supported),
   `workspace.search` (content grep) and `workspace.patch` (anchored edits),
-  `browser.act` typed browser actions over the audited WebView bridge,
+  `browser.act` typed browser actions over the audited WebView bridge
+  (sign-in buttons that open a new tab/popup work: an idempotent same-window
+  shim routes `window.open` and `target="_blank"` clicks into the current
+  window — wry/WebView2 otherwise swallows them, live-caught on Gmail's
+  Sign-in button 2026-10-03),
   `web.preview` (a live preview window of a site the agent is building,
   reloaded as the agent keeps editing — no web server anywhere), and
   `agent.spawn` sub-agents (Codex/GLM-style multi-agent lane).
+- **Prose-dump corrective retry:** when a 12B-class model answers a task
+  with a pasted fenced code block instead of tool calls (the live defect
+  the user caught 2026-10-03), the runtime issues exactly ONE bounded
+  corrective nudge telling it to re-attempt with real tool calls; a model
+  that already acted, or a chat-only run, is never corrected — opt-in via
+  `RunOptions.corrective_retries`, enabled for full-access and sub-agent
+  runs.
 - **Vision attachments:** chat can attach images through the audited
   attachment pipeline (mmproj vision), with CSP-permitted previews.
 - **Browser lane:** the agent opens and drives a real frontend-created
@@ -141,7 +156,12 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   Workspace and recorded once in the vault as an encrypted
   `BROWSER_RESEARCH` note carrying the status and its honest boundary
   (host-local, not vault-encrypted; `ClearSession` clears page storage
-  only). No cookie values or credentials are ever stored.
+  only). No cookie values or credentials are ever stored. The agent is
+  briefed to reach the user's logged-in accounts (Gmail, Notion,
+  webmail) through that persistent session — **no API keys or OAuth apps
+  anywhere** — and to never ask for or type the user's credentials: a
+  missing login is surfaced to the user to complete themselves in the
+  Browser window, then the agent continues.
 - **Live website preview (2026-10-02):** `web.preview` mirrors the site
   the agent is building into a bounded `%TEMP%\unoone-preview` tree (the
   only path the asset protocol gains scope for) and opens it in its own

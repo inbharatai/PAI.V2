@@ -880,7 +880,17 @@ fn desktop_system_prefix(full_access: bool) -> String {
              http://localhost:PORT and check the page) and report the pid in \
              your answer so the user can stop it later.\n\
              - Drive a real web browser (navigate, click, type, fill forms, screenshot) \
-             via browser.act\n\
+             via browser.act — the browser session is PERSISTENT: every \
+             browser window shares the machine's WebView2 profile, so a site \
+             the user logged into once (Gmail, Notion, Instagram, webmail) \
+             stays logged in across app restarts. Reach the user's accounts \
+             through that browser session and work on their email, notes and \
+             pages directly — NO API keys or OAuth apps are involved or ever \
+             needed. Never ask the user for their password and never type \
+             credentials for them: if a site needs a login that is not \
+             already active, tell the user to log in themselves in the \
+             Browser window, then continue once they have. Sign-in buttons \
+             that open a new tab/popup work normally.\n\
              - Create real downloadable documents (PDF, DOCX, MD, TXT) from plain \
              text via doc.create — give `filename` plus the full `content`; the \
              user can open the result immediately\n\
@@ -2841,7 +2851,10 @@ fn subagent_system_prefix() -> String {
          - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
          dotnet, go, java, cmake, make, gcc, clang, powershell)\n\
          - Deploy long-running processes with background:true on process.run\n\
-         - Drive the real web browser via browser.act\n\
+         - Drive the real web browser via browser.act — the session is \
+         PERSISTENT (the machine's WebView2 profile), so sites the user is \
+         logged into stay logged in; never ask for or type credentials, and \
+         report back if a needed login is missing so the PARENT tells the user\n\
          - Create real documents (PDF, DOCX, MD, TXT) via doc.create\n\
          - Open a live website preview via web.preview (the entry .html path)\n\
          Do the whole task yourself: create the real files, run the real \
@@ -4540,6 +4553,57 @@ mod workspace_tool_tests {
         assert!(
             parts[0] < 24 && parts[1] < 60 && parts[2] < 60,
             "invalid time {stamp}"
+        );
+    }
+
+    /// 2026-10-03 user directive: account work (email, Notion, Instagram)
+    /// rides the PERSISTENT browser session with no API keys, and the model
+    /// must never handle the user's credentials itself. The briefing must
+    /// say exactly that — an untaught boundary is an unusable lane (the
+    /// defect-#38 lesson), and a wrong claim here is a privacy defect.
+    #[test]
+    fn briefing_teaches_the_persistent_browser_session_and_credential_boundary() {
+        let prompt = desktop_system_prefix(true);
+        assert!(
+            prompt.contains("the browser session is PERSISTENT"),
+            "the briefing must teach that logins persist across restarts"
+        );
+        assert!(
+            prompt.contains("stays logged in across app restarts"),
+            "the briefing must state the persistence boundary concretely"
+        );
+        assert!(
+            prompt.contains("NO API keys or OAuth apps"),
+            "the briefing must tell the model accounts need no API"
+        );
+        assert!(
+            prompt.contains("Never ask the user for their password"),
+            "the briefing must forbid requesting credentials"
+        );
+        assert!(
+            prompt.contains("never type credentials for them"),
+            "the briefing must route logins through the human, not the model"
+        );
+        assert!(
+            !desktop_system_prefix(false).contains("PERSISTENT"),
+            "read-only mode must not claim the browser lane"
+        );
+
+        // The sub-agent inherits the same session honesty, with the added
+        // rule that it REPORTS a missing login instead of asking the user
+        // (it never talks to the user).
+        let subagent = subagent_system_prefix();
+        assert!(
+            subagent.contains("PERSISTENT"),
+            "the sub-agent briefing must state the persistent session"
+        );
+        assert!(
+            subagent.contains("never ask for or type credentials"),
+            "the sub-agent briefing must forbid credential handling"
+        );
+        assert!(
+            subagent.contains("so the PARENT tells the user"),
+            "a missing login must surface through the parent, not the child"
         );
     }
 
