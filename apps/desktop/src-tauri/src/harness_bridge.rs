@@ -3689,11 +3689,12 @@ pub async fn harness_chat(
             None
         };
         let mut builder = if let Some(folders) = workspace_fs.clone() {
-            let broker = GrantedFolderBroker::new(
+            let broker = GrantedFolderBroker::with_process_lease(
                 folders,
                 FULL_ACCESS_PROGRAMS
                     .iter()
                     .map(|program| (*program).to_owned()),
+                process_lease.clone(),
             );
             HarnessBuilder::embedded(Arc::new(broker))
                 .map_err(|error| error.to_string())?
@@ -3977,6 +3978,17 @@ mod grant_approval_tests {
     }
 
     #[test]
+    fn lock_denies_and_removes_every_pending_card() {
+        let requests = PendingGrantRequests::default();
+        let (_, a) = requests.insert("p".into(), "f".into());
+        let (_, b) = requests.insert("q".into(), "g".into());
+        requests.deny_all();
+        assert!(requests.snapshot().is_empty());
+        assert_eq!(*a.0.lock().unwrap(), Some(false));
+        assert_eq!(*b.0.lock().unwrap(), Some(false));
+    }
+
+    #[test]
     fn an_answered_card_wakes_exactly_once() {
         let requests = PendingGrantRequests::default();
         let (id, decision) = requests.insert("p".to_owned(), "f".to_owned());
@@ -4067,6 +4079,18 @@ mod run_registry_tests {
         assert!(!second.is_cancelled());
         assert!(registry.stop("conv-3"));
         assert_eq!(second.cause(), Some(CancelCause::User));
+    }
+
+    #[test]
+    fn lock_cancels_and_removes_every_conversation() {
+        let registry = HarnessRunRegistry::new();
+        let a = CancellationToken::new();
+        let b = CancellationToken::new();
+        registry.register("a", a.clone());
+        registry.register("b", b.clone());
+        registry.stop_all();
+        assert!(a.is_cancelled() && b.is_cancelled());
+        assert!(!registry.stop("a") && !registry.stop("b"));
     }
 
     #[test]

@@ -502,4 +502,58 @@ mod tests {
         assert_eq!(out.stdout.len() + out.stderr.len(), 2);
         assert!(out.truncated);
     }
+
+    fn long_command() -> ProcessSpec {
+        if cfg!(windows) {
+            ProcessSpec::new("cmd", vec!["/C".into(), "ping -n 30 127.0.0.1 >NUL".into()])
+        } else {
+            ProcessSpec::new("sh", vec!["-c".into(), "sleep 30 & wait".into()])
+        }
+    }
+
+    #[test]
+    fn deadline_terminates_the_tree_and_releases_ownership() {
+        let state = DesktopProcessState::default();
+        state.set_enabled(true);
+        let started = Instant::now();
+        let spec = long_command().with_timeout(Duration::from_millis(30));
+        assert!(broker(&state)
+            .run_process(&spec, &CancellationToken::new())
+            .is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(state.status().owned_processes, 0);
+    }
+
+    #[test]
+    fn cancellation_terminates_the_tree_and_releases_ownership() {
+        let state = DesktopProcessState::default();
+        state.set_enabled(true);
+        let cancel = CancellationToken::new();
+        let signal = cancel.clone();
+        let thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            signal.cancel(inbharat_harness_core::CancelCause::User);
+        });
+        let started = Instant::now();
+        assert!(broker(&state)
+            .run_process(&long_command(), &cancel)
+            .is_err());
+        thread.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(state.status().owned_processes, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn revoke_terminates_a_windows_background_job() {
+        let state = DesktopProcessState::default();
+        state.set_enabled(true);
+        broker(&state)
+            .spawn_detached(&long_command(), &CancellationToken::new())
+            .unwrap();
+        let owned = Arc::clone(&state.0.lock().unwrap().processes[0]);
+        state.set_enabled(false);
+        assert!(owned.lock().unwrap().child.try_wait().unwrap().is_some());
+        assert_eq!(state.status().owned_processes, 0);
+    }
 }

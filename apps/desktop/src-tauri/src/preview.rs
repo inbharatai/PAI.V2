@@ -454,6 +454,22 @@ mod tests {
     }
 
     #[test]
+    fn locked_preview_cannot_restage_until_unlock() {
+        let root = site();
+        let mirror = mirror_root();
+        let state = PreviewState::with_mirror_root(mirror.clone());
+        state
+            .blocked
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(start_preview(&state, &root.join("index.html")).is_err());
+        assert!(!mirror.exists());
+        state.resume();
+        assert!(start_preview(&state, &root.join("index.html")).is_ok());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(mirror);
+    }
+
+    #[test]
     fn start_preview_mirrors_the_site_and_stores_the_session() {
         let root = site();
         let mirror = mirror_root();

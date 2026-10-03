@@ -819,7 +819,10 @@ impl ModelManager {
                         .find(|asset| {
                             asset.kind == unoone_usb_manifest::AssetKind::Mmproj
                                 && tier.is_some()
-                                && crate::desktop_model_policy::tier(&asset.id) == tier
+                                && crate::desktop_model_policy::tier(&format!(
+                                    "{} {}",
+                                    asset.id, asset.path
+                                )) == tier
                         })
                         .map(|asset| {
                             PathBuf::from(vault_root)
@@ -2396,6 +2399,74 @@ mod tests {
         assert_eq!(manager.get_status(), ModelStatus::Error);
     }
 
+    #[test]
+    fn cancelled_hash_never_reads_model_bytes() {
+        let cancel = inbharat_harness_core::CancellationToken::new();
+        cancel.cancel(inbharat_harness_core::CancelCause::User);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(
+            ModelManager::sha256_file_cancellable(file.path(), Some(&cancel))
+                .unwrap_err()
+                .contains("cancelled")
+        );
+    }
+
+    #[test]
+    fn desktop_discovery_and_selection_keep_tiers_and_projectors_separate() {
+        let root = tempfile::tempdir().unwrap();
+        let mut assets = Vec::new();
+        for (id, size) in [
+            ("gemma-4-12b", 7 * 1073741824_u64),
+            ("gemma-4-e4b", 3 * 1073741824),
+            ("gemma-4-e2b", 1610612736),
+        ] {
+            let path = format!("models/{id}.gguf");
+            std::fs::create_dir_all(root.path().join("models")).unwrap();
+            std::fs::File::create(root.path().join(&path))
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+            assets.push(serde_json::json!({"id": id, "kind": "MODEL", "path": path, "size_bytes": size, "sha256": "a".repeat(64)}));
+        }
+        let projector = "models/mmproj-gemma-4-12b.gguf";
+        std::fs::write(root.path().join(projector), b"projection").unwrap();
+        assets.push(serde_json::json!({"id": "vision-projector", "kind": "MMPROJ", "path": projector, "size_bytes": 10, "sha256": "b".repeat(64)}));
+        let manifest = serde_json::json!({
+            "product_id": "test", "schema_version": 1, "pai_version": "0.1.0",
+            "vault": {"id_path": "VAULT/id"},
+            "platforms": {"windows": {"architectures": ["x86_64"],
+            "desktop": {"id": "desktop", "kind": "DESKTOP_EXECUTABLE", "path": "desktop.exe", "size_bytes": 1, "sha256": "c".repeat(64)}, "models": assets}}
+        });
+        std::fs::write(
+            root.path().join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let root = root.path().to_str().unwrap();
+        let models = ModelManager::new().find_models(root);
+        assert_eq!(models.len(), 3);
+        assert!(models.iter().all(|model| model.available));
+        assert!(models[0].mmproj_path.is_some());
+        assert!(models[1].mmproj_path.is_none() && models[2].mmproj_path.is_none());
+        assert_eq!(models[1].model_type, "gemma-4-e4b");
+        assert_eq!(
+            select_model_for_memory(root, 16.0, 12.0)
+                .unwrap()
+                .model
+                .name,
+            "gemma-4-12b"
+        );
+        assert_eq!(
+            select_model_for_memory(root, 8.0, 6.0).unwrap().model.name,
+            "gemma-4-e4b"
+        );
+        assert_eq!(
+            select_model_for_memory(root, 4.0, 3.9).unwrap().model.name,
+            "gemma-4-e2b"
+        );
+        assert!(select_model_for_memory(root, 32.0, 3.0).is_err());
+    }
+
     // --- Host-disk model cache -------------------------------------------------
 
     fn write_cache_test_manifest(vault_dir: &std::path::Path, sha256: Option<&str>) {
@@ -2690,27 +2761,40 @@ pub fn select_desktop_model(vault_root: String) -> Result<DesktopModelSelection,
     serde_json::from_str::<unoone_usb_manifest::PocketManifest>(&manifest)
         .map_err(|_| "Desktop boot requires the current Pocket AI manifest".to_owned())?;
     let (total, available) = available_memory()?;
-    let mut models = ModelManager::new().find_models(&vault_root);
+    select_model_for_memory(&vault_root, total, available)
+}
+
+fn select_model_for_memory(
+    vault_root: &str,
+    total: f64,
+    available: f64,
+) -> Result<DesktopModelSelection, String> {
+    let mut models = ModelManager::new().find_models(vault_root);
     models.retain(|model| {
         model.available && crate::desktop_model_policy::tier(&model.name).is_some()
     });
     models.sort_by_key(|model| std::cmp::Reverse(crate::desktop_model_policy::tier(&model.name)));
     for model in models {
-        // Start with a bounded context; longer context remains an explicit choice
-        // in Model Manager and passes the same admission check at launch.
-        let mut config = get_model_config();
-        config.context_size = 4096;
-        config.model_path = model.path.clone();
-        config.mmproj_path = model.mmproj_path.clone();
-        if admit_model(&model, &config, total, available) {
-            return Ok(DesktopModelSelection {
-                reason: format!(
-                    "{} selected with {:.1} GiB available RAM and a 4096-token context",
-                    model.name, available
-                ),
-                model,
-                config,
-            });
+        let defaults = get_model_config();
+        let mut contexts = vec![defaults.context_size, 16384, 8192, 4096];
+        contexts.retain(|context| *context <= defaults.context_size);
+        contexts.sort_unstable_by(|a, b| b.cmp(a));
+        contexts.dedup();
+        for context_size in contexts {
+            let mut config = defaults.clone();
+            config.context_size = context_size;
+            config.model_path = model.path.clone();
+            config.mmproj_path = model.mmproj_path.clone();
+            if admit_model(&model, &config, total, available) {
+                return Ok(DesktopModelSelection {
+                    reason: format!(
+                        "{} selected with {:.1} GiB available RAM and a {}-token requested context",
+                        model.name, available, context_size
+                    ),
+                    model,
+                    config,
+                });
+            }
         }
     }
     Err(format!("No declared desktop model fits the current {:.1} GiB available RAM budget. Close other apps or stage a qualified smaller model in the package.", available))
