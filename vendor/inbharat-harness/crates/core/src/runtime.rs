@@ -79,6 +79,12 @@ pub struct RunOptions {
     pub trajectory: TrajectoryMode,
     pub budget: Option<BudgetLimits>,
     pub recovery_attempts: u32,
+    /// How many times a completion that made ZERO tool calls but pasted
+    /// fenced code (the "prose dump" failure: long instructions come back
+    /// as prose instead of actions) is corrected with one nudge message
+    /// before its text is accepted as the run output. 0 disables the
+    /// corrective retry — the default, so other consumers are unchanged.
+    pub corrective_retries: u32,
     pub attachments: Vec<AttachmentMetadata>,
     pub memory: MemoryOptions,
 }
@@ -94,6 +100,7 @@ impl Default for RunOptions {
             trajectory: TrajectoryMode::Standard,
             budget: None,
             recovery_attempts: 2,
+            corrective_retries: 0,
             attachments: Vec::new(),
             memory: MemoryOptions::default(),
         }
@@ -110,6 +117,25 @@ pub struct RunOutcome {
     pub tool_calls: u32,
     pub event_count: usize,
     pub elapsed: Duration,
+}
+
+/// The corrective nudge appended after a prose-dump completion: the model
+/// pasted code instead of calling its tools. Kept as one message so every
+/// consumer of the vendored harness corrects identically.
+const CORRECTIVE_RETRY_MESSAGE: &str = "Your reply contains code as text, but you made no tool \
+     calls. Do not paste code — USE THE TOOLS: call them to read, write, \
+     create and run for real. Re-attempt the task now with actual tool \
+     calls instead of describing or pasting the result.";
+
+/// Whether a completion is a "prose dump": at least one complete fenced
+/// code block (an opening and a closing ``` line). A single stray fence is
+/// not enough — the point is code pasted INSTEAD of actions, which needs a
+/// whole block.
+fn contains_fenced_code(text: &str) -> bool {
+    text.lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count()
+        >= 2
 }
 
 /// Builder for explicit provider wiring.
@@ -691,6 +717,12 @@ impl Harness {
         }
         let memory_context = self.build_memory_context(prompt, options)?;
         let mut final_output = String::new();
+        // Prose-dump corrective retry bookkeeping (2026-10-03): how many
+        // corrective nudges this run spent, and whether ANY tool call has
+        // happened yet — a model that already acted and then answers with
+        // prose (e.g. the user asked to see code) is NOT corrected.
+        let mut corrective_used = 0_u32;
+        let mut acted_with_tools = false;
         let mut logical_step = 1_u32;
         while logical_step <= max_steps {
             cancel.check("agent.loop")?;
@@ -714,6 +746,11 @@ impl Harness {
                 };
                 let tool_ids: Vec<String> =
                     model_tools.iter().map(|tool| tool.id.clone()).collect();
+                // Whether this step even offered tools — the prose-dump
+                // corrective retry only fires when the model HAD tools to
+                // call and called none (captured here because `model_tools`
+                // moves into the request below).
+                let tools_offered = !model_tools.is_empty();
                 let system = system_prompt_with_memory(
                     &self.system_prefix,
                     decision.level,
@@ -813,6 +850,7 @@ impl Harness {
                             }
                         }
                         if response.finish == FinishReason::ToolCalls {
+                            acted_with_tools = true;
                             if streamed_calls.is_empty() {
                                 return Err(Failure::new(
                                     ErrorCode::ProviderFailed,
@@ -969,6 +1007,39 @@ impl Harness {
                             })?;
                             logical_step = logical_step.saturating_add(1);
                             break;
+                        }
+                        // Prose-dump corrective retry (2026-10-03): a
+                        // completion that made ZERO tool calls all run but
+                        // pastes a whole fenced code block — the "long
+                        // instructions come back as prose instead of
+                        // actions" failure, live-caught with the 12B — gets
+                        // one corrective nudge (opt-in via
+                        // `RunOptions::corrective_retries`) instead of being
+                        // returned as if the task was done. The pasted prose
+                        // stays in the model history, so the retry answers
+                        // the same nudge instead of repeating the dump.
+                        // Budget-honest: the retry consumes no extra step
+                        // (same contract as transport recovery attempts).
+                        if options.corrective_retries > corrective_used
+                            && !acted_with_tools
+                            && streamed_calls.is_empty()
+                            && tools_offered
+                            && contains_fenced_code(&response.text)
+                        {
+                            corrective_used = corrective_used.saturating_add(1);
+                            messages.push(ModelMessage {
+                                role: ModelRole::Assistant,
+                                content: response.text.clone(),
+                            });
+                            messages.push(ModelMessage {
+                                role: ModelRole::User,
+                                content: CORRECTIVE_RETRY_MESSAGE.to_owned(),
+                            });
+                            session.append(EventData::StepEnd {
+                                reason: "prose_corrective_retry".to_owned(),
+                            })?;
+                            attempt = attempt.saturating_add(1);
+                            continue;
                         }
                         final_output = response.text;
                         session.append(EventData::AssistantMessage {
@@ -1677,6 +1748,22 @@ fn finish_name(reason: FinishReason) -> &'static str {
 mod tests {
     use super::*;
     use crate::providers::{InMemoryMemoryProvider, ModelResponse};
+
+    /// Prose-dump detection (2026-10-03): the "long instructions come back
+    /// as prose instead of actions" failure is a COMPLETE fenced code block
+    /// pasted with zero tool calls.
+    #[test]
+    fn fenced_code_detection_requires_a_whole_block() {
+        assert!(contains_fenced_code(
+            "Here it is:\n```rust\nfn main() {}\n```\n"
+        ));
+        // A single stray fence is not a prose dump.
+        assert!(!contains_fenced_code("```\n"));
+        // Plain prose is never a prose dump.
+        assert!(!contains_fenced_code("All done, the file is written."));
+        // Indented fences still count (models indent fences inside lists).
+        assert!(contains_fenced_code("  ```js\n  x()\n  ```"));
+    }
 
     /// Live-caught 2026-09-12: the desktop full-access lane (L3 autonomous
     /// coding sessions) now runs at the VALIDATOR CEILING in every dimension

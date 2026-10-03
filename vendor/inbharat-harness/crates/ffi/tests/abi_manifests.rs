@@ -36,8 +36,8 @@ fn string_array(value: &Value, what: &str) -> Result<Vec<String>, String> {
 }
 
 fn manifest_symbols(manifest: &str, name: &str) -> Result<Vec<String>, String> {
-    let parsed =
-        Value::parse_json(manifest).map_err(|message| format!("{name} is not valid bounded JSON: {message}"))?;
+    let parsed = Value::parse_json(manifest)
+        .map_err(|message| format!("{name} is not valid bounded JSON: {message}"))?;
     let object = parsed
         .as_object()
         .ok_or_else(|| format!("{name} root is not an object"))?;

@@ -107,10 +107,7 @@ extern "C" fn loop_model_stream(
     IB_STATUS_OK
 }
 
-extern "C" fn loop_tool_validate(
-    _user_data: *mut c_void,
-    _arguments_json: IbByteSpanV1,
-) -> i32 {
+extern "C" fn loop_tool_validate(_user_data: *mut c_void, _arguments_json: IbByteSpanV1) -> i32 {
     IB_STATUS_OK
 }
 
@@ -190,12 +187,20 @@ extern "C" fn loop_permission_authorize(
 
 extern "C" fn destroy_counter_model(user_data: *mut c_void) {
     // SAFETY: user_data is the live LoopState for this test.
-    unsafe { (*(user_data.cast::<LoopState>())).destroy_model.fetch_add(1, Ordering::SeqCst) };
+    unsafe {
+        (*(user_data.cast::<LoopState>()))
+            .destroy_model
+            .fetch_add(1, Ordering::SeqCst)
+    };
 }
 
 extern "C" fn destroy_counter_tool(user_data: *mut c_void) {
     // SAFETY: as above.
-    unsafe { (*(user_data.cast::<LoopState>())).destroy_tool.fetch_add(1, Ordering::SeqCst) };
+    unsafe {
+        (*(user_data.cast::<LoopState>()))
+            .destroy_tool
+            .fetch_add(1, Ordering::SeqCst)
+    };
 }
 
 extern "C" fn destroy_counter_permission(user_data: *mut c_void) {
@@ -209,7 +214,11 @@ extern "C" fn destroy_counter_permission(user_data: *mut c_void) {
 
 extern "C" fn destroy_counter_memory(user_data: *mut c_void) {
     // SAFETY: as above.
-    unsafe { (*(user_data.cast::<LoopState>())).destroy_memory.fetch_add(1, Ordering::SeqCst) };
+    unsafe {
+        (*(user_data.cast::<LoopState>()))
+            .destroy_memory
+            .fetch_add(1, Ordering::SeqCst)
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -280,11 +289,7 @@ extern "C" fn loop_memory_store(user_data: *mut c_void, record_json: IbByteSpanV
         .map(str::to_owned);
     match id {
         Some(id) => {
-            state
-                .memory_records
-                .lock()
-                .unwrap()
-                .insert(id, record);
+            state.memory_records.lock().unwrap().insert(id, record);
             IB_STATUS_OK
         }
         None => IB_STATUS_INVALID_ARGUMENT,
@@ -347,8 +352,12 @@ fn tool_dto(state: &LoopState) -> IbToolV2 {
         id: span_of("c.echo"),
         version: span_of("1.0.0"),
         description: span_of("Echoes the text argument (C-registered test tool)"),
-        input_schema: span_of(r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#),
-        output_schema: span_of(r#"{"type":"object","properties":{"heard":{"type":"string"}},"additionalProperties":false}"#),
+        input_schema: span_of(
+            r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#,
+        ),
+        output_schema: span_of(
+            r#"{"type":"object","properties":{"heard":{"type":"string"}},"additionalProperties":false}"#,
+        ),
         // Model (bit 0) + FileRead (bit 1).
         required_capabilities: 0b11,
         supported_levels: 0b1111,
@@ -421,19 +430,37 @@ fn registered_c_vtables_drive_one_l1_tool_loop_and_return_a_verifiable_ledger() 
     let config = config_v2(".");
     let mut builder = ptr::null_mut();
     // SAFETY: valid size-tagged pointers for the duration of each call.
-    assert_eq!(unsafe { ib_harness_builder_create_v2(&config, &mut builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_create_v2(&config, &mut builder) },
+        IB_STATUS_OK
+    );
     let provider = model_provider_dto(&state);
     let tool = tool_dto(&state);
     let permission = permission_dto(&state);
     let memory = memory_dto(&state);
     // SAFETY: the builder handle and DTOs are valid for each call.
-    assert_eq!(unsafe { ib_harness_builder_register_model_v2(builder, &provider) }, IB_STATUS_OK);
-    assert_eq!(unsafe { ib_harness_builder_register_tool_v2(builder, &tool) }, IB_STATUS_OK);
-    assert_eq!(unsafe { ib_harness_builder_register_permission_v2(builder, &permission) }, IB_STATUS_OK);
-    assert_eq!(unsafe { ib_harness_builder_register_memory_v2(builder, &memory) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_register_model_v2(builder, &provider) },
+        IB_STATUS_OK
+    );
+    assert_eq!(
+        unsafe { ib_harness_builder_register_tool_v2(builder, &tool) },
+        IB_STATUS_OK
+    );
+    assert_eq!(
+        unsafe { ib_harness_builder_register_permission_v2(builder, &permission) },
+        IB_STATUS_OK
+    );
+    assert_eq!(
+        unsafe { ib_harness_builder_register_memory_v2(builder, &memory) },
+        IB_STATUS_OK
+    );
     let mut harness = ptr::null_mut();
     // SAFETY: the builder is consumed by build.
-    assert_eq!(unsafe { ib_harness_builder_build_v2(builder, &mut harness) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_build_v2(builder, &mut harness) },
+        IB_STATUS_OK
+    );
     assert!(!harness.is_null());
 
     let mut output = IbOwnedBytesV1::default();
@@ -477,22 +504,32 @@ fn registered_c_vtables_drive_one_l1_tool_loop_and_return_a_verifiable_ledger() 
     for line in &lines {
         let event = Value::parse_json(line).expect("every ledger line is canonical JSON");
         let object = event.as_object().expect("ledger lines are objects");
-        assert!(object.contains_key("chain"), "the hash chain travels with each event");
+        assert!(
+            object.contains_key("chain"),
+            "the hash chain travels with each event"
+        );
         assert!(object.contains_key("seq"));
         assert!(object.contains_key("type"));
     }
     assert!(
-        lines.iter().any(|line| line.contains("\"type\":\"tool.call\"")),
+        lines
+            .iter()
+            .any(|line| line.contains("\"type\":\"tool.call\"")),
         "the dispatched C tool call is audited"
     );
     assert!(
-        lines.iter().any(|line| line.contains("\"type\":\"tool.result\"")),
+        lines
+            .iter()
+            .any(|line| line.contains("\"type\":\"tool.result\"")),
         "the C tool result is audited"
     );
 
     // Destroying the harness releases the registrations exactly once each.
     // SAFETY: the harness handle was built by build_v2 and is destroyed once.
-    assert_eq!(unsafe { crate::ib_harness_destroy_v1(harness) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { crate::ib_harness_destroy_v1(harness) },
+        IB_STATUS_OK
+    );
     assert_eq!(state.destroy_model.load(Ordering::SeqCst), 1);
     assert_eq!(state.destroy_tool.load(Ordering::SeqCst), 1);
     assert_eq!(state.destroy_permission.load(Ordering::SeqCst), 1);
@@ -506,10 +543,16 @@ fn v2_build_fails_closed_without_a_registered_model_but_routes() {
     let config = config_v2(".");
     let mut builder = ptr::null_mut();
     // SAFETY: valid size-tagged pointers for the call.
-    assert_eq!(unsafe { ib_harness_builder_create_v2(&config, &mut builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_create_v2(&config, &mut builder) },
+        IB_STATUS_OK
+    );
     let mut harness = ptr::null_mut();
     // SAFETY: the builder is consumed by build.
-    assert_eq!(unsafe { ib_harness_builder_build_v2(builder, &mut harness) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_build_v2(builder, &mut harness) },
+        IB_STATUS_OK
+    );
     // The handle is v1-compatible: pure routing works on it.
     let mut level = 255_u8;
     // SAFETY: handle and output pointer are live.
@@ -537,7 +580,10 @@ fn v2_build_fails_closed_without_a_registered_model_but_routes() {
     assert_eq!(status, IB_STATUS_UNAVAILABLE);
     assert!(output.data.is_null());
     // SAFETY: the harness handle is destroyed exactly once.
-    assert_eq!(unsafe { crate::ib_harness_destroy_v1(harness) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { crate::ib_harness_destroy_v1(harness) },
+        IB_STATUS_OK
+    );
 }
 
 /// A duplicate registration is rejected, consumes the builder (core contract),
@@ -549,23 +595,42 @@ fn duplicate_model_registration_is_rejected_and_consumes_the_builder() {
     let config = config_v2(".");
     let mut builder = ptr::null_mut();
     // SAFETY: valid size-tagged pointers for the call.
-    assert_eq!(unsafe { ib_harness_builder_create_v2(&config, &mut builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_create_v2(&config, &mut builder) },
+        IB_STATUS_OK
+    );
     let provider = model_provider_dto(&state);
     // SAFETY: the builder handle and DTO are valid for each call.
-    assert_eq!(unsafe { ib_harness_builder_register_model_v2(builder, &provider) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_register_model_v2(builder, &provider) },
+        IB_STATUS_OK
+    );
     let duplicate = model_provider_dto(&state);
     let rejected = unsafe { ib_harness_builder_register_model_v2(builder, &duplicate) };
-    assert_eq!(rejected, IB_STATUS_OPERATION_FAILED, "a duplicate id is a conflict");
+    assert_eq!(
+        rejected, IB_STATUS_OPERATION_FAILED,
+        "a duplicate id is a conflict"
+    );
     // The rejected adapter is released, AND the consumed builder releases its
     // earlier successful registration (core contract: register_model consumes
     // the builder on error) — two destroys, both through the same counter.
-    assert_eq!(state.destroy_model.load(Ordering::SeqCst), 2, "the rejected adapter and the consumed builder's earlier registration are both released");
+    assert_eq!(
+        state.destroy_model.load(Ordering::SeqCst),
+        2,
+        "the rejected adapter and the consumed builder's earlier registration are both released"
+    );
     // The builder is consumed: any later registration is invalid-argument.
     let tool = tool_dto(&state);
     // SAFETY: the (dead) builder handle and DTO are valid pointers.
-    assert_eq!(unsafe { ib_harness_builder_register_tool_v2(builder, &tool) }, IB_STATUS_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { ib_harness_builder_register_tool_v2(builder, &tool) },
+        IB_STATUS_INVALID_ARGUMENT
+    );
     // SAFETY: the handle is still destroyed exactly once.
-    assert_eq!(unsafe { ib_harness_builder_destroy_v2(builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_destroy_v2(builder) },
+        IB_STATUS_OK
+    );
 }
 
 /// Argument validation happens BEFORE the builder is taken: a too-small size
@@ -576,7 +641,10 @@ fn bad_size_tag_is_rejected_without_consuming_the_builder() {
     let config = config_v2(".");
     let mut builder = ptr::null_mut();
     // SAFETY: valid size-tagged pointers for the call.
-    assert_eq!(unsafe { ib_harness_builder_create_v2(&config, &mut builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_create_v2(&config, &mut builder) },
+        IB_STATUS_OK
+    );
     let mut provider = model_provider_dto(&state);
     provider.struct_size = 4; // far too small
     // SAFETY: the DTO pointer is valid; its size tag is the value under test.
@@ -584,13 +652,23 @@ fn bad_size_tag_is_rejected_without_consuming_the_builder() {
         unsafe { ib_harness_builder_register_model_v2(builder, &provider) },
         IB_STATUS_INVALID_ARGUMENT
     );
-    assert_eq!(state.destroy_model.load(Ordering::SeqCst), 0, "nothing was registered");
+    assert_eq!(
+        state.destroy_model.load(Ordering::SeqCst),
+        0,
+        "nothing was registered"
+    );
     // The builder still works: a valid registration succeeds afterwards.
     let good = model_provider_dto(&state);
     // SAFETY: the builder handle and DTO are valid for the call.
-    assert_eq!(unsafe { ib_harness_builder_register_model_v2(builder, &good) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_register_model_v2(builder, &good) },
+        IB_STATUS_OK
+    );
     // SAFETY: the handle is destroyed exactly once.
-    assert_eq!(unsafe { ib_harness_builder_destroy_v2(builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_destroy_v2(builder) },
+        IB_STATUS_OK
+    );
     // Abandoning without build releases the registration.
     assert_eq!(state.destroy_model.load(Ordering::SeqCst), 1);
 }
@@ -602,18 +680,33 @@ fn pre_cancelled_run_v2_reports_cancelled() {
     let config = config_v2(".");
     let mut builder = ptr::null_mut();
     // SAFETY: valid size-tagged pointers for the call.
-    assert_eq!(unsafe { ib_harness_builder_create_v2(&config, &mut builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_create_v2(&config, &mut builder) },
+        IB_STATUS_OK
+    );
     let provider = model_provider_dto(&state);
     // SAFETY: the builder handle and DTO are valid for the call.
-    assert_eq!(unsafe { ib_harness_builder_register_model_v2(builder, &provider) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_register_model_v2(builder, &provider) },
+        IB_STATUS_OK
+    );
     let mut harness = ptr::null_mut();
     // SAFETY: the builder is consumed by build.
-    assert_eq!(unsafe { ib_harness_builder_build_v2(builder, &mut harness) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_build_v2(builder, &mut harness) },
+        IB_STATUS_OK
+    );
     let mut cancellation = ptr::null_mut();
     // SAFETY: the output pointer receives one owned cancellation handle.
-    assert_eq!(unsafe { crate::ib_harness_cancel_create_v1(&mut cancellation) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { crate::ib_harness_cancel_create_v1(&mut cancellation) },
+        IB_STATUS_OK
+    );
     // SAFETY: the cancellation handle is live.
-    assert_eq!(unsafe { crate::ib_harness_cancel_request_v1(cancellation, 0) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { crate::ib_harness_cancel_request_v1(cancellation, 0) },
+        IB_STATUS_OK
+    );
     // The C side can poll the same token through the v2 helper.
     // SAFETY: the cancellation handle is live.
     assert_eq!(unsafe { ib_harness_cancel_requested_v2(cancellation) }, 1);
@@ -634,10 +727,20 @@ fn pre_cancelled_run_v2_reports_cancelled() {
     };
     assert_eq!(status, IB_STATUS_CANCELLED);
     assert!(output.data.is_null());
-    assert_eq!(state.model_calls.load(Ordering::SeqCst), 0, "the model was never called");
+    assert_eq!(
+        state.model_calls.load(Ordering::SeqCst),
+        0,
+        "the model was never called"
+    );
     // SAFETY: both handles are destroyed exactly once.
-    assert_eq!(unsafe { crate::ib_harness_cancel_destroy_v1(cancellation) }, IB_STATUS_OK);
-    assert_eq!(unsafe { crate::ib_harness_destroy_v1(harness) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { crate::ib_harness_cancel_destroy_v1(cancellation) },
+        IB_STATUS_OK
+    );
+    assert_eq!(
+        unsafe { crate::ib_harness_destroy_v1(harness) },
+        IB_STATUS_OK
+    );
 }
 
 /// A stale or type-confused builder pointer is rejected by the magic tag
@@ -647,17 +750,26 @@ fn stale_builder_handle_is_rejected_by_magic_tag() {
     let config = config_v2(".");
     let mut builder = ptr::null_mut();
     // SAFETY: valid size-tagged pointers for the call.
-    assert_eq!(unsafe { ib_harness_builder_create_v2(&config, &mut builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_create_v2(&config, &mut builder) },
+        IB_STATUS_OK
+    );
     // Corrupt the tag, as a stale/foreign pointer would have.
     // SAFETY: builder is a live owned handle; only the tag is rewritten.
     unsafe { (*builder).magic = 0 };
     // SAFETY: the pointer is valid; the tag check is the value under test.
-    assert_eq!(unsafe { ib_harness_builder_destroy_v2(builder) }, IB_STATUS_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { ib_harness_builder_destroy_v2(builder) },
+        IB_STATUS_INVALID_ARGUMENT
+    );
     // Restore and destroy exactly once.
     // SAFETY: builder is still the live owned handle.
     unsafe { (*builder).magic = BUILDER_HANDLE_MAGIC };
     // SAFETY: the handle is destroyed exactly once.
-    assert_eq!(unsafe { ib_harness_builder_destroy_v2(builder) }, IB_STATUS_OK);
+    assert_eq!(
+        unsafe { ib_harness_builder_destroy_v2(builder) },
+        IB_STATUS_OK
+    );
 }
 
 /// The C memory adapter round-trips records through the vtable with the
@@ -703,7 +815,10 @@ fn c_memory_vtable_round_trips_through_the_core_trait() {
     let missing = adapter
         .retrieve(MemoryScope::Preferences, "vault", "missing")
         .expect("retrieve of a missing id is not an error");
-    assert!(missing.is_none(), "not found is an empty span, not an error");
+    assert!(
+        missing.is_none(),
+        "not found is an empty span, not an error"
+    );
     // Search returns the empty array through the JSON boundary.
     let query = MemoryQuery {
         scope: MemoryScope::Preferences,
@@ -714,12 +829,20 @@ fn c_memory_vtable_round_trips_through_the_core_trait() {
     let results = adapter.search(&query).expect("search must succeed");
     assert!(results.is_empty(), "the stub returns no matches");
     // Delete reports what existed.
-    assert!(adapter
-        .delete(MemoryScope::Preferences, "vault", "pref-1")
-        .expect("delete must succeed"));
-    assert!(!adapter
-        .delete(MemoryScope::Preferences, "vault", "pref-1")
-        .expect("second delete must succeed"));
+    assert!(
+        adapter
+            .delete(MemoryScope::Preferences, "vault", "pref-1")
+            .expect("delete must succeed")
+    );
+    assert!(
+        !adapter
+            .delete(MemoryScope::Preferences, "vault", "pref-1")
+            .expect("second delete must succeed")
+    );
     drop(adapter);
-    assert_eq!(state.destroy_memory.load(Ordering::SeqCst), 1, "destroy fired once on drop");
+    assert_eq!(
+        state.destroy_memory.load(Ordering::SeqCst),
+        1,
+        "destroy fired once on drop"
+    );
 }

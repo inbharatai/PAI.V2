@@ -3066,6 +3066,10 @@ impl PaiSubagentProvider {
             },
             explicit_level: Some(ExecutionLevel::L3),
             budget: Some(subagent_budget(remaining_depth)),
+            // Sub-agents are pure act-and-report workers (they never talk
+            // to the user), so the prose-dump corrective retry applies
+            // fully here too.
+            corrective_retries: 1,
             ..RunOptions::default()
         };
         let (outcome, _session) = harness.run(&request.prompt, &options, cancel)?;
@@ -3716,6 +3720,13 @@ pub async fn harness_chat(
             // hours of wall time, 64 MiB of accumulated tool output.
             options.explicit_level = Some(ExecutionLevel::L3);
             options.budget = Some(full_access_budget());
+            // Prose-dump corrective retry (2026-10-03): complex multi-step
+            // tasks on the local 12B could come back as pasted code
+            // instead of tool calls. ONE corrective nudge per run, then
+            // the model's text stands — chat-only runs keep the default
+            // (off) so a plain "show me code" answer is never second-
+            // guessed.
+            options.corrective_retries = 1;
         }
         // `cancel` is the run token registered by the caller before this
         // worker started — the UI Stop control cancels it from outside.
@@ -4142,6 +4153,240 @@ mod workspace_tool_tests {
             budget.max_steps, 10_000,
             "max_steps must stay at the validator ceiling"
         );
+    }
+
+    /// A scripted provider for the prose-dump corrective retry (2026-10-03).
+    /// Call 1 answers a real task with pasted code and NO tool call — the
+    /// live-caught 12B failure ("long instructions come back as prose
+    /// instead of actions"); call 2 (after the corrective nudge) makes the
+    /// REAL tool call; call 3 reports what the tool actually returned.
+    /// `first_action_is_tool_call` flips the script: call 1 acts, call 2
+    /// pastes code — a model that already acted is never corrected.
+    struct ProseDumpProvider {
+        calls: Mutex<u32>,
+        first_action_is_tool_call: bool,
+    }
+
+    impl inbharat_harness_core::ModelProvider for ProseDumpProvider {
+        fn id(&self) -> &str {
+            "prose"
+        }
+        fn models(&self) -> Vec<String> {
+            vec!["prose-v1".to_owned()]
+        }
+        fn stream(
+            &self,
+            _request: &inbharat_harness_core::ModelRequest,
+            _cancel: &CancellationToken,
+            sink: &mut dyn FnMut(inbharat_harness_core::ModelChunk) -> HarnessResult<()>,
+        ) -> HarnessResult<inbharat_harness_core::ModelResponse> {
+            use inbharat_harness_core::providers::{FinishReason, ModelChunk, ModelResponse};
+            let call = {
+                let mut calls = self
+                    .calls
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *calls += 1;
+                *calls
+            };
+            let respond_text = |sink: &mut dyn FnMut(ModelChunk) -> HarnessResult<()>,
+                                text: &str|
+             -> HarnessResult<ModelResponse> {
+                sink(ModelChunk::TextDelta {
+                    block: 0,
+                    text: text.to_owned(),
+                })?;
+                Ok(ModelResponse {
+                    text: text.to_owned(),
+                    finish: FinishReason::Stop,
+                    input_units: 1,
+                    output_units: 1,
+                    provider_request_id: None,
+                })
+            };
+            let act_with_fs_list = |sink: &mut dyn FnMut(ModelChunk) -> HarnessResult<()>| {
+                sink(ModelChunk::ToolCall {
+                    block: 0,
+                    call_id: "call-1".to_owned(),
+                    tool_id: "fs.list".to_owned(),
+                    arguments: "{\"path\":\".\"}".to_owned(),
+                })?;
+                Ok(ModelResponse {
+                    text: String::new(),
+                    finish: FinishReason::ToolCalls,
+                    input_units: 1,
+                    output_units: 1,
+                    provider_request_id: None,
+                })
+            };
+            match call {
+                1 if self.first_action_is_tool_call => act_with_fs_list(sink),
+                1 => respond_text(
+                    sink,
+                    "Here is the program:\n```js\nconsole.log(\"hi\");\n```\n",
+                ),
+                2 if self.first_action_is_tool_call => respond_text(
+                    sink,
+                    "Here is the follow-up:\n```js\nconsole.log(\"bye\");\n```\n",
+                ),
+                2 => act_with_fs_list(sink),
+                _ => respond_text(sink, "The directory is listed. Done."),
+            }
+        }
+    }
+
+    /// A harness with the fs.list tool registered and the scripted provider
+    /// — the exact shape the corrective-retry tests run against.
+    fn prose_dump_harness(provider: ProseDumpProvider) -> inbharat_harness_core::Harness {
+        let (dir, filesystem) = temp_workspace();
+        drop(dir);
+        let broker = GrantedFolderBroker::new(granted(&filesystem), std::iter::empty::<String>());
+        HarnessBuilder::embedded(Arc::new(broker))
+            .expect("harness builder")
+            .register_model(Arc::new(provider))
+            .expect("register scripted model")
+            .register_tool(Arc::new(ListFilesTool::default()))
+            .expect("register fs.list")
+            .confirmation_provider(Arc::new(StaticConfirmationProvider {
+                outcome: ConfirmationOutcome::AllowedOnce,
+            }))
+            .build()
+    }
+
+    fn prose_dump_options(corrective_retries: u32) -> RunOptions {
+        RunOptions {
+            actor: "local-user".to_owned(),
+            provider: "prose".to_owned(),
+            model: "prose-v1".to_owned(),
+            explicit_level: Some(ExecutionLevel::L3),
+            budget: Some(full_access_budget()),
+            capabilities: CapabilitySet::all_local(),
+            corrective_retries,
+            ..RunOptions::default()
+        }
+    }
+
+    #[test]
+    fn a_prose_dump_gets_one_corrective_retry_and_then_acts() {
+        let harness = prose_dump_harness(ProseDumpProvider {
+            calls: Mutex::new(0),
+            first_action_is_tool_call: false,
+        });
+        let (outcome, session) = harness
+            .run(
+                "list the directory",
+                &prose_dump_options(1),
+                &CancellationToken::new(),
+            )
+            .expect("the corrected run completes");
+        // The final output is the model's real report — not the prose dump.
+        assert_eq!(outcome.output, "The directory is listed. Done.");
+        // The run actually ACTED: without the corrective retry this would
+        // be 0 and the output would be the pasted code block.
+        assert_eq!(outcome.tool_calls, 1, "the retry must act with the tool");
+        assert!(
+            session.replay().expect("replay session").balanced,
+            "the session must stay audit-balanced with the corrective retry"
+        );
+    }
+
+    #[test]
+    fn a_prose_dump_without_the_opt_in_stands() {
+        let harness = prose_dump_harness(ProseDumpProvider {
+            calls: Mutex::new(0),
+            first_action_is_tool_call: false,
+        });
+        let (outcome, _session) = harness
+            .run(
+                "list the directory",
+                &prose_dump_options(0),
+                &CancellationToken::new(),
+            )
+            .expect("the uncorrected run completes");
+        // corrective_retries = 0 disables the fix — the model's text stands
+        // verbatim (other RunOptions consumers are unchanged).
+        assert!(outcome.output.contains("```js"));
+        assert_eq!(outcome.tool_calls, 0);
+    }
+
+    #[test]
+    fn a_model_that_already_acted_is_never_corrected() {
+        let harness = prose_dump_harness(ProseDumpProvider {
+            calls: Mutex::new(0),
+            first_action_is_tool_call: true,
+        });
+        let (outcome, _session) = harness
+            .run(
+                "list the directory then show me code",
+                &prose_dump_options(1),
+                &CancellationToken::new(),
+            )
+            .expect("the run completes");
+        // Call 2 pastes a code block, but the model already used its tools:
+        // the fenced code IS the answer (e.g. the user asked to see code),
+        // so it must not be second-guessed.
+        assert!(outcome.output.contains("```js"));
+        assert_eq!(outcome.tool_calls, 1, "the real tool call still ran");
+    }
+
+    #[test]
+    fn a_corrective_retry_is_bounded_to_one_nudge() {
+        // After the nudge, if the model pastes code AGAIN, the text stands —
+        // the retry budget is 1, not a loop.
+        struct RepeatProseProvider;
+        impl inbharat_harness_core::ModelProvider for RepeatProseProvider {
+            fn id(&self) -> &str {
+                "prose"
+            }
+            fn models(&self) -> Vec<String> {
+                vec!["prose-v1".to_owned()]
+            }
+            fn stream(
+                &self,
+                _request: &inbharat_harness_core::ModelRequest,
+                _cancel: &CancellationToken,
+                sink: &mut dyn FnMut(inbharat_harness_core::ModelChunk) -> HarnessResult<()>,
+            ) -> HarnessResult<inbharat_harness_core::ModelResponse> {
+                let text = "Again as text:\n```js\nconsole.log(\"x\");\n```\n".to_owned();
+                sink(inbharat_harness_core::ModelChunk::TextDelta {
+                    block: 0,
+                    text: text.clone(),
+                })?;
+                Ok(inbharat_harness_core::providers::ModelResponse {
+                    text,
+                    finish: inbharat_harness_core::providers::FinishReason::Stop,
+                    input_units: 1,
+                    output_units: 1,
+                    provider_request_id: None,
+                })
+            }
+        }
+        let (dir, filesystem) = temp_workspace();
+        drop(dir);
+        let broker = GrantedFolderBroker::new(granted(&filesystem), std::iter::empty::<String>());
+        let harness = HarnessBuilder::embedded(Arc::new(broker))
+            .expect("harness builder")
+            .register_model(Arc::new(RepeatProseProvider))
+            .expect("register repeat-prose model")
+            .register_tool(Arc::new(ListFilesTool::default()))
+            .expect("register fs.list")
+            .confirmation_provider(Arc::new(StaticConfirmationProvider {
+                outcome: ConfirmationOutcome::AllowedOnce,
+            }))
+            .build();
+        let (outcome, _session) = harness
+            .run(
+                "list the directory",
+                &prose_dump_options(1),
+                &CancellationToken::new(),
+            )
+            .expect("the run completes after one nudge");
+        assert!(outcome.output.contains("```js"));
+        assert_eq!(outcome.tool_calls, 0, "no infinite nudge loop");
+        // The budget proves the second dump was accepted after exactly one
+        // corrective retry: the run consumed at most 3 logical steps
+        // (initial + retry + final).
+        assert!(outcome.steps <= 3, "steps: {}", outcome.steps);
     }
 
     #[test]

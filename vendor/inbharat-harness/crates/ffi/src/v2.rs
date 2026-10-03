@@ -41,10 +41,10 @@
 //!   library memory released with `ib_harness_bytes_free_v1`.
 
 use crate::{
-    IB_STATUS_CANCELLED, IB_STATUS_DENIED, IB_STATUS_INVALID_ARGUMENT, IB_STATUS_OK,
-    IB_STATUS_OPERATION_FAILED, IB_STATUS_PANIC, IB_STATUS_RESOURCE_EXHAUSTED,
-    IB_STATUS_UNAVAILABLE, IbByteSpanV1, IbCancellationHandle, IbHarnessHandle, IbOwnedBytesV1,
-    CANCEL_HANDLE_MAGIC, HARNESS_HANDLE_MAGIC,
+    CANCEL_HANDLE_MAGIC, HARNESS_HANDLE_MAGIC, IB_STATUS_CANCELLED, IB_STATUS_DENIED,
+    IB_STATUS_INVALID_ARGUMENT, IB_STATUS_OK, IB_STATUS_OPERATION_FAILED, IB_STATUS_PANIC,
+    IB_STATUS_RESOURCE_EXHAUSTED, IB_STATUS_UNAVAILABLE, IbByteSpanV1, IbCancellationHandle,
+    IbHarnessHandle, IbOwnedBytesV1,
 };
 use inbharat_harness_core::error::{ErrorCode, Failure, FailureClass, HarnessResult};
 use inbharat_harness_core::providers::{
@@ -89,8 +89,7 @@ pub type IbDestroyFn = Option<extern "C" fn(user_data: *mut c_void)>;
 
 /// Emits one streamed chunk from the C provider back into the harness.
 /// Returns `IB_STATUS_OK` to continue; nonzero aborts the stream with that status.
-pub type IbChunkEmitFn =
-    extern "C" fn(emit_data: *mut c_void, chunk: *const IbModelChunkV2) -> i32;
+pub type IbChunkEmitFn = extern "C" fn(emit_data: *mut c_void, chunk: *const IbModelChunkV2) -> i32;
 
 /// One model dispatch: C receives the request, streams chunks through `emit`,
 /// and fills `out_response`. `cancel` (non-null) is polled with
@@ -437,7 +436,10 @@ fn scope_from_u8(code: u8) -> HarnessResult<MemoryScope> {
         4 => Ok(MemoryScope::Project),
         5 => Ok(MemoryScope::Document),
         6 => Ok(MemoryScope::Extended),
-        _ => Err(Failure::invalid("ffi.v2.memory_scope", "unknown scope code")),
+        _ => Err(Failure::invalid(
+            "ffi.v2.memory_scope",
+            "unknown scope code",
+        )),
     }
 }
 
@@ -617,12 +619,7 @@ fn convert_chunk(chunk: &IbModelChunkV2) -> HarnessResult<ModelChunk> {
         6 => ModelChunk::Finish {
             reason: finish_reason_from_u8(chunk.finish_reason)?,
         },
-        _ => {
-            return Err(Failure::invalid(
-                "ffi.v2.model_chunk",
-                "unknown chunk kind",
-            ))
-        }
+        _ => return Err(Failure::invalid("ffi.v2.model_chunk", "unknown chunk kind")),
     })
 }
 
@@ -671,7 +668,10 @@ impl ModelProvider for CModelProvider {
                 .iter()
                 .map(|message| {
                     Value::Object(BTreeMap::from([
-                        ("role".to_owned(), Value::String(role_to_str(message.role).to_owned())),
+                        (
+                            "role".to_owned(),
+                            Value::String(role_to_str(message.role).to_owned()),
+                        ),
                         ("content".to_owned(), Value::String(message.content.clone())),
                     ]))
                 })
@@ -685,8 +685,14 @@ impl ModelProvider for CModelProvider {
                 .map(|tool| {
                     Value::Object(BTreeMap::from([
                         ("id".to_owned(), Value::String(tool.id.clone())),
-                        ("description".to_owned(), Value::String(tool.description.clone())),
-                        ("input_schema".to_owned(), Value::String(tool.input_schema.clone())),
+                        (
+                            "description".to_owned(),
+                            Value::String(tool.description.clone()),
+                        ),
+                        (
+                            "input_schema".to_owned(),
+                            Value::String(tool.input_schema.clone()),
+                        ),
                     ]))
                 })
                 .collect(),
@@ -778,7 +784,11 @@ impl Tool for CTool {
         Ok(())
     }
 
-    fn execute(&self, arguments: &ToolArguments, context: &ToolContext<'_>) -> HarnessResult<ToolOutput> {
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
         let arguments_json = arguments_to_json(arguments);
         let mut cancellation = IbCancellationHandle {
             magic: CANCEL_HANDLE_MAGIC,
@@ -844,8 +854,14 @@ struct CMemoryProvider {
 fn record_to_json(record: &MemoryRecord) -> Value {
     Value::Object(BTreeMap::from([
         ("id".to_owned(), Value::String(record.id.clone())),
-        ("scope".to_owned(), Value::String(record.scope.as_str().to_owned())),
-        ("namespace".to_owned(), Value::String(record.namespace.clone())),
+        (
+            "scope".to_owned(),
+            Value::String(record.scope.as_str().to_owned()),
+        ),
+        (
+            "namespace".to_owned(),
+            Value::String(record.namespace.clone()),
+        ),
         ("content".to_owned(), Value::String(record.content.clone())),
         (
             "attributes".to_owned(),
@@ -861,16 +877,19 @@ fn record_to_json(record: &MemoryRecord) -> Value {
 }
 
 fn record_from_json(value: &Value) -> HarnessResult<MemoryRecord> {
-    let object = value.as_object().ok_or_else(|| {
-        Failure::invalid("ffi.v2.memory_record", "record JSON is not an object")
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| Failure::invalid("ffi.v2.memory_record", "record JSON is not an object"))?;
     let string = |key: &str| -> HarnessResult<String> {
         object
             .get(key)
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| {
-                Failure::invalid("ffi.v2.memory_record", "record field is missing or not a string")
+                Failure::invalid(
+                    "ffi.v2.memory_record",
+                    "record field is missing or not a string",
+                )
             })
     };
     let scope_name = string("scope")?;
@@ -890,10 +909,12 @@ fn record_from_json(value: &Value) -> HarnessResult<MemoryRecord> {
         for (key, entry) in entries {
             attributes.insert(
                 key.clone(),
-                entry.as_str().ok_or_else(|| {
-                    Failure::invalid("ffi.v2.memory_record", "attribute value is not a string")
-                })?
-                .to_owned(),
+                entry
+                    .as_str()
+                    .ok_or_else(|| {
+                        Failure::invalid("ffi.v2.memory_record", "attribute value is not a string")
+                    })?
+                    .to_owned(),
             );
         }
     }
@@ -913,7 +934,12 @@ impl MemoryProvider for CMemoryProvider {
         self.capabilities.clone()
     }
 
-    fn retrieve(&self, scope: MemoryScope, namespace: &str, id: &str) -> HarnessResult<Option<MemoryRecord>> {
+    fn retrieve(
+        &self,
+        scope: MemoryScope,
+        namespace: &str,
+        id: &str,
+    ) -> HarnessResult<Option<MemoryRecord>> {
         let mut out = empty_span();
         // Callbacks are guaranteed for the provider's registered lifetime;
         // the out span is written by C and copied before returning.
@@ -969,7 +995,7 @@ impl MemoryProvider for CMemoryProvider {
                 return Err(Failure::invalid(
                     "ffi.v2.memory_search",
                     "results JSON is not an array",
-                ))
+                ));
             }
         };
         array.iter().map(record_from_json).collect()
@@ -1235,12 +1261,7 @@ pub unsafe extern "C" fn ib_harness_builder_register_model_v2(
             Value::Array(entries) => {
                 let mut models = Vec::with_capacity(entries.len());
                 for entry in entries {
-                    models.push(
-                        entry
-                            .as_str()
-                            .ok_or(IB_STATUS_INVALID_ARGUMENT)?
-                            .to_owned(),
-                    );
+                    models.push(entry.as_str().ok_or(IB_STATUS_INVALID_ARGUMENT)?.to_owned());
                 }
                 models
             }
@@ -1291,8 +1312,9 @@ pub unsafe extern "C" fn ib_harness_builder_register_tool_v2(
         let mut capabilities = inbharat_harness_core::CapabilitySet::new();
         for discriminant in 0_u8..=8 {
             if tool.required_capabilities & 1u32 << discriminant != 0 {
-                capabilities
-                    .insert(capability_from_discriminant(discriminant).ok_or(IB_STATUS_INVALID_ARGUMENT)?);
+                capabilities.insert(
+                    capability_from_discriminant(discriminant).ok_or(IB_STATUS_INVALID_ARGUMENT)?,
+                );
             }
         }
         let mut supported_levels = Vec::new();
@@ -1309,9 +1331,12 @@ pub unsafe extern "C" fn ib_harness_builder_register_tool_v2(
         let manifest = ToolManifest {
             id: read_span(tool.id).map_err(|failure| status_from_failure(&failure))?,
             version: read_span(tool.version).map_err(|failure| status_from_failure(&failure))?,
-            description: read_span(tool.description).map_err(|failure| status_from_failure(&failure))?,
-            input_schema: read_span(tool.input_schema).map_err(|failure| status_from_failure(&failure))?,
-            output_schema: read_span(tool.output_schema).map_err(|failure| status_from_failure(&failure))?,
+            description: read_span(tool.description)
+                .map_err(|failure| status_from_failure(&failure))?,
+            input_schema: read_span(tool.input_schema)
+                .map_err(|failure| status_from_failure(&failure))?,
+            output_schema: read_span(tool.output_schema)
+                .map_err(|failure| status_from_failure(&failure))?,
             required_capabilities: capabilities,
             supported_levels,
             determinism: match tool.determinism {
@@ -1337,8 +1362,10 @@ pub unsafe extern "C" fn ib_harness_builder_register_tool_v2(
             concurrency_safe: tool.concurrency_safe != 0,
             default_timeout: Duration::from_millis(u64::from(tool.default_timeout_ms)),
             max_output_bytes: tool.max_output_bytes as usize,
-            verification: read_span(tool.verification).map_err(|failure| status_from_failure(&failure))?,
-            compensation: read_span(tool.compensation).map_err(|failure| status_from_failure(&failure))?,
+            verification: read_span(tool.verification)
+                .map_err(|failure| status_from_failure(&failure))?,
+            compensation: read_span(tool.compensation)
+                .map_err(|failure| status_from_failure(&failure))?,
         };
         let current = reference.builder.take().ok_or(IB_STATUS_INVALID_ARGUMENT)?;
         let adapter = CTool {
@@ -1384,7 +1411,10 @@ pub unsafe extern "C" fn ib_harness_builder_register_memory_v2(
         let mut scopes = Vec::new();
         for bit in 0_u32..6 {
             if memory.scopes_bitmask & (1 << bit) != 0 {
-                scopes.push(scope_from_u8((bit + 1) as u8).map_err(|failure| status_from_failure(&failure))?);
+                scopes.push(
+                    scope_from_u8((bit + 1) as u8)
+                        .map_err(|failure| status_from_failure(&failure))?,
+                );
             }
         }
         let capabilities = MemoryCapabilities {
@@ -1458,9 +1488,7 @@ pub unsafe extern "C" fn ib_harness_builder_register_permission_v2(
 /// # Safety
 /// `handle` must be null or a live cancellation handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ib_harness_cancel_requested_v2(
-    handle: *mut IbCancellationHandle,
-) -> i32 {
+pub unsafe extern "C" fn ib_harness_cancel_requested_v2(handle: *mut IbCancellationHandle) -> i32 {
     match v2_boundary_value(|| {
         if handle.is_null() {
             return Err(IB_STATUS_INVALID_ARGUMENT);
