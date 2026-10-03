@@ -500,6 +500,9 @@ export function ModelManager() {
                 if (operation !== modelOperation.current) return;
                 const port = await tauriApi.startModelServer(nextConfig, vaultRoot);
                 if (operation !== modelOperation.current) return;
+                const health = await tauriApi.checkModelHealth();
+                if (operation !== modelOperation.current) return;
+                if (!health.model_id) throw new Error('The loaded model has no verified identity.');
                 setModelStatus('LOADED');
                 setConfig(nextConfig);
                 console.log('[ModelManager] llama-server started on port', port);
@@ -521,16 +524,18 @@ export function ModelManager() {
             disabled={modelStatus !== 'LOADED' && modelStatus !== 'LOADING' && !loadingModel}
             onClick={async () => {
               setModelStatus('NOT_LOADED');
-              modelOperation.current += 1;
+              const operation = ++modelOperation.current;
               setError(null);
               try {
                 window.dispatchEvent(new Event('unoone:model-manual-control'));
                 await tauriApi.stopModelServer();
-              } catch (e: any) {
-                setError(`Unload failed: ${e?.message || 'Unknown error'}`);
-                setModelStatus('ERROR');
+              } catch (e: unknown) {
+                if (operation === modelOperation.current) {
+                  setError(`Unload failed: ${e instanceof Error ? e.message : String(e)}`);
+                  setModelStatus('ERROR');
+                }
               } finally {
-                setLoadingModel(false);
+                if (operation === modelOperation.current) setLoadingModel(false);
               }
             }}
           >

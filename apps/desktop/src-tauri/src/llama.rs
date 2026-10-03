@@ -3229,6 +3229,7 @@ pub async fn check_model_health(
     state: tauri::State<'_, ModelManagerState>,
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Result<serde_json::Value, String> {
+    let generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
     let client = reqwest::Client::new();
 
     let uno_port = *state
@@ -3258,6 +3259,11 @@ pub async fn check_model_health(
         .send()
         .await;
 
+    if state.suspended.load(std::sync::atomic::Ordering::SeqCst)
+        || generation != state.generation.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err("Health result belongs to a stopped model session".to_owned());
+    }
     match response {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp
