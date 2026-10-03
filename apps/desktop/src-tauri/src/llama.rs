@@ -609,13 +609,12 @@ impl ModelManager {
             let requested = Self::normalize_path(
                 &std::fs::canonicalize(&requested_path).unwrap_or(requested_path),
             );
-            for asset in manifest
-                .platforms
-                .windows
-                .models
-                .iter()
-                .filter(|asset| asset.kind == unoone_usb_manifest::AssetKind::Model)
-            {
+            for asset in manifest.platforms.windows.models.iter().filter(|asset| {
+                matches!(
+                    asset.kind,
+                    unoone_usb_manifest::AssetKind::Model | unoone_usb_manifest::AssetKind::Mmproj
+                )
+            }) {
                 let full = vault_root_path.join(&asset.path);
                 let full = Self::normalize_path(&std::fs::canonicalize(&full).unwrap_or(full));
                 if full == requested {
@@ -2524,6 +2523,38 @@ mod tests {
     }
 
     #[test]
+    fn cached_boot_verifies_the_drive_projector_independently() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mmproj-gemma-4-12b.gguf");
+        std::fs::write(&path, b"original projector").unwrap();
+        let digest = ModelManager::sha256_file(&path).unwrap();
+        let manifest = serde_json::json!({
+            "product_id": "test", "schema_version": 1, "pai_version": "0.1.0",
+            "vault": {"id_path": "VAULT/id"},
+            "platforms": {"windows": {"architectures": ["x86_64"],
+            "desktop": {"id": "desktop", "kind": "DESKTOP_EXECUTABLE", "path": "desktop.exe", "size_bytes": 1, "sha256": "c".repeat(64)},
+            "models": [{"id": "vision-12b", "kind": "MMPROJ", "path": "mmproj-gemma-4-12b.gguf", "size_bytes": 18, "sha256": digest}]}}
+        });
+        std::fs::write(
+            root.path().join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let config = ModelConfig {
+            mmproj_path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let cancel = inbharat_harness_core::CancellationToken::new();
+        assert!(verify_projection_hash(&config, root.path().to_str().unwrap(), &cancel).is_ok());
+        std::fs::write(&path, b"tampered projector").unwrap();
+        assert!(
+            verify_projection_hash(&config, root.path().to_str().unwrap(), &cancel)
+                .unwrap_err()
+                .contains("digest")
+        );
+    }
+
+    #[test]
     fn cancelled_hash_never_reads_model_bytes() {
         let cancel = inbharat_harness_core::CancellationToken::new();
         cancel.cancel(inbharat_harness_core::CancelCause::User);
@@ -3014,6 +3045,29 @@ pub async fn get_model_status(
 }
 
 /// D1: Start llama-server on a free port, verify its identity, and store it in state.
+fn verify_projection_hash(
+    config: &ModelConfig,
+    vault_root: &str,
+    cancel: &inbharat_harness_core::CancellationToken,
+) -> Result<(), String> {
+    let Some(path) = config.mmproj_path.as_deref() else {
+        return Ok(());
+    };
+    let root = std::fs::canonicalize(vault_root).map_err(|e| e.to_string())?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("Projection artifact is missing: {e}"))?;
+    if !canonical.starts_with(&root) {
+        return Err("Projection artifact escapes the Pocket AI package".to_owned());
+    }
+    let expected = ModelManager::read_manifest_model_hash(vault_root, path)
+        .ok_or("Projection artifact has no declared digest")?;
+    let actual = ModelManager::sha256_file_cancellable(&canonical, Some(cancel))?;
+    if !actual.eq_ignore_ascii_case(&expected) {
+        return Err("Projection artifact does not match its declared digest".to_owned());
+    }
+    Ok(())
+}
+
 fn manager_model_for_config(vault_root: &str, config: &ModelConfig) -> Result<ModelInfo, String> {
     let requested = ModelManager::read_manifest_model_hash(vault_root, &config.model_path)
         .ok_or("Model is not declared in the package")?;
@@ -3092,6 +3146,9 @@ pub async fn start_model_server(
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    // Cached text weights may boot before the full sweep, but the vision
+    // projector still comes from the drive. Verify its own bytes before use.
+    verify_projection_hash(&config, &vault_root, &cancel)?;
     // Serialize start/stop only after validation. Invalid requests leave the
     // current server intact, and cached boot does not await the full sweep.
     let mut active_manager = state.manager.lock().await;
