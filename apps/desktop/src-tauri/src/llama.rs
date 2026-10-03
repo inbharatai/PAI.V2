@@ -2698,6 +2698,45 @@ mod tests {
     }
 
     #[test]
+    fn manager_model_for_config_matches_cache_path_across_manifest_hash_case() {
+        // Live-caught 2026-10-03: the staged drive manifest stores UPPERCASE
+        // SHA-256 digests while the host-cache branch of read_manifest_model_hash
+        // lowercases the filename digest, so an exact `==` in
+        // manager_model_for_config refused the digest-verified cache copy
+        // ("Model or cache entry does not match a declared desktop model") and
+        // left every boot on the flagship machine in limited mode. The match
+        // must be case-insensitive like the rest of the identity checks.
+        let (vault_dir, model_path) = cache_test_fixture("unoone-cache-case-test", None);
+        std::fs::write(&model_path, b"cross-case cache match test bytes").unwrap();
+        let sha = ModelManager::sha256_file(&model_path).unwrap();
+        let uppercase = sha.to_ascii_uppercase();
+        assert_ne!(
+            uppercase, sha,
+            "fixture needs a digest with letters to pin the case"
+        );
+        write_cache_test_manifest(&vault_dir, Some(&uppercase));
+
+        let (cached, _size) =
+            stage_model_to_host_cache(model_path.to_str().unwrap(), vault_dir.to_str().unwrap())
+                .expect("staging against an uppercase manifest digest should succeed");
+
+        let config = ModelConfig {
+            model_path: cached.to_str().unwrap().to_owned(),
+            mmproj_path: None,
+            ..Default::default()
+        };
+        let model = manager_model_for_config(vault_dir.to_str().unwrap(), &config)
+            .expect("a digest-verified cache copy must resolve to the declared desktop model");
+        let got = std::fs::canonicalize(&model.path).expect("resolved model path exists");
+        let want = std::fs::canonicalize(&model_path).expect("fixture model exists");
+        assert_eq!(got, want);
+
+        let _ = std::fs::remove_dir_all(&vault_dir);
+        let _ = std::fs::remove_file(&cached);
+        let _ = std::fs::remove_file(cached.with_extension("verified"));
+    }
+
+    #[test]
     fn stage_model_refuses_model_without_manifest_hash() {
         let (vault_dir, model_path) = cache_test_fixture("unoone-cache-nohash-test", None);
         let error =
@@ -3073,9 +3112,14 @@ fn manager_model_for_config(vault_root: &str, config: &ModelConfig) -> Result<Mo
         .find_models(vault_root)
         .into_iter()
         .find(|model| {
+            // Case-insensitive, like every other manifest-hash identity check:
+            // the host-cache branch of read_manifest_model_hash lowercases the
+            // filename digest while the drive manifest stores uppercase SHA-256
+            // (live-caught 2026-10-03: an exact `==` refused the digest-verified
+            // cache copy and left boot in limited mode).
             model.available
-                && ModelManager::read_manifest_model_hash(vault_root, &model.path).as_ref()
-                    == Some(&requested)
+                && ModelManager::read_manifest_model_hash(vault_root, &model.path)
+                    .is_some_and(|hash| hash.eq_ignore_ascii_case(&requested))
         })
         .ok_or("Model or cache entry does not match a declared desktop model")?;
     if config.mmproj_path != model.mmproj_path {
@@ -3457,7 +3501,10 @@ pub(crate) fn stage_model_to_host_cache(
     drop(output);
 
     let digest = hex::encode(hasher.finalize());
-    if digest != expected_sha {
+    // Case-insensitive: the manifest may store uppercase SHA-256 (the staged
+    // drive manifests do) while hex::encode always emits lowercase — the
+    // digest itself is identical either way.
+    if !digest.eq_ignore_ascii_case(&expected_sha) {
         let _ = std::fs::remove_file(&part);
         return Err("The cached copy does not match the manifest sha256 — the model bytes changed or the drive read failed. Nothing was staged.".to_string());
     }
