@@ -2605,21 +2605,23 @@ mod tests {
         assert!(models[1].mmproj_path.is_none() && models[2].mmproj_path.is_none());
         assert_eq!(models[1].model_type, "gemma-4-e4b");
         assert_eq!(
-            select_model_for_memory(root, 16.0, 12.0)
-                .unwrap()
-                .model
-                .name,
+            select_model_for_memory(root, 16.0).unwrap().model.name,
             "gemma-4-12b"
         );
         assert_eq!(
-            select_model_for_memory(root, 8.0, 6.0).unwrap().model.name,
+            select_model_for_memory(root, 8.0).unwrap().model.name,
             "gemma-4-e4b"
         );
         assert_eq!(
-            select_model_for_memory(root, 4.0, 3.9).unwrap().model.name,
+            select_model_for_memory(root, 4.0).unwrap().model.name,
             "gemma-4-e2b"
         );
-        assert!(select_model_for_memory(root, 32.0, 3.0).is_err());
+        // The budget is the system's TOTAL RAM (user directive 2026-10-03):
+        // free-RAM pressure is not an input and can never veto a selection.
+        assert_eq!(
+            select_model_for_memory(root, 32.0).unwrap().model.name,
+            "gemma-4-12b"
+        );
     }
 
     // --- Host-disk model cache -------------------------------------------------
@@ -2880,7 +2882,7 @@ fn available_memory() -> Result<(f64, f64), String> {
     Ok((total, available))
 }
 
-fn admit_model(model: &ModelInfo, config: &ModelConfig, total: f64, available: f64) -> bool {
+fn admit_model(model: &ModelInfo, config: &ModelConfig, total: f64) -> bool {
     let Some(tier) = crate::desktop_model_policy::tier(&model.name) else {
         return false;
     };
@@ -2904,7 +2906,7 @@ fn admit_model(model: &ModelInfo, config: &ModelConfig, total: f64, available: f
         .kv_estimate_bytes
         .map(|b| b as f64 / 1073741824.0)
         .unwrap_or(1.0);
-    crate::desktop_model_policy::fits(tier, total, available, weights, projector, kv)
+    crate::desktop_model_policy::fits(tier, total, weights, projector, kv)
 }
 
 #[tauri::command]
@@ -2915,15 +2917,11 @@ pub fn select_desktop_model(vault_root: String) -> Result<DesktopModelSelection,
         .map_err(|e| e.to_string())?;
     serde_json::from_str::<unoone_usb_manifest::PocketManifest>(&manifest)
         .map_err(|_| "Desktop boot requires the current Pocket AI manifest".to_owned())?;
-    let (total, available) = available_memory()?;
-    select_model_for_memory(&vault_root, total, available)
+    let (total, _available) = available_memory()?;
+    select_model_for_memory(&vault_root, total)
 }
 
-fn select_model_for_memory(
-    vault_root: &str,
-    total: f64,
-    available: f64,
-) -> Result<DesktopModelSelection, String> {
+fn select_model_for_memory(vault_root: &str, total: f64) -> Result<DesktopModelSelection, String> {
     let mut models = ModelManager::new().find_models(vault_root);
     models.retain(|model| {
         model.available && crate::desktop_model_policy::tier(&model.name).is_some()
@@ -2940,11 +2938,11 @@ fn select_model_for_memory(
             config.context_size = context_size;
             config.model_path = model.path.clone();
             config.mmproj_path = model.mmproj_path.clone();
-            if admit_model(&model, &config, total, available) {
+            if admit_model(&model, &config, total) {
                 return Ok(DesktopModelSelection {
                     reason: format!(
-                        "{} selected with {:.1} GiB available RAM and a {}-token requested context",
-                        model.name, available, context_size
+                        "{} selected against the system's {:.1} GiB total RAM budget and a {}-token requested context",
+                        model.name, total, context_size
                     ),
                     model,
                     config,
@@ -2952,7 +2950,7 @@ fn select_model_for_memory(
             }
         }
     }
-    Err(format!("No declared desktop model fits the current {:.1} GiB available RAM budget. Close other apps or stage a qualified smaller model in the package.", available))
+    Err(format!("No declared desktop model fits the system's {:.1} GiB total RAM budget. Stage a qualified smaller model in the package.", total))
 }
 
 #[tauri::command]
@@ -3113,11 +3111,9 @@ pub async fn start_model_server(
     //      runs on unverified bytes — the gate only moves WHEN the multi-GB
     //      asset sweep must finish relative to model boot.
     let declared = manager_model_for_config(&vault_root, &config)?;
-    let (total, available) = available_memory()?;
-    if !admit_model(&declared, &config, total, available) {
-        return Err(
-            "Selected model and context exceed the current desktop memory budget".to_owned(),
-        );
+    let (total, _available) = available_memory()?;
+    if !admit_model(&declared, &config, total) {
+        return Err("Selected model and context exceed the system's total RAM budget".to_owned());
     }
     let serving_verified_host_cache = model_served_from_verified_host_cache(&config.model_path);
     // Two-tier gate (see the comment above); the release condition reads
@@ -3157,14 +3153,9 @@ pub async fn start_model_server(
     {
         return Err("Model startup was cancelled".to_owned());
     }
-    // RAM pressure may have changed during a long removable-drive sweep.
-    let (total, available) = available_memory()?;
-    if !admit_model(&declared, &config, total, available) {
-        return Err(
-            "Memory pressure changed while validating the drive; select a smaller model or context"
-                .to_owned(),
-        );
-    }
+    // No post-sweep memory re-check: the budget is the system's TOTAL RAM,
+    // which cannot change while the sweep runs — a second identical
+    // admission would be dead logic.
     crate::boot_trace::mark_detail(
         "start_model_server: gate passed",
         &format!(

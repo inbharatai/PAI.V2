@@ -77,6 +77,23 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   77.4 s → 40–56 s with the model server live at ~15 s. A boot-chain race
   that killed model startup when the user unlocked during validation
   (silently, no error, no retry) was caught live and fixed the same day.
+- **Explicit model controls supersede automatic boot (2026-10-03):** manual
+  Stop/Load in Model Manager takes precedence over BootGate auto-boot; a
+  manual load resolves the selected cache artifact and hash-verifies it and
+  the declared vision projector (mmproj) before boot, then checks the
+  running model's health/identity and discards health results from stopped
+  sessions. Admission is a conservative memory policy
+  (`desktop_model_policy`) that budgets against the system's **TOTAL RAM —
+  the maximum the machine holds** (user directive 2026-10-03, restoring the
+  flagship lane that ran accurately before the admission existed):
+  momentary free-RAM pressure never vetoes boot (the OS reclaims standby
+  pages), while every artifact and runtime reserve still counts (weights
+  ×1.1 + projector + KV + 1 GiB ≤ total), unmeasured GPU memory is never
+  credited, a missing tier is never silently downloaded, and invalid
+  measurements fail closed. Stopping the model cancels pending loads (a
+  cancelled hash never reads model bytes) and preserves restart admission;
+  an inference child being started is killed even if its loading future is
+  dropped mid-shutdown.
 - Real Tauri API calls (no mock data), real SHA-256 verification, honest error states.
 - Windows bundle CI builds `UnoOnePower.exe`, `UnoOneDock.exe`, and
   `Start UnoOne.exe` together and publishes their SHA-256 sums as one artifact.
@@ -144,6 +161,22 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   `web.preview` (a live preview window of a site the agent is building,
   reloaded as the agent keeps editing — no web server anywhere), and
   `agent.spawn` sub-agents (Codex/GLM-style multi-agent lane).
+- **Session host-command consent + owned processes (2026-10-03):**
+  `process.run` runs only while the user has enabled host commands in
+  Settings for that session — an audited, revocable consent
+  (`host_commands_enabled`/`host_commands_revoked` vault `AuditRecord`s).
+  Every process the agent spawns is owned: lock, permission revocation,
+  drive removal, or app exit terminates them all (Windows Job Objects kill
+  whole process trees; a 32-process session cap bounds runaway deploys), and
+  process leases are generation-invalidated, so a broker captured before a
+  revoke can never spawn after it. Locking the vault is now a full sweep —
+  it stops inference immediately, cancels every in-flight run (a
+  generation-id'd run registry closes the supersede/finish race), denies
+  all pending in-chat grant cards, kills owned processes, and closes the
+  preview and browser windows. Folder grants authorize file tools only,
+  never commands — the model briefing states that boundary honestly, and
+  a denial tells the model to ask the user to enable permission and
+  restart the task.
 - **Prose-dump corrective retry:** when a 12B-class model answers a task
   with a pasted fenced code block instead of tool calls (the live defect
   the user caught 2026-10-03), the runtime issues exactly ONE bounded
