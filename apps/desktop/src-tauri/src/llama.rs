@@ -470,6 +470,42 @@ pub struct ModelManager {
     granted_context: Mutex<Option<u32>>,
 }
 
+/// Kill an uncommitted inference child even if its loading future is dropped
+/// during application shutdown or an IPC/task failure.
+struct StartingModelChild(Option<std::process::Child>);
+impl std::ops::Deref for StartingModelChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("starting child")
+    }
+}
+impl std::ops::DerefMut for StartingModelChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("starting child")
+    }
+}
+impl Drop for StartingModelChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+impl Drop for ModelManager {
+    fn drop(&mut self) {
+        if let Some(mut child) = self
+            .llama_process
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl ModelManager {
     pub fn new() -> Self {
         Self {
@@ -497,6 +533,7 @@ impl ModelManager {
     }
 
     /// Compute the SHA-256 hex digest of a file.
+    #[cfg(test)]
     pub(crate) fn sha256_file(path: &std::path::Path) -> Result<String, String> {
         Self::sha256_file_cancellable(path, None)
     }
@@ -1342,10 +1379,11 @@ impl ModelManager {
         cancel
             .check("desktop.model.spawn")
             .map_err(|e| e.to_string())?;
-        let mut child = cmd.spawn().map_err(|e| {
+        let child = cmd.spawn().map_err(|e| {
             *self.status.lock().unwrap() = ModelStatus::Error;
             format!("Failed to start llama-server: {}", e)
         })?;
+        let mut child = StartingModelChild(Some(child));
 
         let pid = child.id();
 
@@ -1392,7 +1430,7 @@ impl ModelManager {
                     Ok(mut identity) => {
                         identity.pid = pid;
                         *self.server_identity.lock().unwrap() = Some(identity);
-                        *self.llama_process.lock().unwrap() = Some(child);
+                        *self.llama_process.lock().unwrap() = child.0.take();
                         *self.status.lock().unwrap() = ModelStatus::Loaded;
                         crate::boot_trace::mark_detail(
                             "start_server: VERIFIED LOADED",
@@ -1790,10 +1828,11 @@ impl ModelManagerState {
     }
 
     pub(crate) fn suspend(&self) {
-        self.startup_cancel
+        let cancel = self
+            .startup_cancel
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .cancel(inbharat_harness_core::CancelCause::Parent);
+            .unwrap_or_else(|e| e.into_inner());
+        cancel.cancel(inbharat_harness_core::CancelCause::Parent);
         self.suspended
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.generation
@@ -1801,18 +1840,29 @@ impl ModelManagerState {
     }
 
     pub(crate) fn resume(&self) {
-        *self
+        let mut cancel = self
             .startup_cancel
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = inbharat_harness_core::CancellationToken::new();
-        self.suspended
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+            .unwrap_or_else(|e| e.into_inner());
+        // The first unlock must retain a pre-unlock boot's cancellation token.
+        // Replace it only when a genuinely suspended session is reopened.
+        if self
+            .suspended
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            *cancel = inbharat_harness_core::CancellationToken::new();
+            self.generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     /// Emergency cleanup used when the Pocket AI is removed or the app exits.
     pub async fn emergency_stop(&self) {
-        self.suspend();
+        let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
         let mut manager = self.manager.lock().await;
+        if generation != self.generation.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         if let Some(manager) = manager.take() {
             let _ = manager.stop_server();
         }
@@ -2400,6 +2450,22 @@ mod tests {
     }
 
     #[test]
+    fn first_unlock_retains_early_boot_cancellation_and_reunlock_replaces_it() {
+        let state = ModelManagerState::new();
+        let early = state.startup_cancel.lock().unwrap().clone();
+        state.resume();
+        state.suspend();
+        assert!(early.is_cancelled());
+        let generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
+        state.resume();
+        assert!(!state.startup_cancel.lock().unwrap().is_cancelled());
+        assert_ne!(
+            generation,
+            state.generation.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[test]
     fn cancelled_hash_never_reads_model_bytes() {
         let cancel = inbharat_harness_core::CancellationToken::new();
         cancel.cancel(inbharat_harness_core::CancelCause::User);
@@ -2862,7 +2928,9 @@ pub fn get_context_budget(
 pub async fn get_model_status(
     state: tauri::State<'_, ModelManagerState>,
 ) -> Result<String, String> {
-    let manager = state.manager.lock().await;
+    let Ok(manager) = state.manager.try_lock() else {
+        return Ok("LOADING".to_owned());
+    };
     let Some(manager) = manager.as_ref() else {
         return Ok("NOT_LOADED".to_string());
     };
@@ -2923,13 +2991,6 @@ pub async fn start_model_server(
         .lock()
         .map_err(|_| "Startup cancellation lock failed")?
         .clone();
-    // Serialize start/stop and keep ownership while the server is loading.
-    let mut active_manager = state.manager.lock().await;
-    if state.suspended.load(Ordering::SeqCst)
-        || generation != state.generation.load(Ordering::SeqCst)
-    {
-        return Err("Model startup was cancelled".to_owned());
-    }
     crate::boot_trace::mark_detail("start_model_server: entry", &config.model_path);
     // The model server is the inference gate, in two tiers:
     //   1. Full DesktopLaunch sweep complete → any model (drive or cache).
@@ -2949,13 +3010,45 @@ pub async fn start_model_server(
     let serving_verified_host_cache = model_served_from_verified_host_cache(&config.model_path);
     // Two-tier gate (see the comment above); the release condition reads
     // cleanly as: full sweep done, or (boot gate done AND cached model).
-    let boot_released = startup.is_boot_gate_complete() && serving_verified_host_cache;
-    if !startup.is_asset_validation_complete() && !boot_released {
-        crate::boot_trace::mark(
-            "start_model_server: REFUSED — assets not validated (and model is not on the verified host cache)",
+    let gate_deadline = Instant::now() + Duration::from_secs(20 * 60);
+    loop {
+        cancel
+            .check("desktop.model.validation")
+            .map_err(|e| e.to_string())?;
+        if state.suspended.load(Ordering::SeqCst)
+            || generation != state.generation.load(Ordering::SeqCst)
+        {
+            return Err("Model startup was cancelled".to_owned());
+        }
+        let boot_released = startup.is_boot_gate_complete() && serving_verified_host_cache;
+        if startup.is_asset_validation_complete() || boot_released {
+            break;
+        }
+        if startup.validation_failed()
+            || !PathBuf::from(&vault_root).join("manifest.json").is_file()
+        {
+            return Err("Pocket AI assets failed validation or the drive was removed".to_owned());
+        }
+        if Instant::now() >= gate_deadline {
+            return Err("Pocket AI asset validation timed out".to_owned());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // Serialize start/stop only after validation. Invalid requests leave the
+    // current server intact, and cached boot does not await the full sweep.
+    let mut active_manager = state.manager.lock().await;
+    if state.suspended.load(Ordering::SeqCst)
+        || generation != state.generation.load(Ordering::SeqCst)
+    {
+        return Err("Model startup was cancelled".to_owned());
+    }
+    // RAM pressure may have changed during a long removable-drive sweep.
+    let (total, available) = available_memory()?;
+    if !admit_model(&declared, &config, total, available) {
+        return Err(
+            "Memory pressure changed while validating the drive; select a smaller model or context"
+                .to_owned(),
         );
-        startup.set_phase(crate::startup::StartupPhase::LimitedMode);
-        return Err("Pocket AI assets have not completed DesktopLaunch validation.".to_string());
     }
     crate::boot_trace::mark_detail(
         "start_model_server: gate passed",

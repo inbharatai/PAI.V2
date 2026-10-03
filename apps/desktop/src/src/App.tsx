@@ -155,31 +155,8 @@ function App() {
     void (async () => {
       try {
         setBootError('');
-        // Wait for the model-boot release, not the full sweep. The backend
-        // runs a fast BootGate first (identity + runtime executables —
-        // BOOT_ASSETS_VERIFIED) and releases model boot from the
-        // digest-verified host cache while the full DesktopLaunch sweep of
-        // models/voice/speech keeps running in the background (it ends in
-        // PAI_CONNECTED). The backend gate (start_model_server) still
-        // refuses a drive-path model until the full sweep finishes.
-        const initialStatus = await tauriApi.getStartupStatus();
-        const validationPhase = initialStatus.phase;
-        if (validationPhase === 'CHECKING_ASSETS' || validationPhase === 'VALIDATING_PAI') {
-          await new Promise<void>((resolve, reject) => {
-            const poll = async () => {
-              if (generation !== bootGeneration.current) { reject(new Error("Model startup cancelled.")); return; }
-              const status = await tauriApi.getStartupStatus();
-              if (status.phase === 'PAI_CONNECTED' || status.phase === 'BOOT_ASSETS_VERIFIED') {
-                resolve();
-              } else if (status.phase === 'PAI_INVALID' || status.phase === 'WAITING_FOR_PAI' || status.phase === 'DISCONNECTED' || status.phase === 'LIMITED_MODE') {
-                reject(new Error('Pocket AI assets failed validation.'));
-              } else {
-                setTimeout(poll, 250);
-              }
-            };
-            poll();
-          });
-        }
+        // The backend waits on authoritative validation flags, even if unlock
+        // advances the display phase while the asset sweep is still running.
         assertCurrent();
         const selection = await tauriApi.selectDesktopModel(bootRoot);
         assertCurrent();
