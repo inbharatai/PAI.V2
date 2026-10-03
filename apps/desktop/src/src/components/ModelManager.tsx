@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { tauriApi, type ModelInfo, type ModelConfig, type ModelStatus, type AccelerationBackend, type SecurityLevel, type ModelCacheStatus, type ContextBudget } from '../lib/tauri';
 
 export function ModelManager() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModelPath, setSelectedModelPath] = useState<string>('');
   const [modelStatus, setModelStatus] = useState<ModelStatus>('NOT_LOADED');
+  const [loadingModel, setLoadingModel] = useState(false);
+  const modelOperation = useRef(0);
+  useEffect(() => () => { modelOperation.current += 1; }, []);
   const [accelBackends, setAccelBackends] = useState<AccelerationBackend[]>([]);
   const [config, setConfig] = useState<ModelConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -53,6 +56,19 @@ export function ModelManager() {
     }
     load();
   }, []);
+
+  // Follow automatic loading so the initial status cannot leave this panel
+  // stuck on a spinner after the native server has finished loading.
+  useEffect(() => {
+    if (modelStatus !== 'LOADING' || loadingModel) return;
+    let active = true;
+    const interval = window.setInterval(() => {
+      void tauriApi.getModelStatus().then(status => {
+        if (active) setModelStatus(status);
+      }).catch(() => undefined);
+    }, 1000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [modelStatus, loadingModel]);
 
   // Derive the budget the server launcher will actually apply, so the panel
   // states the granted context and every clamp reason before a session starts.
@@ -158,7 +174,7 @@ export function ModelManager() {
                 border: selectedModelPath === model.path ? '1px solid var(--accent)' : undefined,
                 background: selectedModelPath === model.path ? 'var(--accent-bg)' : undefined,
               }}
-              onClick={() => setSelectedModelPath(model.path)}
+              onClick={() => { setSelectedModelPath(model.path); setCacheStatus(null); }}
             >
               <div className="recording-item-icon" style={{
                 background: model.available ? 'var(--accent-bg)' : 'var(--danger-bg)',
@@ -444,9 +460,11 @@ export function ModelManager() {
         <div style={{ display: 'flex', gap: '12px', marginBottom: '24px' }}>
           <button
             className="btn btn-primary"
-            disabled={!selectedModelPath || !config || modelStatus === 'LOADING'}
+            disabled={!selectedModelPath || !config || modelStatus === 'LOADING' || loadingModel}
             onClick={async () => {
               if (!config || !selectedModelPath) return;
+              const operation = ++modelOperation.current;
+              setLoadingModel(true);
               setModelStatus('LOADING');
               setError(null);
               try {
@@ -456,13 +474,19 @@ export function ModelManager() {
                   throw new Error('No UnoOne vault detected. Insert the Pocket USB to load the model.');
                 }
 
+                window.dispatchEvent(new Event('unoone:model-manual-control'));
+                await tauriApi.stopModelServer();
+                if (operation !== modelOperation.current) return;
+                // The displayed cache status may belong to a previous selection.
+                const selectedCache = await tauriApi.modelCacheStatus(selectedModelPath, vaultRoot).catch(() => null);
+
                 const nextConfig: ModelConfig = {
                   ...config,
                   // Launch from the digest-verified host cache when the model
                   // is staged there — same bytes (manifest sha256 key), read
                   // from the host disk instead of the slow USB drive.
-                  model_path: cacheStatus?.staged && cacheStatus.cached_path
-                    ? cacheStatus.cached_path
+                  model_path: selectedCache?.staged && selectedCache.cached_path
+                    ? selectedCache.cached_path
                     : selectedModelPath,
                   mmproj_path: models.find(model => model.path === selectedModelPath)?.mmproj_path,
                 };
@@ -473,34 +497,49 @@ export function ModelManager() {
                   nextConfig.mmproj_path = undefined;
                 }
 
+                if (operation !== modelOperation.current) return;
                 const port = await tauriApi.startModelServer(nextConfig, vaultRoot);
+                if (operation !== modelOperation.current) return;
+                const health = await tauriApi.checkModelHealth();
+                if (operation !== modelOperation.current) return;
+                if (!health.model_id) throw new Error('The loaded model has no verified identity.');
                 setModelStatus('LOADED');
                 setConfig(nextConfig);
                 console.log('[ModelManager] llama-server started on port', port);
-              } catch (e: any) {
-                setError(e?.message || 'Failed to start model server');
-                setModelStatus('ERROR');
+              } catch (e: unknown) {
+                if (operation === modelOperation.current) {
+                  setError(e instanceof Error ? e.message : String(e));
+                  setModelStatus('ERROR');
+                }
+              } finally {
+                if (operation === modelOperation.current) setLoadingModel(false);
               }
             }}
           >
-            {modelStatus === 'LOADING' ? 'Loading…' : 'Load Model'}
+            {modelStatus === 'LOADING' || loadingModel ? 'Loading…' : 'Load Model'}
           </button>
 
           <button
             className="btn btn-secondary"
-            disabled={modelStatus !== 'LOADED'}
+            disabled={modelStatus !== 'LOADED' && modelStatus !== 'LOADING' && !loadingModel}
             onClick={async () => {
               setModelStatus('NOT_LOADED');
+              const operation = ++modelOperation.current;
               setError(null);
               try {
+                window.dispatchEvent(new Event('unoone:model-manual-control'));
                 await tauriApi.stopModelServer();
-              } catch (e: any) {
-                setError(`Unload failed: ${e?.message || 'Unknown error'}`);
-                setModelStatus('ERROR');
+              } catch (e: unknown) {
+                if (operation === modelOperation.current) {
+                  setError(`Unload failed: ${e instanceof Error ? e.message : String(e)}`);
+                  setModelStatus('ERROR');
+                }
+              } finally {
+                if (operation === modelOperation.current) setLoadingModel(false);
               }
             }}
           >
-            Unload Model
+            {loadingModel || modelStatus === 'LOADING' ? 'Cancel loading' : 'Unload Model'}
           </button>
 
           <button
@@ -550,4 +589,5 @@ export function ModelManager() {
     </div>
   );
 }
+
 

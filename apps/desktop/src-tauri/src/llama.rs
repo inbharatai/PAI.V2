@@ -470,6 +470,42 @@ pub struct ModelManager {
     granted_context: Mutex<Option<u32>>,
 }
 
+/// Kill an uncommitted inference child even if its loading future is dropped
+/// during application shutdown or an IPC/task failure.
+struct StartingModelChild(Option<std::process::Child>);
+impl std::ops::Deref for StartingModelChild {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("starting child")
+    }
+}
+impl std::ops::DerefMut for StartingModelChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("starting child")
+    }
+}
+impl Drop for StartingModelChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+impl Drop for ModelManager {
+    fn drop(&mut self) {
+        if let Some(mut child) = self
+            .llama_process
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 impl ModelManager {
     pub fn new() -> Self {
         Self {
@@ -497,7 +533,15 @@ impl ModelManager {
     }
 
     /// Compute the SHA-256 hex digest of a file.
+    #[cfg(test)]
     pub(crate) fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+        Self::sha256_file_cancellable(path, None)
+    }
+
+    fn sha256_file_cancellable(
+        path: &std::path::Path,
+        cancel: Option<&inbharat_harness_core::CancellationToken>,
+    ) -> Result<String, String> {
         use sha2::Digest;
         use std::io::Read;
         let mut file = std::fs::File::open(path)
@@ -509,6 +553,9 @@ impl ModelManager {
         // cannot overflow.
         let mut buffer = vec![0u8; 512 * 1024];
         loop {
+            if cancel.is_some_and(|token| token.is_cancelled()) {
+                return Err("Model startup cancelled".to_owned());
+            }
             let n = file
                 .read(&mut buffer)
                 .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
@@ -562,13 +609,12 @@ impl ModelManager {
             let requested = Self::normalize_path(
                 &std::fs::canonicalize(&requested_path).unwrap_or(requested_path),
             );
-            for asset in manifest
-                .platforms
-                .windows
-                .models
-                .iter()
-                .filter(|asset| asset.kind == unoone_usb_manifest::AssetKind::Model)
-            {
+            for asset in manifest.platforms.windows.models.iter().filter(|asset| {
+                matches!(
+                    asset.kind,
+                    unoone_usb_manifest::AssetKind::Model | unoone_usb_manifest::AssetKind::Mmproj
+                )
+            }) {
                 let full = vault_root_path.join(&asset.path);
                 let full = Self::normalize_path(&std::fs::canonicalize(&full).unwrap_or(full));
                 if full == requested {
@@ -790,18 +836,6 @@ impl ModelManager {
             if let Ok(manifest) =
                 serde_json::from_str::<unoone_usb_manifest::PocketManifest>(&manifest_content)
             {
-                let mmproj_path = manifest
-                    .platforms
-                    .windows
-                    .models
-                    .iter()
-                    .find(|asset| asset.kind == unoone_usb_manifest::AssetKind::Mmproj)
-                    .map(|asset| {
-                        PathBuf::from(vault_root)
-                            .join(asset.path.replace('/', "\\"))
-                            .to_string_lossy()
-                            .to_string()
-                    });
                 for model in manifest
                     .platforms
                     .windows
@@ -809,11 +843,33 @@ impl ModelManager {
                     .iter()
                     .filter(|asset| asset.kind == unoone_usb_manifest::AssetKind::Model)
                 {
-                    let full_path = PathBuf::from(vault_root).join(model.path.replace('/', "\\"));
+                    let full_path = PathBuf::from(vault_root).join(&model.path);
+                    let tier = crate::desktop_model_policy::tier(&model.id);
+                    // A projector must identify the same tier. Never attach a 12B
+                    // projector to a smaller text model just because it is first.
+                    let mmproj_path = manifest
+                        .platforms
+                        .windows
+                        .models
+                        .iter()
+                        .find(|asset| {
+                            asset.kind == unoone_usb_manifest::AssetKind::Mmproj
+                                && tier.is_some()
+                                && crate::desktop_model_policy::tier(&format!(
+                                    "{} {}",
+                                    asset.id, asset.path
+                                )) == tier
+                        })
+                        .map(|asset| {
+                            PathBuf::from(vault_root)
+                                .join(&asset.path)
+                                .to_string_lossy()
+                                .into_owned()
+                        });
                     let (native_context, context_verified) = native_context_or_default(&full_path);
                     models.push(ModelInfo {
                         name: model.id.clone(),
-                        model_type: "gemma-4-12b".to_string(),
+                        model_type: model.id.clone(),
                         quantization: "manifest-verified".to_string(),
                         file_size_gb: model.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                         context_length: native_context,
@@ -823,6 +879,7 @@ impl ModelManager {
                         mmproj_path: mmproj_path.clone(),
                     });
                 }
+                return models;
             }
             if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_content) {
                 // Read desktop models from manifest
@@ -1085,6 +1142,7 @@ impl ModelManager {
         &self,
         config: &ModelConfig,
         vault_root: &str,
+        cancel: &inbharat_harness_core::CancellationToken,
     ) -> Result<u16, String> {
         let llama_path = self.get_llama_binary_path(vault_root);
 
@@ -1141,9 +1199,11 @@ impl ModelManager {
         *self.status.lock().unwrap() = ModelStatus::Loading;
         let hash_started = std::time::Instant::now();
         crate::boot_trace::mark_detail("start_server: model hash begin", &config.model_path);
-        let disk_sha256 = Some(Self::sha256_file(&model_path).inspect_err(|_e| {
-            *self.status.lock().unwrap() = ModelStatus::Error;
-        })?);
+        let disk_sha256 = Some(
+            Self::sha256_file_cancellable(&model_path, Some(cancel)).inspect_err(|_e| {
+                *self.status.lock().unwrap() = ModelStatus::Error;
+            })?,
+        );
         crate::boot_trace::mark_detail(
             "start_server: model hash end",
             &format!("elapsed={:.1}s", hash_started.elapsed().as_secs_f32()),
@@ -1315,10 +1375,14 @@ impl ModelManager {
             "start_server: spawning llama-server",
             &format!("port={port}"),
         );
-        let mut child = cmd.spawn().map_err(|e| {
+        cancel
+            .check("desktop.model.spawn")
+            .map_err(|e| e.to_string())?;
+        let child = cmd.spawn().map_err(|e| {
             *self.status.lock().unwrap() = ModelStatus::Error;
             format!("Failed to start llama-server: {}", e)
         })?;
+        let mut child = StartingModelChild(Some(child));
 
         let pid = child.id();
 
@@ -1331,6 +1395,9 @@ impl ModelManager {
         let addr = format!("127.0.0.1:{}", port);
         let mut last_err = String::from("server did not open port in time");
         loop {
+            if cancel.is_cancelled() {
+                return Err(self.reset_to_error(&mut child, "Model startup cancelled".to_owned()));
+            }
             // If the stub crashed before binding, surface it immediately.
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -1362,7 +1429,7 @@ impl ModelManager {
                     Ok(mut identity) => {
                         identity.pid = pid;
                         *self.server_identity.lock().unwrap() = Some(identity);
-                        *self.llama_process.lock().unwrap() = Some(child);
+                        *self.llama_process.lock().unwrap() = child.0.take();
                         *self.status.lock().unwrap() = ModelStatus::Loaded;
                         crate::boot_trace::mark_detail(
                             "start_server: VERIFIED LOADED",
@@ -1741,22 +1808,82 @@ impl ModelManager {
 /// D1: State wrapper for ModelManager so it can be held as Tauri managed state.
 /// Uses tokio::sync::Mutex so the guard can be held across .await points (Send).
 pub struct ModelManagerState {
-    pub manager: tokio::sync::Mutex<Option<ModelManager>>,
+    pub manager: tokio::sync::Mutex<Option<std::sync::Arc<ModelManager>>>,
+    active: std::sync::Mutex<Option<std::sync::Arc<ModelManager>>>,
     pub server_port: std::sync::Mutex<u16>,
+    generation: std::sync::atomic::AtomicU64,
+    suspended: std::sync::atomic::AtomicBool,
+    startup_cancel: std::sync::Mutex<inbharat_harness_core::CancellationToken>,
 }
 
 impl ModelManagerState {
     pub fn new() -> Self {
         Self {
             manager: tokio::sync::Mutex::new(None),
+            active: std::sync::Mutex::new(None),
             server_port: std::sync::Mutex::new(8342),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            suspended: std::sync::atomic::AtomicBool::new(false),
+            startup_cancel: std::sync::Mutex::new(inbharat_harness_core::CancellationToken::new()),
         }
+    }
+
+    fn stop_active(&self) {
+        if let Some(manager) = self.active.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = manager.stop_server();
+        }
+    }
+
+    pub(crate) fn suspend(&self) {
+        let cancel = self
+            .startup_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cancel.cancel(inbharat_harness_core::CancelCause::Parent);
+        self.suspended
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.stop_active();
+    }
+
+    pub(crate) fn resume(&self) {
+        let mut cancel = self
+            .startup_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // The first unlock must retain a pre-unlock boot's cancellation token.
+        // Replace it only when a genuinely suspended session is reopened.
+        if self
+            .suspended
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            *cancel = inbharat_harness_core::CancellationToken::new();
+            self.generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    fn cancel_pending_start(&self) {
+        let mut cancel = self
+            .startup_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cancel.cancel(inbharat_harness_core::CancelCause::User);
+        *cancel = inbharat_harness_core::CancellationToken::new();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.stop_active();
     }
 
     /// Emergency cleanup used when the Pocket AI is removed or the app exits.
     pub async fn emergency_stop(&self) {
-        let manager = self.manager.lock().await;
-        if let Some(manager) = manager.as_ref() {
+        let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
+        let mut manager = self.manager.lock().await;
+        if generation != self.generation.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if let Some(manager) = manager.take() {
             let _ = manager.stop_server();
         }
         if let Ok(mut port) = self.server_port.lock() {
@@ -1765,8 +1892,9 @@ impl ModelManagerState {
     }
 
     pub fn emergency_stop_blocking(&self) {
-        if let Ok(manager) = self.manager.try_lock() {
-            if let Some(manager) = manager.as_ref() {
+        self.suspend();
+        if let Ok(mut manager) = self.manager.try_lock() {
+            if let Some(manager) = manager.take() {
                 let _ = manager.stop_server();
             }
         }
@@ -2284,7 +2412,11 @@ mod tests {
         std::fs::create_dir_all(vault_root.join("RUNTIMES").join("WINDOWS").join("CPU")).unwrap();
 
         let result = manager
-            .start_server(&config, vault_root.to_str().unwrap())
+            .start_server(
+                &config,
+                vault_root.to_str().unwrap(),
+                &inbharat_harness_core::CancellationToken::new(),
+            )
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("llama-server not found"));
@@ -2326,11 +2458,168 @@ mod tests {
         };
 
         let result = manager
-            .start_server(&config, vault_root.to_str().unwrap())
+            .start_server(
+                &config,
+                vault_root.to_str().unwrap(),
+                &inbharat_harness_core::CancellationToken::new(),
+            )
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Model file not found"));
         assert_eq!(manager.get_status(), ModelStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn lock_stops_inference_while_an_async_request_holds_the_manager() {
+        let state = ModelManagerState::new();
+        let manager = std::sync::Arc::new(ModelManager::new());
+        let mut command = if cfg!(windows) {
+            std::process::Command::new("ping")
+        } else {
+            std::process::Command::new("sleep")
+        };
+        if cfg!(windows) {
+            command.args(["-n", "30", "127.0.0.1"]);
+        } else {
+            command.arg("30");
+        }
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        *manager.llama_process.lock().unwrap() = Some(command.spawn().unwrap());
+        *state.active.lock().unwrap() = Some(std::sync::Arc::clone(&manager));
+        *state.manager.lock().await = Some(std::sync::Arc::clone(&manager));
+        let _inflight_request = state.manager.lock().await;
+        let started = std::time::Instant::now();
+        state.suspend();
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(manager.llama_process.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn manual_model_stop_cancels_loading_and_preserves_restart_admission() {
+        let state = ModelManagerState::new();
+        let pending = state.startup_cancel.lock().unwrap().clone();
+        state.cancel_pending_start();
+        assert!(pending.is_cancelled());
+        assert!(!state.startup_cancel.lock().unwrap().is_cancelled());
+        assert!(!state.suspended.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn first_unlock_retains_early_boot_cancellation_and_reunlock_replaces_it() {
+        let state = ModelManagerState::new();
+        let early = state.startup_cancel.lock().unwrap().clone();
+        state.resume();
+        state.suspend();
+        assert!(early.is_cancelled());
+        let generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
+        state.resume();
+        assert!(!state.startup_cancel.lock().unwrap().is_cancelled());
+        assert_ne!(
+            generation,
+            state.generation.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn cached_boot_verifies_the_drive_projector_independently() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("mmproj-gemma-4-12b.gguf");
+        std::fs::write(&path, b"original projector").unwrap();
+        let digest = ModelManager::sha256_file(&path).unwrap();
+        let manifest = serde_json::json!({
+            "product_id": "test", "schema_version": 1, "pai_version": "0.1.0",
+            "vault": {"id_path": "VAULT/id"},
+            "platforms": {"windows": {"architectures": ["x86_64"],
+            "desktop": {"id": "desktop", "kind": "DESKTOP_EXECUTABLE", "path": "desktop.exe", "size_bytes": 1, "sha256": "c".repeat(64)},
+            "models": [{"id": "vision-12b", "kind": "MMPROJ", "path": "mmproj-gemma-4-12b.gguf", "size_bytes": 18, "sha256": digest}]}}
+        });
+        std::fs::write(
+            root.path().join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let config = ModelConfig {
+            mmproj_path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let cancel = inbharat_harness_core::CancellationToken::new();
+        assert!(verify_projection_hash(&config, root.path().to_str().unwrap(), &cancel).is_ok());
+        std::fs::write(&path, b"tampered projector").unwrap();
+        assert!(
+            verify_projection_hash(&config, root.path().to_str().unwrap(), &cancel)
+                .unwrap_err()
+                .contains("digest")
+        );
+    }
+
+    #[test]
+    fn cancelled_hash_never_reads_model_bytes() {
+        let cancel = inbharat_harness_core::CancellationToken::new();
+        cancel.cancel(inbharat_harness_core::CancelCause::User);
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(
+            ModelManager::sha256_file_cancellable(file.path(), Some(&cancel))
+                .unwrap_err()
+                .contains("cancelled")
+        );
+    }
+
+    #[test]
+    fn desktop_discovery_and_selection_keep_tiers_and_projectors_separate() {
+        let root = tempfile::tempdir().unwrap();
+        let mut assets = Vec::new();
+        for (id, size) in [
+            ("gemma-4-12b", 7 * 1073741824_u64),
+            ("gemma-4-e4b", 3 * 1073741824),
+            ("gemma-4-e2b", 1610612736),
+        ] {
+            let path = format!("models/{id}.gguf");
+            std::fs::create_dir_all(root.path().join("models")).unwrap();
+            std::fs::File::create(root.path().join(&path))
+                .unwrap()
+                .set_len(size)
+                .unwrap();
+            assets.push(serde_json::json!({"id": id, "kind": "MODEL", "path": path, "size_bytes": size, "sha256": "a".repeat(64)}));
+        }
+        let projector = "models/mmproj-gemma-4-12b.gguf";
+        std::fs::write(root.path().join(projector), b"projection").unwrap();
+        assets.push(serde_json::json!({"id": "vision-projector", "kind": "MMPROJ", "path": projector, "size_bytes": 10, "sha256": "b".repeat(64)}));
+        let manifest = serde_json::json!({
+            "product_id": "test", "schema_version": 1, "pai_version": "0.1.0",
+            "vault": {"id_path": "VAULT/id"},
+            "platforms": {"windows": {"architectures": ["x86_64"],
+            "desktop": {"id": "desktop", "kind": "DESKTOP_EXECUTABLE", "path": "desktop.exe", "size_bytes": 1, "sha256": "c".repeat(64)}, "models": assets}}
+        });
+        std::fs::write(
+            root.path().join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let root = root.path().to_str().unwrap();
+        let models = ModelManager::new().find_models(root);
+        assert_eq!(models.len(), 3);
+        assert!(models.iter().all(|model| model.available));
+        assert!(models[0].mmproj_path.is_some());
+        assert!(models[1].mmproj_path.is_none() && models[2].mmproj_path.is_none());
+        assert_eq!(models[1].model_type, "gemma-4-e4b");
+        assert_eq!(
+            select_model_for_memory(root, 16.0, 12.0)
+                .unwrap()
+                .model
+                .name,
+            "gemma-4-12b"
+        );
+        assert_eq!(
+            select_model_for_memory(root, 8.0, 6.0).unwrap().model.name,
+            "gemma-4-e4b"
+        );
+        assert_eq!(
+            select_model_for_memory(root, 4.0, 3.9).unwrap().model.name,
+            "gemma-4-e2b"
+        );
+        assert!(select_model_for_memory(root, 32.0, 3.0).is_err());
     }
 
     // --- Host-disk model cache -------------------------------------------------
@@ -2567,6 +2856,105 @@ pub fn list_models(vault_root: String) -> Result<Vec<ModelInfo>, String> {
     Ok(manager.find_models(&vault_root))
 }
 
+#[derive(Serialize)]
+pub struct DesktopModelSelection {
+    pub model: ModelInfo,
+    pub config: ModelConfig,
+    pub reason: String,
+}
+
+fn available_memory() -> Result<(f64, f64), String> {
+    let memory =
+        sys_info::mem_info().map_err(|e| format!("Cannot measure available memory: {e}"))?;
+    let total = memory.total as f64 / (1024.0 * 1024.0);
+    // sys-info reports avail=0 on some platforms; free is a conservative fallback.
+    let available = if memory.avail > 0 {
+        memory.avail
+    } else {
+        memory.free
+    };
+    let available = available as f64 / (1024.0 * 1024.0);
+    if total <= 0.0 || available <= 0.0 {
+        return Err("Available memory could not be measured".to_owned());
+    }
+    Ok((total, available))
+}
+
+fn admit_model(model: &ModelInfo, config: &ModelConfig, total: f64, available: f64) -> bool {
+    let Some(tier) = crate::desktop_model_policy::tier(&model.name) else {
+        return false;
+    };
+    let weights = std::fs::metadata(&model.path)
+        .ok()
+        .map(|m| m.len() as f64 / 1073741824.0)
+        .unwrap_or(0.0);
+    let projector = match config.mmproj_path.as_ref() {
+        Some(path) => match std::fs::metadata(path) {
+            Ok(m) => m.len() as f64 / 1073741824.0,
+            Err(_) => return false,
+        },
+        None => 0.0,
+    };
+    let context = get_context_budget(
+        config.model_path.clone(),
+        config.context_size,
+        config.cache_type_k.clone(),
+    );
+    let kv = context
+        .kv_estimate_bytes
+        .map(|b| b as f64 / 1073741824.0)
+        .unwrap_or(1.0);
+    crate::desktop_model_policy::fits(tier, total, available, weights, projector, kv)
+}
+
+#[tauri::command]
+pub fn select_desktop_model(vault_root: String) -> Result<DesktopModelSelection, String> {
+    // A self-declared filename or an arbitrary scanned GGUF is not a qualified
+    // desktop tier. Only the validated package's declared model lane is eligible.
+    let manifest = std::fs::read_to_string(PathBuf::from(&vault_root).join("manifest.json"))
+        .map_err(|e| e.to_string())?;
+    serde_json::from_str::<unoone_usb_manifest::PocketManifest>(&manifest)
+        .map_err(|_| "Desktop boot requires the current Pocket AI manifest".to_owned())?;
+    let (total, available) = available_memory()?;
+    select_model_for_memory(&vault_root, total, available)
+}
+
+fn select_model_for_memory(
+    vault_root: &str,
+    total: f64,
+    available: f64,
+) -> Result<DesktopModelSelection, String> {
+    let mut models = ModelManager::new().find_models(vault_root);
+    models.retain(|model| {
+        model.available && crate::desktop_model_policy::tier(&model.name).is_some()
+    });
+    models.sort_by_key(|model| std::cmp::Reverse(crate::desktop_model_policy::tier(&model.name)));
+    for model in models {
+        let defaults = get_model_config();
+        let mut contexts = vec![defaults.context_size, 16384, 8192, 4096];
+        contexts.retain(|context| *context <= defaults.context_size);
+        contexts.sort_unstable_by(|a, b| b.cmp(a));
+        contexts.dedup();
+        for context_size in contexts {
+            let mut config = defaults.clone();
+            config.context_size = context_size;
+            config.model_path = model.path.clone();
+            config.mmproj_path = model.mmproj_path.clone();
+            if admit_model(&model, &config, total, available) {
+                return Ok(DesktopModelSelection {
+                    reason: format!(
+                        "{} selected with {:.1} GiB available RAM and a {}-token requested context",
+                        model.name, available, context_size
+                    ),
+                    model,
+                    config,
+                });
+            }
+        }
+    }
+    Err(format!("No declared desktop model fits the current {:.1} GiB available RAM budget. Close other apps or stage a qualified smaller model in the package.", available))
+}
+
 #[tauri::command]
 pub fn detect_acceleration(
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
@@ -2629,7 +3017,9 @@ pub fn get_context_budget(
 pub async fn get_model_status(
     state: tauri::State<'_, ModelManagerState>,
 ) -> Result<String, String> {
-    let manager = state.manager.lock().await;
+    let Ok(manager) = state.manager.try_lock() else {
+        return Ok("LOADING".to_owned());
+    };
     let Some(manager) = manager.as_ref() else {
         return Ok("NOT_LOADED".to_string());
     };
@@ -2655,6 +3045,47 @@ pub async fn get_model_status(
 }
 
 /// D1: Start llama-server on a free port, verify its identity, and store it in state.
+fn verify_projection_hash(
+    config: &ModelConfig,
+    vault_root: &str,
+    cancel: &inbharat_harness_core::CancellationToken,
+) -> Result<(), String> {
+    let Some(path) = config.mmproj_path.as_deref() else {
+        return Ok(());
+    };
+    let root = std::fs::canonicalize(vault_root).map_err(|e| e.to_string())?;
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("Projection artifact is missing: {e}"))?;
+    if !canonical.starts_with(&root) {
+        return Err("Projection artifact escapes the Pocket AI package".to_owned());
+    }
+    let expected = ModelManager::read_manifest_model_hash(vault_root, path)
+        .ok_or("Projection artifact has no declared digest")?;
+    let actual = ModelManager::sha256_file_cancellable(&canonical, Some(cancel))?;
+    if !actual.eq_ignore_ascii_case(&expected) {
+        return Err("Projection artifact does not match its declared digest".to_owned());
+    }
+    Ok(())
+}
+
+fn manager_model_for_config(vault_root: &str, config: &ModelConfig) -> Result<ModelInfo, String> {
+    let requested = ModelManager::read_manifest_model_hash(vault_root, &config.model_path)
+        .ok_or("Model is not declared in the package")?;
+    let model = ModelManager::new()
+        .find_models(vault_root)
+        .into_iter()
+        .find(|model| {
+            model.available
+                && ModelManager::read_manifest_model_hash(vault_root, &model.path).as_ref()
+                    == Some(&requested)
+        })
+        .ok_or("Model or cache entry does not match a declared desktop model")?;
+    if config.mmproj_path != model.mmproj_path {
+        return Err("Projection artifact must match the selected model's declared tier".to_owned());
+    }
+    Ok(model)
+}
+
 #[tauri::command]
 pub async fn start_model_server(
     config: ModelConfig,
@@ -2662,6 +3093,16 @@ pub async fn start_model_server(
     state: tauri::State<'_, ModelManagerState>,
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Result<u16, String> {
+    use std::sync::atomic::Ordering;
+    if state.suspended.load(Ordering::SeqCst) {
+        return Err("Unlock Pocket AI before restarting inference".to_owned());
+    }
+    let generation = state.generation.load(Ordering::SeqCst);
+    let cancel = state
+        .startup_cancel
+        .lock()
+        .map_err(|_| "Startup cancellation lock failed")?
+        .clone();
     crate::boot_trace::mark_detail("start_model_server: entry", &config.model_path);
     // The model server is the inference gate, in two tiers:
     //   1. Full DesktopLaunch sweep complete → any model (drive or cache).
@@ -2671,16 +3112,58 @@ pub async fn start_model_server(
     //      manifest) before the server is trusted, so inference still never
     //      runs on unverified bytes — the gate only moves WHEN the multi-GB
     //      asset sweep must finish relative to model boot.
+    let declared = manager_model_for_config(&vault_root, &config)?;
+    let (total, available) = available_memory()?;
+    if !admit_model(&declared, &config, total, available) {
+        return Err(
+            "Selected model and context exceed the current desktop memory budget".to_owned(),
+        );
+    }
     let serving_verified_host_cache = model_served_from_verified_host_cache(&config.model_path);
     // Two-tier gate (see the comment above); the release condition reads
     // cleanly as: full sweep done, or (boot gate done AND cached model).
-    let boot_released = startup.is_boot_gate_complete() && serving_verified_host_cache;
-    if !startup.is_asset_validation_complete() && !boot_released {
-        crate::boot_trace::mark(
-            "start_model_server: REFUSED — assets not validated (and model is not on the verified host cache)",
+    let gate_deadline = Instant::now() + Duration::from_secs(20 * 60);
+    loop {
+        cancel
+            .check("desktop.model.validation")
+            .map_err(|e| e.to_string())?;
+        if state.suspended.load(Ordering::SeqCst)
+            || generation != state.generation.load(Ordering::SeqCst)
+        {
+            return Err("Model startup was cancelled".to_owned());
+        }
+        let boot_released = startup.is_boot_gate_complete() && serving_verified_host_cache;
+        if startup.is_asset_validation_complete() || boot_released {
+            break;
+        }
+        if startup.validation_failed()
+            || !PathBuf::from(&vault_root).join("manifest.json").is_file()
+        {
+            return Err("Pocket AI assets failed validation or the drive was removed".to_owned());
+        }
+        if Instant::now() >= gate_deadline {
+            return Err("Pocket AI asset validation timed out".to_owned());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // Cached text weights may boot before the full sweep, but the vision
+    // projector still comes from the drive. Verify its own bytes before use.
+    verify_projection_hash(&config, &vault_root, &cancel)?;
+    // Serialize start/stop only after validation. Invalid requests leave the
+    // current server intact, and cached boot does not await the full sweep.
+    let mut active_manager = state.manager.lock().await;
+    if state.suspended.load(Ordering::SeqCst)
+        || generation != state.generation.load(Ordering::SeqCst)
+    {
+        return Err("Model startup was cancelled".to_owned());
+    }
+    // RAM pressure may have changed during a long removable-drive sweep.
+    let (total, available) = available_memory()?;
+    if !admit_model(&declared, &config, total, available) {
+        return Err(
+            "Memory pressure changed while validating the drive; select a smaller model or context"
+                .to_owned(),
         );
-        startup.set_phase(crate::startup::StartupPhase::LimitedMode);
-        return Err("Pocket AI assets have not completed DesktopLaunch validation.".to_string());
     }
     crate::boot_trace::mark_detail(
         "start_model_server: gate passed",
@@ -2691,8 +3174,11 @@ pub async fn start_model_server(
             serving_verified_host_cache
         ),
     );
+    if let Some(previous) = active_manager.take() {
+        previous.stop_server()?;
+    }
     startup.set_phase(crate::startup::StartupPhase::StartingModel);
-    let manager = ModelManager::new();
+    let manager = std::sync::Arc::new(ModelManager::new());
     // Default to the best detected backend.
     let best_backend = manager
         .detect_backends()
@@ -2701,10 +3187,12 @@ pub async fn start_model_server(
         .unwrap_or(AccelerationBackend::Cpu);
     manager.set_backend(best_backend);
 
-    let port = match manager.start_server(&config, &vault_root).await {
+    let port = match manager.start_server(&config, &vault_root, &cancel).await {
         Ok(port) => port,
         Err(error) => {
-            startup.set_phase(crate::startup::StartupPhase::LimitedMode);
+            if generation == state.generation.load(Ordering::SeqCst) {
+                startup.set_phase(crate::startup::StartupPhase::LimitedMode);
+            }
             return Err(error);
         }
     };
@@ -2712,7 +3200,24 @@ pub async fn start_model_server(
         .server_port
         .lock()
         .map_err(|e| format!("State lock error: {}", e))? = port;
-    *state.manager.lock().await = Some(manager);
+    // Publish under the same admission mutex as suspend: a lock racing the
+    // final health response must either cancel this child or see it to stop.
+    let admission = state
+        .startup_cancel
+        .lock()
+        .map_err(|_| "Startup cancellation lock failed")?;
+    if admission.is_cancelled()
+        || state.suspended.load(Ordering::SeqCst)
+        || generation != state.generation.load(Ordering::SeqCst)
+    {
+        let _ = manager.stop_server();
+        return Err("Model startup was cancelled by lock or disconnect".to_owned());
+    }
+    *state
+        .active
+        .lock()
+        .map_err(|_| "Active model lock failed")? = Some(std::sync::Arc::clone(&manager));
+    *active_manager = Some(manager);
     startup.set_phase(crate::startup::StartupPhase::VerifyingModel);
     Ok(port)
 }
@@ -2724,6 +3229,7 @@ pub async fn check_model_health(
     state: tauri::State<'_, ModelManagerState>,
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Result<serde_json::Value, String> {
+    let generation = state.generation.load(std::sync::atomic::Ordering::SeqCst);
     let client = reqwest::Client::new();
 
     let uno_port = *state
@@ -2753,6 +3259,11 @@ pub async fn check_model_health(
         .send()
         .await;
 
+    if state.suspended.load(std::sync::atomic::Ordering::SeqCst)
+        || generation != state.generation.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err("Health result belongs to a stopped model session".to_owned());
+    }
     match response {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp
@@ -2779,8 +3290,9 @@ pub async fn check_model_health(
 /// D1: Stop the currently managed llama-server process and clear state.
 #[tauri::command]
 pub async fn stop_model_server(state: tauri::State<'_, ModelManagerState>) -> Result<(), String> {
-    let manager = state.manager.lock().await;
-    if let Some(manager) = manager.as_ref() {
+    state.cancel_pending_start();
+    let mut manager = state.manager.lock().await;
+    if let Some(manager) = manager.take() {
         manager.stop_server()?;
     }
     *state

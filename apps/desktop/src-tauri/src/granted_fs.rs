@@ -29,15 +29,12 @@
 //!
 //! [`GrantedFolderBroker`] is the `ExecutionBroker` the harness tools call:
 //! file operations delegate to [`GrantedFolders`]; process operations
-//! delegate unchanged to an inner `LocalExecutionBroker` rooted at the
-//! workspace, so the allowlist, argument bounds, scrubbed environment and
-//! working directory behave exactly as before (a folder grant widens file
-//! access, never the program allowlist).
+//! use a session-only host-command lease and retain process ownership for
+//! lock/unplug cleanup. Folder grants do not authorize or sandbox programs.
 
 use inbharat_harness_core::execution::{DetachedSpawn, ProcessOutput};
 use inbharat_harness_core::{
-    ExecutionBroker, Failure, FailureClass, HarnessResult, LocalExecutionBroker, ProcessSpec,
-    RootedFs,
+    ExecutionBroker, Failure, FailureClass, HarnessResult, ProcessSpec, RootedFs,
 };
 use std::path::{Path, PathBuf};
 
@@ -374,15 +371,32 @@ fn strip_root_prefix(root: &Path, path: &Path) -> Option<PathBuf> {
 /// workspace working directory).
 pub(crate) struct GrantedFolderBroker {
     folders: GrantedFolders,
-    processes: LocalExecutionBroker,
+    processes: crate::desktop_process::DesktopProcessBroker,
 }
 
 impl GrantedFolderBroker {
+    #[cfg(test)]
     pub(crate) fn new(
         folders: GrantedFolders,
         allowed_programs: impl IntoIterator<Item = String>,
     ) -> Self {
-        let processes = LocalExecutionBroker::new(folders.primary().clone(), allowed_programs);
+        Self::with_process_lease(
+            folders,
+            allowed_programs,
+            crate::desktop_process::DesktopProcessState::default().lease(),
+        )
+    }
+
+    pub(crate) fn with_process_lease(
+        folders: GrantedFolders,
+        allowed_programs: impl IntoIterator<Item = String>,
+        lease: crate::desktop_process::ProcessLease,
+    ) -> Self {
+        let processes = crate::desktop_process::DesktopProcessBroker::new(
+            folders.primary().root(),
+            allowed_programs,
+            lease,
+        );
         Self { folders, processes }
     }
 }

@@ -193,6 +193,13 @@ impl StartupCoordinator {
     /// Flag-based, not phase-based: host probes legally advance the phase
     /// (SELECTING_BACKEND, STARTING_MODEL…) while the sweep is still running,
     /// so the phase alone must never be read as "the full sweep completed".
+    pub(crate) fn validation_failed(&self) -> bool {
+        self.validation_failures
+            .lock()
+            .map(|failures| !failures.is_empty())
+            .unwrap_or(true)
+    }
+
     pub fn is_asset_validation_complete(&self) -> bool {
         self.asset_sweep_complete
             .lock()
@@ -319,6 +326,7 @@ pub fn start_mount_monitor(app: AppHandle) {
 }
 
 async fn cleanup_after_removal(app: AppHandle) {
+    crate::stop_desktop_work(&app);
     app.state::<recording::RecordingStateHolder>()
         .emergency_discard();
     app.state::<llama::ModelManagerState>()

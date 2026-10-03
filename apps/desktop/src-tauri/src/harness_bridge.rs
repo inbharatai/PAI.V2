@@ -882,11 +882,14 @@ fn desktop_system_prefix(full_access: bool) -> String {
              completes on the widened access. A decline (or no answer) means \
              the folder stays off-limits — never claim a file outside the \
              grants was read or written.\n\
-             - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
+             - Host commands require separate session permission in Settings. Folder grants \
+             do not sandbox programs: commands can access host files and the network. \
+             A denial means ask the user to enable permission and restart the task. \
+             Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
              dotnet, go, java, cmake, make, gcc, clang, powershell) inside that workspace\n\
              - Deploy long-running processes (servers, watchers): pass \
              background:true to process.run — it returns immediately with the \
-             pid and the process keeps running. Its output is NOT captured, so \
+             pid and the process keeps running until lock, unplug, command revocation or app exit. Its output is NOT captured, so \
              verify the effect itself (browser.act to the served \
              http://localhost:PORT and check the page) and report the pid in \
              your answer so the user can stop it later.\n\
@@ -1273,7 +1276,7 @@ fn agent_workspace_info() -> Result<AgentWorkspaceInfo, String> {
 /// `AuditRecord` — the user-visible scope change is as auditable as any
 /// tool call. Best-effort: an audit write failure must never block the
 /// grant itself, only be reported loudly.
-fn audit_workspace_grant(vault: &Arc<Mutex<Option<Vault>>>, action: &str, root: &str) {
+pub(crate) fn audit_workspace_grant(vault: &Arc<Mutex<Option<Vault>>>, action: &str, root: &str) {
     let Ok(mut guard) = vault.lock() else {
         eprintln!("workspace-grant audit skipped: vault lock poisoned");
         return;
@@ -1492,6 +1495,13 @@ pub struct PendingGrantRequests {
 }
 
 impl PendingGrantRequests {
+    pub(crate) fn deny_all(&self) {
+        for (_, request) in self.lock_pending().drain(..) {
+            *request.decision.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(false);
+            request.decision.1.notify_all();
+        }
+    }
+
     /// Registers a new card and returns its id + the channel to wait on.
     fn insert(&self, path: String, proposed_folder: String) -> (u64, GrantDecisionChannel) {
         let id = self
@@ -1708,9 +1718,15 @@ fn request_folder_grant(app: &tauri::AppHandle, path: &Path) -> DeniedPathResolu
             proposed.display()
         ));
     }
-    // 3. Show the card and wait, bounded, deny by default.
-    let (request_id, decision) =
-        requests.insert(path.display().to_string(), proposed.display().to_string());
+    // Serialize card admission with vault locking: the lock sweep must see
+    // every pending card, including one racing the end of a tool call.
+    let (request_id, decision) = {
+        let guard = vault_state.vault.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.as_ref().is_none_or(|v| !v.is_unlocked()) {
+            return DeniedPathResolution::Denied("Pocket AI was locked".to_owned());
+        }
+        requests.insert(path.display().to_string(), proposed.display().to_string())
+    };
     let shown = app.emit(
         "unoone:folder-grant-request",
         serde_json::json!({
@@ -2875,7 +2891,10 @@ fn subagent_system_prefix() -> String {
          and verifies it.\n\
          You have the same tools as the parent, all audited and budgeted:\n\
          - Read/write/list/search/patch files in the workspace folder: {workspace}{granted_lines}\n\
-         - Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
+         - Host commands inherit the parent session permission. Folder grants do not \
+         sandbox commands; programs can access host files and the network. Never retry \
+         through another tool when permission is denied. \
+         Run programs directly (git, cargo, rustc, node, npm, npx, python, pip, \
          dotnet, go, java, cmake, make, gcc, clang, powershell)\n\
          - Deploy long-running processes with background:true on process.run\n\
          - Drive the real web browser via browser.act — the session is \
@@ -2927,6 +2946,7 @@ struct PaiSubagentProvider {
     /// same trail (tagged by the existing "[subagent-xxxx]" prefix) so the
     /// vault memory records what the whole run did, children included.
     trail: SharedAgentTrail,
+    process_lease: crate::desktop_process::ProcessLease,
 }
 
 impl PaiSubagentProvider {
@@ -2943,7 +2963,15 @@ impl PaiSubagentProvider {
         capabilities: CapabilitySet,
         trail: SharedAgentTrail,
     ) -> Self {
+        let process_lease = app
+            .as_ref()
+            .map(|app| {
+                app.state::<crate::desktop_process::DesktopProcessState>()
+                    .lease()
+            })
+            .unwrap_or_else(|| crate::desktop_process::DesktopProcessState::default().lease());
         Self {
+            process_lease,
             model_id,
             port,
             vault_root,
@@ -2955,6 +2983,11 @@ impl PaiSubagentProvider {
             capabilities,
             trail,
         }
+    }
+
+    fn with_process_lease(mut self, lease: crate::desktop_process::ProcessLease) -> Self {
+        self.process_lease = lease;
+        self
     }
 
     /// Build and run one child harness. Returns the child's final report.
@@ -3006,9 +3039,10 @@ impl PaiSubagentProvider {
                 error,
             )
         })?;
-        let broker = GrantedFolderBroker::new(
+        let broker = GrantedFolderBroker::with_process_lease(
             folders.clone(),
             FULL_ACCESS_PROGRAMS.iter().map(|p| (*p).to_owned()),
+            self.process_lease.clone(),
         );
         let child_prefix = format!("[{child_id}]");
         let mut builder = HarnessBuilder::embedded(Arc::new(broker))
@@ -3328,7 +3362,8 @@ impl Tool for AgentSpawnTool {
 /// "stopped" state rather than a fabricated result.
 #[derive(Default)]
 pub struct HarnessRunRegistry {
-    runs: Mutex<HashMap<String, CancellationToken>>,
+    runs: Mutex<HashMap<String, (u64, CancellationToken)>>,
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl HarnessRunRegistry {
@@ -3340,13 +3375,19 @@ impl HarnessRunRegistry {
     /// still-registered run is cancelled with `CancelCause::Parent`
     /// (superseded); first-cause-wins means its own loop stops at the next
     /// step boundary and reports the supersede honestly.
-    pub fn register(&self, conversation_id: &str, token: CancellationToken) {
+    pub fn register(&self, conversation_id: &str, token: CancellationToken) -> u64 {
         let Ok(mut runs) = self.runs.lock() else {
-            return; // poisoned lock: refuse to track, never block the chat
+            token.cancel(CancelCause::Parent);
+            return 0; // fail closed if registration is unavailable
         };
-        if let Some(previous) = runs.insert(conversation_id.to_owned(), token) {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if let Some((_, previous)) = runs.insert(conversation_id.to_owned(), (id, token)) {
             previous.cancel(CancelCause::Parent);
         }
+        id
     }
 
     /// User stop: cancels the live run for `conversation_id`. True only when
@@ -3356,16 +3397,28 @@ impl HarnessRunRegistry {
             return false;
         };
         match runs.get(conversation_id) {
-            Some(token) => token.cancel(CancelCause::User),
+            Some((_, token)) => token.cancel(CancelCause::User),
             None => false,
         }
     }
 
     /// Removes the finished (or crashed) run WITHOUT cancelling: a late Stop
     /// after the loop already ended must not report a phantom cancellation.
-    pub fn finish(&self, conversation_id: &str) {
+    pub fn finish(&self, conversation_id: &str, id: u64) {
         if let Ok(mut runs) = self.runs.lock() {
-            runs.remove(conversation_id);
+            if runs
+                .get(conversation_id)
+                .is_some_and(|(current, _)| *current == id)
+            {
+                runs.remove(conversation_id);
+            }
+        }
+    }
+
+    pub fn stop_all(&self) {
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        for (_, (_, token)) in runs.drain() {
+            token.cancel(CancelCause::Parent);
         }
     }
 }
@@ -3546,24 +3599,23 @@ pub async fn harness_chat(
     }
     let vault = Arc::clone(&vault_state.vault);
     let safety = Arc::clone(&safety_state.guard);
-    {
+    let browser = Arc::clone(browser_state.inner());
+    let (attachment_metadata, attachment_bytes) = attachments;
+    let stop_conversation_id = conversation_id.clone();
+    let cancel = CancellationToken::new();
+    let (run_id, process_lease) = {
         let guard = vault
             .lock()
             .map_err(|_| "Vault state lock failed".to_owned())?;
         if guard.as_ref().is_none_or(|open| !open.is_unlocked()) {
             return Err("Pocket AI vault is locked".to_owned());
         }
-    }
-    let browser = Arc::clone(browser_state.inner());
-    let (attachment_metadata, attachment_bytes) = attachments;
-    // Stop control (2026-10-01): this run's cancellation token is registered
-    // before the worker starts so `harness_stop_run` can interrupt the loop
-    // mid-run; the registry slot is cleared on every exit path after the
-    // await below. One live run per conversation — registering supersedes
-    // (cancels) any previous run still in flight for this conversation.
-    let stop_conversation_id = conversation_id.clone();
-    let cancel = CancellationToken::new();
-    run_registry.register(&stop_conversation_id, cancel.clone());
+        (
+            run_registry.register(&stop_conversation_id, cancel.clone()),
+            app.state::<crate::desktop_process::DesktopProcessState>()
+                .lease(),
+        )
+    };
     // Gap 1 (2026-09-16): live token tap for the chat UI. Tool-free model
     // turns stream their answer token-by-token as `chat-token` events; the
     // adapter keeps tool-bearing (agentic) turns buffered, so the event only
@@ -3637,11 +3689,12 @@ pub async fn harness_chat(
             None
         };
         let mut builder = if let Some(folders) = workspace_fs.clone() {
-            let broker = GrantedFolderBroker::new(
+            let broker = GrantedFolderBroker::with_process_lease(
                 folders,
                 FULL_ACCESS_PROGRAMS
                     .iter()
                     .map(|program| (*program).to_owned()),
+                process_lease.clone(),
             );
             HarnessBuilder::embedded(Arc::new(broker))
                 .map_err(|error| error.to_string())?
@@ -3686,18 +3739,21 @@ pub async fn harness_chat(
             // self-contained sub-task to a fresh nested harness run — a
             // sub-agent with the same verified model, the same fenced
             // workspace and the same audited tools, up to 2 levels deep.
-            Arc::new(PaiSubagentProvider::new(
-                model_id.clone(),
-                port,
-                vault_root.clone(),
-                Arc::clone(&vault),
-                vault_id.clone(),
-                Arc::clone(&safety),
-                Arc::clone(&browser),
-                Some(app.clone()),
-                capabilities.clone(),
-                Arc::clone(&run_trail),
-            ))
+            Arc::new(
+                PaiSubagentProvider::new(
+                    model_id.clone(),
+                    port,
+                    vault_root.clone(),
+                    Arc::clone(&vault),
+                    vault_id.clone(),
+                    Arc::clone(&safety),
+                    Arc::clone(&browser),
+                    Some(app.clone()),
+                    capabilities.clone(),
+                    Arc::clone(&run_trail),
+                )
+                .with_process_lease(process_lease.clone()),
+            )
         });
         if let Some(folders) = workspace_fs.clone() {
             for tool in desktop_workspace_tools(
@@ -3880,7 +3936,7 @@ pub async fn harness_chat(
     // Every exit path — worker panic, run error, cancellation, or success —
     // ends the run: clear the registry slot before returning so a late Stop
     // reports false instead of cancelling a phantom run.
-    run_registry.finish(&stop_conversation_id);
+    run_registry.finish(&stop_conversation_id, run_id);
     worker_result?
 }
 
@@ -3919,6 +3975,17 @@ mod grant_approval_tests {
         // drive roots — the card must never offer what a grant would refuse).
         let missing = std::path::PathBuf::from(r"C:\__unoone_never_exists__\file.txt");
         assert_eq!(propose_grant_folder(&missing), None);
+    }
+
+    #[test]
+    fn lock_denies_and_removes_every_pending_card() {
+        let requests = PendingGrantRequests::default();
+        let (_, a) = requests.insert("p".into(), "f".into());
+        let (_, b) = requests.insert("q".into(), "g".into());
+        requests.deny_all();
+        assert!(requests.snapshot().is_empty());
+        assert_eq!(*a.0.lock().unwrap(), Some(false));
+        assert_eq!(*b.0.lock().unwrap(), Some(false));
     }
 
     #[test]
@@ -3988,10 +4055,10 @@ mod run_registry_tests {
     fn finish_removes_the_run_without_cancelling() {
         let registry = HarnessRunRegistry::new();
         let token = CancellationToken::new();
-        registry.register("conv-2", token.clone());
+        let id = registry.register("conv-2", token.clone());
         // The run completed normally: finish() must clear the slot but never
         // touch the token (a completed run cannot be "stopped" retroactively).
-        registry.finish("conv-2");
+        registry.finish("conv-2", id);
         assert!(!token.is_cancelled());
         // A late Stop after the run ended reports false — no phantom stop.
         assert!(!registry.stop("conv-2"));
@@ -4001,9 +4068,10 @@ mod run_registry_tests {
     fn registering_a_new_run_supersedes_the_previous_one() {
         let registry = HarnessRunRegistry::new();
         let first = CancellationToken::new();
-        registry.register("conv-3", first.clone());
+        let old_id = registry.register("conv-3", first.clone());
         let second = CancellationToken::new();
         registry.register("conv-3", second.clone());
+        registry.finish("conv-3", old_id);
         // The superseded run is cancelled by the newer registration…
         assert!(first.is_cancelled());
         assert_eq!(first.cause(), Some(CancelCause::Parent));
@@ -4011,6 +4079,18 @@ mod run_registry_tests {
         assert!(!second.is_cancelled());
         assert!(registry.stop("conv-3"));
         assert_eq!(second.cause(), Some(CancelCause::User));
+    }
+
+    #[test]
+    fn lock_cancels_and_removes_every_conversation() {
+        let registry = HarnessRunRegistry::new();
+        let a = CancellationToken::new();
+        let b = CancellationToken::new();
+        registry.register("a", a.clone());
+        registry.register("b", b.clone());
+        registry.stop_all();
+        assert!(a.is_cancelled() && b.is_cancelled());
+        assert!(!registry.stop("a") && !registry.stop("b"));
     }
 
     #[test]

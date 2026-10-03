@@ -72,6 +72,9 @@ function App() {
   const [bootError, setBootError] = useState('');
   const [startupPhase, setStartupPhase] = useState<StartupPhase>('STARTING');
   const bootstrappedRoot = useRef('');
+  const bootGeneration = useRef(0);
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
 
   const handleUnlock = useCallback((id: string, root: string) => {
     setVaultId(id);
@@ -80,13 +83,21 @@ function App() {
   }, []);
 
   const handleLock = useCallback(() => {
-    void tauriApi.stopModelServer().catch(() => undefined);
-    void tauriApi.lockVault().catch(() => undefined);
+    bootGeneration.current += 1;
+    screenRef.current = 'unlock';
+    void tauriApi.lockVault().catch(error => setBootError(`Lock cleanup failed: ${String(error)}`));
+    setPreUnlockRoot('');
     bootstrappedRoot.current = '';
     setVaultId('');
     setVaultRoot('');
     setScreen('unlock');
     setCurrentView('chat');
+  }, []);
+
+  useEffect(() => {
+    const cancelAutomaticBoot = () => { bootGeneration.current += 1; };
+    window.addEventListener('unoone:model-manual-control', cancelAutomaticBoot);
+    return () => window.removeEventListener('unoone:model-manual-control', cancelAutomaticBoot);
   }, []);
 
   // Load settings to get auto-lock timer; re-fetch when vaultId changes
@@ -143,43 +154,21 @@ function App() {
     // catch below (Limited mode), and a drive removal locks the app
     // independently of this chain.
     bootstrappedRoot.current = bootRoot;
+    const generation = bootGeneration.current;
+    const assertCurrent = () => {
+      if (generation !== bootGeneration.current) throw new Error('Model startup cancelled.');
+    };
     void (async () => {
       try {
         setBootError('');
-        // Wait for the model-boot release, not the full sweep. The backend
-        // runs a fast BootGate first (identity + runtime executables —
-        // BOOT_ASSETS_VERIFIED) and releases model boot from the
-        // digest-verified host cache while the full DesktopLaunch sweep of
-        // models/voice/speech keeps running in the background (it ends in
-        // PAI_CONNECTED). The backend gate (start_model_server) still
-        // refuses a drive-path model until the full sweep finishes.
-        const initialStatus = await tauriApi.getStartupStatus();
-        const validationPhase = initialStatus.phase;
-        if (validationPhase === 'CHECKING_ASSETS' || validationPhase === 'VALIDATING_PAI') {
-          await new Promise<void>((resolve, reject) => {
-            const poll = async () => {
-              const status = await tauriApi.getStartupStatus();
-              if (status.phase === 'PAI_CONNECTED' || status.phase === 'BOOT_ASSETS_VERIFIED') {
-                resolve();
-              } else if (status.phase === 'PAI_INVALID') {
-                reject(new Error('Pocket AI assets failed validation.'));
-              } else {
-                setTimeout(poll, 250);
-              }
-            };
-            poll();
-          });
-        }
-        await tauriApi.getHardwareProfile();
-        const models = await tauriApi.listModels(bootRoot);
-        const desktopModel = models.find(model =>
-          model.available && model.model_type.toLowerCase().includes('12b')
-        );
-        if (!desktopModel) {
-          throw new Error('No manifest-verified Gemma 12B desktop model is available.');
-        }
+        // The backend waits on authoritative validation flags, even if unlock
+        // advances the display phase while the asset sweep is still running.
+        assertCurrent();
+        const selection = await tauriApi.selectDesktopModel(bootRoot);
+        assertCurrent();
+        const desktopModel = selection.model;
+        const config = selection.config;
         await tauriApi.detectAcceleration();
-        const config = await tauriApi.getModelConfig();
         // Prefer the digest-verified host cache when the model is staged
         // there: same bytes (keyed by the manifest sha256), read from the
         // host disk instead of the slow USB drive. The cheap status probe
@@ -194,16 +183,19 @@ function App() {
         } catch {
           // No manifest hash / no cache yet — boot from the drive as before.
         }
+        assertCurrent();
         await tauriApi.startModelServer({
           ...config,
           model_path: bootModelPath,
           mmproj_path: desktopModel.mmproj_path,
         }, bootRoot);
+        assertCurrent();
         const health = await tauriApi.checkModelHealth();
         if (!health.model_id) {
           throw new Error('The model server responded without a verified model identity.');
         }
       } catch (e) {
+        if (generation !== bootGeneration.current) return;
         await tauriApi.setStartupLimited().catch(() => undefined);
         setBootError(`Limited mode: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -279,6 +271,7 @@ function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen('unoone:ensure-browser-workspace', () => {
+      if (screenRef.current !== 'main') return;
       void ensureBrowserWorkspaceWindow();
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
@@ -295,20 +288,21 @@ function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen<{ path: string }>('unoone:ensure-preview-window', event => {
+      if (screenRef.current !== 'main') return;
       setPreviewActive(true);
       void ensurePreviewWindow(event.payload.path);
     }).then(fn => { unlisten = fn; });
     return () => { unlisten?.(); };
   }, []);
   useEffect(() => {
-    if (!previewActive) return;
+    if (!previewActive || screen !== 'main') return;
     const id = window.setInterval(() => {
       void tauriApi.previewPoll()
         .then(result => { if (!result.active) setPreviewActive(false); })
         .catch(() => {});
     }, 1500);
     return () => { window.clearInterval(id); };
-  }, [previewActive]);
+  }, [previewActive, screen]);
 
   // In-chat folder-grant approval (2026-10-03): when an agent run hits a
   // path outside every granted folder, the backend (running on a tool
@@ -494,3 +488,4 @@ function App() {
 }
 
 export default App;
+
