@@ -30,6 +30,8 @@ mod doc_writer;
 // P1-C: desktop producer of the shared ProcedureOutcome contract record —
 // every completed harness agent run leaves honest, never-promotable
 // telemetry in the canonical vault.
+mod desktop_model_policy;
+mod desktop_process;
 mod env_learning;
 mod gguf_meta;
 mod granted_fs;
@@ -185,6 +187,7 @@ fn main() {
         .manage(agent_state)
         // The live website preview's bounded mirror + reload session.
         .manage(preview::PreviewState::default())
+        .manage(desktop_process::DesktopProcessState::default())
         // Stop control for in-flight harness runs, keyed by conversation.
         .manage(harness_bridge::HarnessRunRegistry::new())
         // In-chat folder-grant approval cards (see harness_bridge.rs).
@@ -204,6 +207,7 @@ fn main() {
             get_hardware_profile,
             // Model management
             llama::list_models,
+            llama::select_desktop_model,
             llama::detect_acceleration,
             llama::get_model_config,
             llama::get_context_budget,
@@ -274,6 +278,8 @@ fn main() {
             // rollback path until acceptance parity is proven on device.
             harness_bridge::harness_chat,
             harness_bridge::harness_stop_run,
+            get_execution_status,
+            set_execution_permission,
             harness_bridge::get_workspace_root,
             // P7 (2026-10-01): user-granted agent workspace root (Settings UI).
             harness_bridge::get_agent_workspace_info,
@@ -296,6 +302,7 @@ fn main() {
         .expect("error while building UnoOne Power")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                stop_desktop_work(app);
                 app.state::<recording::RecordingStateHolder>()
                     .emergency_discard();
                 app.state::<llama::ModelManagerState>()
@@ -664,6 +671,7 @@ fn unlock_vault(
     vault_root: String,
     state: tauri::State<'_, DesktopVaultState>,
     startup_state: tauri::State<'_, startup::StartupCoordinator>,
+    app: tauri::AppHandle,
 ) -> Result<VaultUnlockResult, String> {
     startup_state.set_phase(startup::StartupPhase::Unlocking);
     if password.is_empty() {
@@ -711,6 +719,8 @@ fn unlock_vault(
                 .vault_root
                 .lock()
                 .map_err(|e| format!("State lock error: {}", e))? = vault_root.clone();
+            app.state::<llama::ModelManagerState>().resume();
+            app.state::<preview::PreviewState>().resume();
             startup_state.set_phase(startup::StartupPhase::ScanningHost);
 
             // Security-baseline bootstrap: verify_vault (and the Settings
@@ -935,39 +945,63 @@ fn setup_vault(
     }
 }
 
-#[tauri::command]
-fn lock_vault(state: tauri::State<'_, DesktopVaultState>) -> Result<(), String> {
-    // D7: Properly lock and drop the Vault, zeroing the master key.
-    let mut vault_opt = state
-        .vault
-        .lock()
-        .map_err(|e| format!("State lock error: {}", e))?;
-
-    if let Some(vault) = vault_opt.as_mut() {
-        // Vault::lock() zeros the master key via secure_zero.
-        vault.lock().map_err(|e| format!("Lock failed: {}", e))?;
+/// Close admission before terminating owned work. The vault is dropped first so
+/// a concurrent chat cannot register a new run after the cancellation sweep.
+fn stop_desktop_work(app: &tauri::AppHandle) {
+    app.state::<DesktopVaultState>().emergency_lock();
+    app.state::<llama::ModelManagerState>().suspend();
+    app.state::<harness_bridge::HarnessRunRegistry>().stop_all();
+    app.state::<harness_bridge::PendingGrantRequests>()
+        .deny_all();
+    app.state::<desktop_process::DesktopProcessState>()
+        .set_enabled(false);
+    preview::emergency_stop(app);
+    if let Some(window) = app.get_webview_window("browser-workspace") {
+        let _ = window.close();
     }
+}
 
-    // Drop the Vault — its Drop impl also zeros any remaining key material.
-    *vault_opt = None;
-
-    // Clear metadata mirrors
-    *state
-        .unlocked
-        .lock()
-        .map_err(|e| format!("State lock error: {}", e))? = false;
-    state
-        .vault_id
-        .lock()
-        .map_err(|e| format!("State lock error: {}", e))?
-        .clear();
-    state
-        .vault_root
-        .lock()
-        .map_err(|e| format!("State lock error: {}", e))?
-        .clear();
-
+#[tauri::command]
+async fn lock_vault(app: tauri::AppHandle) -> Result<(), String> {
+    stop_desktop_work(&app);
+    app.state::<recording::RecordingStateHolder>()
+        .emergency_discard();
+    app.state::<llama::ModelManagerState>()
+        .emergency_stop()
+        .await;
     Ok(())
+}
+
+#[tauri::command]
+fn get_execution_status(
+    state: tauri::State<'_, desktop_process::DesktopProcessState>,
+) -> desktop_process::ExecutionStatus {
+    state.status()
+}
+
+#[tauri::command]
+fn set_execution_permission(
+    enabled: bool,
+    state: tauri::State<'_, desktop_process::DesktopProcessState>,
+    vault: tauri::State<'_, DesktopVaultState>,
+) -> Result<desktop_process::ExecutionStatus, String> {
+    // Keep the vault guard through permission admission, ordering it against lock.
+    let guard = vault.vault.lock().map_err(|_| "Vault lock failed")?;
+    if enabled && guard.as_ref().is_none_or(|v| !v.is_unlocked()) {
+        return Err("Unlock Pocket AI before enabling host commands".to_owned());
+    }
+    state.set_enabled(enabled);
+    drop(guard);
+    harness_bridge::audit_workspace_grant(
+        &vault.vault,
+        if enabled {
+            "host_commands_enabled"
+        } else {
+            "host_commands_revoked"
+        },
+        "session-only; host filesystem and network access",
+    );
+    Ok(state.status())
 }
 
 /// D7: Check if the vault is currently unlocked (fast metadata read, no vault lock needed).

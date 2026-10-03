@@ -19,6 +19,9 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
   });
   const [appVersion, setAppVersion] = useState('v0.1.0');
   const [error, setError] = useState('');
+  const [execution, setExecution] = useState<{ enabled: boolean; owned_processes: number } | null>(null);
+  const [executionBusy, setExecutionBusy] = useState(false);
+  const [confirmExecution, setConfirmExecution] = useState(false);
   // P7 — user-granted agent workspace root (full-access lane).
   const [workspace, setWorkspace] = useState<AgentWorkspaceInfo | null>(null);
   const [workspaceInput, setWorkspaceInput] = useState('');
@@ -32,22 +35,22 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
   useEffect(() => {
     async function loadSettings() {
       try {
-        const [secLevel, vaultInfo, backendSettings, version, workspaceInfo] = await Promise.all([
+        const [secLevel, backendSettings, version, workspaceInfo, executionStatus] = await Promise.all([
           tauriApi.getSecurityLevel(),
-          tauriApi.detectVault(),
           tauriApi.getSettings(vaultRoot).catch(() => null),
           tauriApi.getVersion().catch(() => null),
           tauriApi.getAgentWorkspaceInfo().catch(() => null),
+          tauriApi.getExecutionStatus(),
         ]);
         setSettings(prev => ({
           ...prev,
           securityLevel: secLevel,
-          modelPath: vaultInfo.detected ? vaultInfo.vault_root + '\\MODELS\\gemma4-12b-q4' : prev.modelPath,
           ...(backendSettings ? {
             maxTokens: backendSettings.max_tokens,
             temperature: backendSettings.temperature,
           } : {}),
         }));
+        setExecution(executionStatus);
         if (version) setAppVersion(version);
         if (workspaceInfo) {
           setWorkspace(workspaceInfo);
@@ -59,6 +62,19 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
     }
     loadSettings();
   }, [vaultRoot]);
+
+  const changeExecution = async (enabled: boolean) => {
+    setExecutionBusy(true);
+    setError('');
+    try {
+      setExecution(await tauriApi.setExecutionPermission(enabled));
+      setConfirmExecution(false);
+    } catch (e) {
+      setError(`Command permission failed: ${String(e)}`);
+    } finally {
+      setExecutionBusy(false);
+    }
+  };
 
   // Grant a new workspace root (validated + audited by the backend) or
   // revoke the grant and return to the default.
@@ -320,6 +336,26 @@ export function SettingsView({ vaultRoot }: SettingsViewProps) {
                 </div>
                 {workspaceMsg && (
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{workspaceMsg}</div>
+                )}
+              </div>
+              <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '8px' }}>
+                <div className="settings-row-label">Host commands</div>
+                <div className="settings-row-desc">
+                  Programs can read and change files outside granted folders and use the network.
+                  Enable only for tasks you trust. Permission ends when you lock Pocket AI, unplug
+                  the drive, or close the app. Revoking it stops owned commands and background jobs.
+                </div>
+                {execution?.enabled ? (
+                  <button disabled={executionBusy} onClick={() => void changeExecution(false)}>
+                    Revoke command permission
+                  </button>
+                ) : confirmExecution ? (
+                  <div role="group" aria-label="Confirm host command permission">
+                    <button disabled={executionBusy} onClick={() => void changeExecution(true)}>Allow host commands this session</button>
+                    <button disabled={executionBusy} onClick={() => setConfirmExecution(false)}>Cancel</button>
+                  </div>
+                ) : (
+                  <button disabled={executionBusy || execution === null} onClick={() => setConfirmExecution(true)}>Enable host commands…</button>
                 )}
               </div>
               <div className="settings-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '8px' }}>

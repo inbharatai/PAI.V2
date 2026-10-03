@@ -196,6 +196,7 @@ impl PreviewSession {
 /// Managed Tauri state: at most one live preview session.
 pub(crate) struct PreviewState {
     session: Mutex<Option<PreviewSession>>,
+    blocked: std::sync::atomic::AtomicBool,
     /// Where this state stages its mirrors — `%TEMP%\unoone-preview` in
     /// the app; tests point it at an isolated directory so parallel test
     /// stagings can never delete each other's mirrors.
@@ -206,18 +207,26 @@ impl Default for PreviewState {
     fn default() -> Self {
         Self {
             session: Mutex::new(None),
+            blocked: std::sync::atomic::AtomicBool::new(false),
             mirror_root: preview_dir(),
         }
     }
 }
 
 impl PreviewState {
+    pub(crate) fn resume(&self) {
+        let _guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+        self.blocked
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// A state whose mirrors stage under `mirror_root` (tests use this for
     /// isolation; the app uses [`PreviewState::default`]).
     #[cfg(test)]
     pub(crate) fn with_mirror_root(mirror_root: PathBuf) -> Self {
         Self {
             session: Mutex::new(None),
+            blocked: std::sync::atomic::AtomicBool::new(false),
             mirror_root,
         }
     }
@@ -245,6 +254,10 @@ pub(crate) fn start_preview(
     state: &PreviewState,
     entry: &Path,
 ) -> Result<PreviewSessionInfo, String> {
+    let mut session = state.session.lock().map_err(|_| "Preview lock failed")?;
+    if state.blocked.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Unlock Pocket AI before starting a preview".to_owned());
+    }
     let extension = entry
         .extension()
         .and_then(|ext| ext.to_str())
@@ -270,13 +283,12 @@ pub(crate) fn start_preview(
     }
     stage_mirror(&root, &files, &state.mirror_root)?;
     let mirror_root = state.mirror_root.clone();
-    *state.session.lock().expect("preview session lock") = Some(PreviewSession {
+    *session = Some(PreviewSession {
         root,
         mirror_root,
         entry_name: entry_name.into(),
         signature,
     });
-    let session = state.session.lock().expect("preview session lock");
     Ok(PreviewSessionInfo {
         // The session just stored holds the entry name; read it back so the
         // two can never drift.
@@ -356,17 +368,26 @@ pub(crate) fn preview_stop(
     state: tauri::State<PreviewState>,
     app: tauri::AppHandle,
 ) -> Result<bool, String> {
-    let had = state
-        .session
-        .lock()
-        .expect("preview session lock")
-        .take()
-        .is_some();
+    Ok(stop_session(&state, &app, false))
+}
+
+pub(crate) fn emergency_stop(app: &tauri::AppHandle) {
+    stop_session(&app.state::<PreviewState>(), app, true);
+}
+
+fn stop_session(state: &PreviewState, app: &tauri::AppHandle, block: bool) -> bool {
+    let mut session = state.session.lock().unwrap_or_else(|e| e.into_inner());
+    if block {
+        state
+            .blocked
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let had = session.take().is_some();
     if let Some(window) = app.get_webview_window(PREVIEW_WINDOW_LABEL) {
         let _ = window.close();
     }
     let _ = std::fs::remove_dir_all(&state.mirror_root);
-    Ok(had)
+    had
 }
 
 /// The chat affordance: focuses the preview window, or re-opens it on the

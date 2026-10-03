@@ -319,6 +319,7 @@ pub fn start_mount_monitor(app: AppHandle) {
 }
 
 async fn cleanup_after_removal(app: AppHandle) {
+    crate::stop_desktop_work(&app);
     app.state::<recording::RecordingStateHolder>()
         .emergency_discard();
     app.state::<llama::ModelManagerState>()

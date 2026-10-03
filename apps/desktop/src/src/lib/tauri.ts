@@ -486,6 +486,9 @@ export const tauriApi = {
   getVaultStatus: () => invoke<VaultStatus>('get_vault_status'),
 
   // Model management
+  selectDesktopModel: (vaultRoot: string) => invoke<{ model: ModelInfo; config: ModelConfig; reason: string }>('select_desktop_model', { vault_root: vaultRoot }),
+  getExecutionStatus: () => invoke<{ enabled: boolean; owned_processes: number }>('get_execution_status'),
+  setExecutionPermission: (enabled: boolean) => invoke<{ enabled: boolean; owned_processes: number }>('set_execution_permission', { enabled }),
   listModels: (vaultRoot: string) => invoke<ModelInfo[]>('list_models', { vault_root: vaultRoot }),
   detectAcceleration: () => invoke<AccelerationBackend[]>('detect_acceleration'),
   getModelConfig: () => invoke<ModelConfig>('get_model_config'),
@@ -687,3 +690,4 @@ export const tauriApi = {
   // MEDIA_ERR_SRC_NOT_SUPPORTED), so strip it before converting.
   convertFileSrc: (path: string) => convertFileSrc(path.replace(/^\\\\\?\\/, '')),
 };
+

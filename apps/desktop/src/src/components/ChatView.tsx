@@ -1155,7 +1155,7 @@ export function ChatView() {
               disabled={isGenerating}
             />
             <span>
-              Full access — read/write files, run commands, drive the browser
+              Agent tools — granted files and browser; commands need Settings permission
               <span style={{ color: 'var(--text-muted, #666)' }}>
                 {' '}(workspace: {workspaceRoot} · audited + budgeted)
               </span>
@@ -1378,3 +1378,4 @@ export function ChatView() {
     </div>
   );
 }
+
