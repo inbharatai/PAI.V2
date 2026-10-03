@@ -1856,6 +1856,17 @@ impl ModelManagerState {
         }
     }
 
+    fn cancel_pending_start(&self) {
+        let mut cancel = self
+            .startup_cancel
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        cancel.cancel(inbharat_harness_core::CancelCause::User);
+        *cancel = inbharat_harness_core::CancellationToken::new();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Emergency cleanup used when the Pocket AI is removed or the app exits.
     pub async fn emergency_stop(&self) {
         let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
@@ -2447,6 +2458,16 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Model file not found"));
         assert_eq!(manager.get_status(), ModelStatus::Error);
+    }
+
+    #[test]
+    fn manual_model_stop_cancels_loading_and_preserves_restart_admission() {
+        let state = ModelManagerState::new();
+        let pending = state.startup_cancel.lock().unwrap().clone();
+        state.cancel_pending_start();
+        assert!(pending.is_cancelled());
+        assert!(!state.startup_cancel.lock().unwrap().is_cancelled());
+        assert!(!state.suspended.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[test]
@@ -3158,9 +3179,7 @@ pub async fn check_model_health(
 /// D1: Stop the currently managed llama-server process and clear state.
 #[tauri::command]
 pub async fn stop_model_server(state: tauri::State<'_, ModelManagerState>) -> Result<(), String> {
-    state
-        .generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    state.cancel_pending_start();
     let mut manager = state.manager.lock().await;
     if let Some(manager) = manager.take() {
         manager.stop_server()?;
