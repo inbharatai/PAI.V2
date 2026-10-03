@@ -5,7 +5,7 @@
 //! `scripts/check_tool_contract_sync.py` (android tables), run in both CI workflows.
 //! `browser.act`, `web.preview` and `agent.spawn` construct their manifests inline
 //! behind an `AppHandle` (not constructible in a unit test), so this test pins their
-//! ids in the contract and fully pins manifest facts for the other 12 desktop tools.
+//! ids in the contract and fully pins manifest facts for the other 13 desktop tools.
 
 #[cfg(test)]
 mod tests {
@@ -14,7 +14,7 @@ mod tests {
     };
     use crate::safety::DesktopSafetyGuard;
     use inbharat_harness_core::tools::{
-        ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool,
+        CopyFileTool, ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool,
     };
     use inbharat_harness_core::{RootedFs, Tool};
     use std::sync::{Arc, Mutex};
@@ -104,6 +104,7 @@ mod tests {
             Box::new(ListFilesTool::default()),
             Box::new(WriteFileTool::default()),
             Box::new(MakeDirTool::default()),
+            Box::new(CopyFileTool::default()),
             Box::new(RunProcessTool::default()),
             Box::new(DesktopSearchTool::new(folders.clone())),
             Box::new(DesktopPatchTool::new(folders.clone())),

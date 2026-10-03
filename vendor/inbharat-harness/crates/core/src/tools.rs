@@ -727,6 +727,68 @@ impl Tool for MakeDirTool {
     }
 }
 
+/// Binary-safe file copy (design-website lane, 2026-10-03). `fs.read` is
+/// UTF-8-only, so a model that "copies" an image by reading it and writing
+/// the text back silently corrupts every binary file — the exact defect that
+/// left the agent unable to build designed websites with real images. This
+/// tool copies bytes disk-to-disk through the fence: no text round-trip
+/// ever touches the content, PNGs/JPGs/PDFs arrive byte-identical, and the
+/// destination write is atomic (temp + rename) like every other write.
+pub struct CopyFileTool {
+    manifest: ToolManifest,
+}
+
+impl Default for CopyFileTool {
+    fn default() -> Self {
+        Self {
+            manifest: manifest(
+                "fs.copy",
+                "Copy one file inside the configured root, byte-exact (safe for images and \
+                 other binary files — never copy a binary file via fs.read + fs.write)",
+                CapabilitySet::from_slice(&[Capability::FileRead, Capability::FileWrite]),
+                vec![ExecutionLevel::L1, ExecutionLevel::L2, ExecutionLevel::L3],
+                SideEffect::Write,
+                ConfirmationMode::OnSideEffect,
+            ),
+        }
+    }
+}
+
+impl Tool for CopyFileTool {
+    fn manifest(&self) -> &ToolManifest {
+        &self.manifest
+    }
+
+    fn validate_arguments(&self, arguments: &ToolArguments) -> HarnessResult<()> {
+        require_exact_string(arguments, &["from", "to"])
+    }
+
+    fn execute(
+        &self,
+        arguments: &ToolArguments,
+        context: &ToolContext<'_>,
+    ) -> HarnessResult<ToolOutput> {
+        let from = argument_string(arguments, "from")?;
+        let to = argument_string(arguments, "to")?;
+        let copied = context
+            .execution
+            .copy_file(Path::new(from), Path::new(to))?;
+        let value = Value::Object(BTreeMap::from([
+            ("from".to_owned(), Value::String(from.to_owned())),
+            ("to".to_owned(), Value::String(to.to_owned())),
+            (
+                "bytes".to_owned(),
+                Value::Integer(i64::try_from(copied).unwrap_or(i64::MAX)),
+            ),
+        ]));
+        Ok(ToolOutput {
+            model_content: format!("copied {copied} bytes from {from} to {to}"),
+            value,
+            presentation: BTreeMap::from([("kind".to_owned(), "file-copy".to_owned())]),
+        })
+    }
+}
+
 /// Allowlisted direct-argv subprocess tool. Never invokes a shell.
 pub struct RunProcessTool {
     manifest: ToolManifest,
@@ -864,6 +926,7 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) -> HarnessResult<()> 
     registry.register(Arc::new(ListFilesTool::default()))?;
     registry.register(Arc::new(WriteFileTool::default()))?;
     registry.register(Arc::new(MakeDirTool::default()))?;
+    registry.register(Arc::new(CopyFileTool::default()))?;
     registry.register(Arc::new(RunProcessTool::default()))?;
     Ok(())
 }
@@ -919,6 +982,10 @@ fn schemas(id: &str) -> (&'static str, &'static str) {
         "fs.mkdir" => (
             r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
             r#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}"#,
+        ),
+        "fs.copy" => (
+            r#"{"type":"object","properties":{"from":{"type":"string","description":"source file inside the root"},"to":{"type":"string","description":"destination inside the root — parents are created if missing; an existing destination file is atomically replaced"}},"required":["from","to"],"additionalProperties":false}"#,
+            r#"{"type":"object","properties":{"from":{"type":"string"},"to":{"type":"string"},"bytes":{"type":"integer"}},"required":["from","to","bytes"],"additionalProperties":false}"#,
         ),
         // Defect #38 follow-up (live-caught 2026-09-15): the background flag
         // was implemented but NOT declared in the model-facing schema — a
@@ -1412,6 +1479,84 @@ mod tests {
             output.model_content.contains("5 bytes, 5 chars"),
             "fs.read must state the exact size, got: {}",
             output.model_content
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn copy_file_tool_copies_binary_byte_exact() -> HarnessResult<()> {
+        // The tool behind the design-website lane: a binary image payload
+        // (high-bit bytes, NOT valid UTF-8 — the kind fs.read+fs.write
+        // corrupts) must arrive byte-identical through fs.copy, with the
+        // byte count in the model-facing result, missing parents created,
+        // and the argument surface staying exactly (from, to).
+        let dir = std::env::temp_dir().join(format!(
+            "inbharat-tools-fscopy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            Failure::invalid("test.setup", format!("temp dir creation failed: {error}"))
+        })?;
+        let payload: Vec<u8> = (0..=255_u16)
+            .map(|index| index as u8 ^ 0x5C)
+            .chain([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+            .collect();
+        std::fs::create_dir_all(dir.join("assets")).map_err(|error| {
+            Failure::invalid("test.setup", format!("temp assets dir failed: {error}"))
+        })?;
+        std::fs::write(dir.join("assets").join("photo.png"), &payload).map_err(|error| {
+            Failure::invalid("test.setup", format!("temp binary write failed: {error}"))
+        })?;
+
+        let tool = CopyFileTool::default();
+        let root_fs = crate::execution::RootedFs::new(&dir)?;
+        let execution = crate::execution::LocalExecutionBroker::new(root_fs, Vec::new());
+        let cancel = CancellationToken::new();
+        let context = ToolContext {
+            actor: "actor",
+            level: ExecutionLevel::L3,
+            execution: &execution,
+            cancel: &cancel,
+        };
+        let arguments: ToolArguments = [
+            ("from", Value::String("assets/photo.png".to_owned())),
+            ("to", Value::String("site/img/photo.png".to_owned())),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value))
+        .collect();
+        let output = tool.execute(&arguments, &context)?;
+        assert!(
+            output.model_content.contains("copied 264 bytes"),
+            "fs.copy must state the copied byte count, got: {}",
+            output.model_content
+        );
+        assert!(
+            output.model_content.contains("assets/photo.png")
+                && output.model_content.contains("site/img/photo.png"),
+            "fs.copy must name both paths, got: {}",
+            output.model_content
+        );
+        assert_eq!(
+            std::fs::read(dir.join("site").join("img").join("photo.png")).map_err(|error| {
+                Failure::invalid("test.assert", format!("cannot re-read copy: {error}"))
+            })?,
+            payload,
+            "binary content must survive the copy byte-identically"
+        );
+
+        // The model-facing surface stays exactly (from, to).
+        let mut stray: ToolArguments = arguments.clone();
+        stray.insert("mode".to_owned(), Value::String("fast".to_owned()));
+        assert!(
+            tool.validate_arguments(&stray).is_err(),
+            "fs.copy must reject unexpected arguments"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

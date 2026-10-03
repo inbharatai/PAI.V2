@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn contract_parses_and_holds_invariants() {
         let c = ToolContract::parse().expect("contract must parse");
-        assert_eq!(c.tools.len(), 62);
+        assert_eq!(c.tools.len(), 63);
     }
 
     #[test]
@@ -262,6 +262,7 @@ mod tests {
                 "agent.spawn",
                 "browser.act",
                 "doc.create",
+                "fs.copy",
                 "fs.list",
                 "fs.mkdir",
                 "fs.read",
@@ -275,7 +276,7 @@ mod tests {
                 "workspace.patch",
                 "workspace.search",
             ],
-            "15 desktop tools: 4 read-lane, 5 harness builtins, 6 bridge tools"
+            "16 desktop tools: 4 read-lane, 6 harness builtins, 6 bridge tools"
         );
     }
 

@@ -5,6 +5,7 @@
 
 use crate::cancel::CancellationToken;
 use crate::error::{ErrorCode, Failure, FailureClass, HarnessResult};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -56,6 +57,21 @@ impl RootedFs {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The read budget this fence enforces — multi-root callers (granted
+    /// folder sets) need it to pre-bound a byte-precise operation against
+    /// the SAME budget instead of guessing a second constant.
+    #[must_use]
+    pub fn max_read_bytes(&self) -> usize {
+        self.max_read_bytes
+    }
+
+    /// The write budget this fence enforces (same rationale as
+    /// [`RootedFs::max_read_bytes`]).
+    #[must_use]
+    pub fn max_write_bytes(&self) -> usize {
+        self.max_write_bytes
     }
 
     /// Resolves an existing path without permitting root escape or symlink escape.
@@ -268,78 +284,13 @@ impl RootedFs {
                 "write exceeds configured byte limit",
             ));
         }
-        let joined = self.lexical_join(relative.as_ref())?;
-        if joined == self.root {
-            return Err(Failure::invalid(
-                "fs.write",
-                "cannot replace root directory",
-            ));
-        }
-        if joined.exists() {
-            let canonical = fs::canonicalize(&joined).map_err(|error| {
-                io_failure(
-                    ErrorCode::FilesystemDenied,
-                    "fs.write",
-                    "cannot canonicalize target",
-                    error,
-                )
-            })?;
-            self.ensure_inside(&canonical)?;
-            if canonical.is_dir() {
-                return Err(Failure::invalid("fs.write", "target is a directory"));
-            }
-        }
-        let parent = joined
-            .parent()
-            .ok_or_else(|| Failure::invalid("fs.write", "target must have an in-root parent"))?;
-        // Defect #29 (live-caught 2026-09-14, long-coding acceptance): the
-        // tool set had no directory-creation capability at all, and this
-        // write path required the parent to already exist — so the very
-        // first step of any "create a folder with files in it" task failed
-        // with "target parent does not exist" forever (the local 12B
-        // retried the identical fs.write every ~96 s, zero files, no
-        // progress, until killed). Real coding agents create missing parent
-        // directories on write; do the same through the fenced component
-        // walk (ensure_no_escape + per-component canonicalize +
-        // ensure_inside), so the fence is preserved exactly.
-        if !parent.exists() {
-            self.create_dir_all(parent)?;
-        }
-        let canonical_parent = fs::canonicalize(parent).map_err(|error| {
-            io_failure(
-                ErrorCode::FilesystemDenied,
-                "fs.write",
-                "target parent does not exist",
-                error,
-            )
-        })?;
-        self.ensure_inside(&canonical_parent)?;
-
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_nanos();
-        let temp = canonical_parent.join(format!(".inbharat-tmp-{}-{nonce}", std::process::id()));
-        let write_result = (|| -> std::io::Result<()> {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temp)?;
-            file.write_all(contents.as_bytes())?;
+        let bytes = contents.as_bytes();
+        self.atomic_replace(relative.as_ref(), |temp| {
+            let mut file = OpenOptions::new().create_new(true).write(true).open(temp)?;
+            file.write_all(bytes)?;
             file.sync_all()?;
-            fs::rename(&temp, &joined)?;
             Ok(())
-        })();
-        if let Err(error) = write_result {
-            let _remove_result = fs::remove_file(&temp);
-            return Err(io_failure(
-                ErrorCode::FilesystemDenied,
-                "fs.write",
-                "atomic write failed",
-                error,
-            ));
-        }
-        Ok(())
+        })
     }
 
     /// Atomically replaces a file with BINARY contents. Identical fence,
@@ -359,7 +310,32 @@ impl RootedFs {
                 "write exceeds configured byte limit",
             ));
         }
-        let joined = self.lexical_join(relative.as_ref())?;
+        self.atomic_replace(relative.as_ref(), |temp| {
+            let mut file = OpenOptions::new().create_new(true).write(true).open(temp)?;
+            file.write_all(contents)?;
+            file.sync_all()?;
+            Ok(())
+        })
+    }
+
+    /// Shared destination-validation + temp-file+rename tail behind both
+    /// atomic write paths. `populate` fills the freshly created temp file
+    /// (always `create_new`, so concurrent writers never interleave), and
+    /// the temp is atomically renamed onto the destination only after it
+    /// is fully written and synced — a failed or interrupted write leaves
+    /// either the old file or nothing, never a half-written destination.
+    /// The temp file is removed on every error path.
+    ///
+    /// Fence rules preserved exactly from the original inline code:
+    /// root itself refused, existing destination canonicalized and checked
+    /// inside the root + must be a file, missing parents created through
+    /// the fenced component walk (defect-#29 rule), parent canonicalized
+    /// and checked inside the root before the temp lands next to it.
+    fn atomic_replace<F>(&self, relative: &Path, populate: F) -> HarnessResult<()>
+    where
+        F: FnOnce(&Path) -> std::io::Result<()>,
+    {
+        let joined = self.lexical_join(relative)?;
         if joined == self.root {
             return Err(Failure::invalid(
                 "fs.write",
@@ -383,8 +359,8 @@ impl RootedFs {
         let parent = joined
             .parent()
             .ok_or_else(|| Failure::invalid("fs.write", "target must have an in-root parent"))?;
-        // Same defect-#29 rule as the text write: create missing parents
-        // through the fenced component walk.
+        // Same defect-#29 rule as the original inline code: create missing
+        // parents through the fenced component walk.
         if !parent.exists() {
             self.create_dir_all(parent)?;
         }
@@ -404,12 +380,9 @@ impl RootedFs {
             .as_nanos();
         let temp = canonical_parent.join(format!(".inbharat-tmp-{}-{nonce}", std::process::id()));
         let write_result = (|| -> std::io::Result<()> {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temp)?;
-            file.write_all(contents)?;
-            file.sync_all()?;
+            // `populate` fully creates, fills and syncs the temp file
+            // (always `create_new`, so concurrent writers never interleave).
+            populate(&temp)?;
             fs::rename(&temp, &joined)?;
             Ok(())
         })();
@@ -423,6 +396,95 @@ impl RootedFs {
             ));
         }
         Ok(())
+    }
+
+    /// Binary-safe copy of an existing in-root file to an in-root
+    /// destination, through the full fence, atomically at the destination.
+    ///
+    /// Why this exists (design-website lane, 2026-10-03): `fs.read` is
+    /// UTF-8 text-only, so an agent that "copies" a PNG by reading it and
+    /// writing the text back silently corrupts every binary image — the
+    /// exact defect that made the tool unable to build designed websites
+    /// with real images. The copy reads bytes off the disk directly; no
+    /// text round-trip ever touches the content.
+    ///
+    /// TOCTOU residual (same as `read_text`): the source is canonicalized
+    /// and containment-checked, then read by its canonical path without an
+    /// inode re-comparison; a swap racing the read copies whatever is at
+    /// the path at open time, still inside the fence.
+    pub fn copy_file(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> HarnessResult<u64> {
+        let from_canonical = self.resolve_existing(from.as_ref())?;
+        if !from_canonical.is_file() {
+            return Err(Failure::invalid(
+                "fs.copy",
+                "source is not a file (copying a directory tree is not supported)",
+            ));
+        }
+        let metadata = fs::metadata(&from_canonical).map_err(|error| {
+            io_failure(
+                ErrorCode::FilesystemDenied,
+                "fs.copy",
+                "cannot read source metadata",
+                error,
+            )
+        })?;
+        let byte_len = metadata.len();
+        if byte_len > self.max_write_bytes as u64 {
+            return Err(Failure::new(
+                ErrorCode::BudgetExceeded,
+                FailureClass::Resource,
+                "fs.copy",
+                "copy exceeds configured byte limit",
+            ));
+        }
+        let joined = self.lexical_join(to.as_ref())?;
+        // Self-copy is a no-op with a rename-shaped hazard (a `rename` onto
+        // the source can truncate on some platforms): resolve it explicitly.
+        // Only an existing destination can be the source, and both sides are
+        // canonicalized for the comparison.
+        if joined.exists() {
+            let dest_canonical = fs::canonicalize(&joined).map_err(|error| {
+                io_failure(
+                    ErrorCode::FilesystemDenied,
+                    "fs.copy",
+                    "cannot canonicalize target",
+                    error,
+                )
+            })?;
+            if dest_canonical == from_canonical {
+                return Ok(byte_len);
+            }
+        }
+        let bytes_copied = Cell::new(0_u64);
+        self.atomic_replace(to.as_ref(), |temp| {
+            // `fs::copy` preserves content exactly (binary-safe) — but it
+            // also copies the source's read-only flag. That must NOT reach
+            // the destination: a read-only copy would wedge the agent (no
+            // later overwrite or delete of its own output). Clear it on
+            // the temp before the rename makes it the destination. Windows:
+            // the read-only attribute is the only bit `fs::copy` carries
+            // and clearing it has no other permission semantics. Unix: a
+            // plain owner-writable mode — `set_readonly(false)` would leave
+            // the copy world-writable (clippy rightly rejects it).
+            let copied = fs::copy(&from_canonical, temp)?;
+            #[cfg(windows)]
+            {
+                let mut permissions = fs::metadata(temp)?.permissions();
+                if permissions.readonly() {
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    permissions.set_readonly(false);
+                    fs::set_permissions(temp, permissions)?;
+                }
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(temp, fs::Permissions::from_mode(0o644))?;
+            }
+            bytes_copied.set(copied);
+            Ok(())
+        })?;
+        Ok(bytes_copied.get())
     }
 
     fn lexical_join(&self, path: &Path) -> HarnessResult<PathBuf> {
@@ -657,6 +719,20 @@ pub trait ExecutionBroker: Send + Sync {
         )
         .with_detail("program", &spec.program))
     }
+
+    /// Binary-safe copy of one file to another path inside the same world.
+    /// Worlds that cannot copy refuse honestly instead of leaving the
+    /// caller to fake it through the UTF-8 text lane — which silently
+    /// corrupts every binary file (images chief among them).
+    fn copy_file(&self, from: &Path, to: &Path) -> HarnessResult<u64> {
+        let _ = (from, to);
+        Err(Failure::new(
+            ErrorCode::FilesystemDenied,
+            FailureClass::Policy,
+            "fs.copy",
+            "this execution world cannot copy files",
+        ))
+    }
 }
 
 /// Local single-user execution broker with an allowlist and scrubbed environment.
@@ -744,6 +820,10 @@ impl ExecutionBroker for LocalExecutionBroker {
 
     fn create_dir_all(&self, relative: &Path) -> HarnessResult<()> {
         self.filesystem.create_dir_all(relative)
+    }
+
+    fn copy_file(&self, from: &Path, to: &Path) -> HarnessResult<u64> {
+        self.filesystem.copy_file(from, to)
     }
 
     fn run_process(
@@ -1477,6 +1557,132 @@ mod tests {
         let tiny = RootedFs::new(&root)?.with_limits(1024, 4);
         assert!(tiny.write_bytes_atomic("big.bin", b"12345").is_err());
         assert!(!root.join("big.bin").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn copy_file_round_trips_binary_through_the_fence() -> HarnessResult<()> {
+        // The binary-safe copy behind the design-website lane: a PNG-shaped
+        // payload (high-bit bytes that are NOT valid UTF-8) must arrive
+        // byte-identical — the read+write text round-trip corrupts exactly
+        // this kind of content, which is why the copy lane exists at all.
+        let (root, _cleanup, fs) = abs_fs("copybin")?;
+        let payload: Vec<u8> = (0..=255_u16)
+            .map(|index| index as u8 ^ 0xA5)
+            .chain([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+            .collect();
+        fs.write_bytes_atomic("assets/photo.png", &payload)?;
+        let copied = fs.copy_file("assets/photo.png", "site/images/photo.png")?;
+        assert_eq!(copied, payload.len() as u64);
+        assert_eq!(
+            std::fs::read(root.join("site").join("images").join("photo.png")).map_err(|error| {
+                Failure::invalid("test.assert", format!("cannot re-read copy: {error}"))
+            })?,
+            payload
+        );
+
+        // Escape probes in BOTH arguments stay denied, and nothing is created.
+        let Some(parent) = root.parent() else {
+            return Err(Failure::invalid("test.setup", "root has no parent"));
+        };
+        assert!(
+            fs.copy_file("../outside-probe.bin", "x.bin").is_err(),
+            "copy from an escaping source must be denied"
+        );
+        assert!(
+            fs.copy_file("assets/photo.png", "../outside-probe.bin")
+                .is_err(),
+            "copy to an escaping destination must be denied"
+        );
+        assert!(
+            fs.copy_file("assets/photo.png", parent.join("inbharat-copy-outside.bin"))
+                .is_err(),
+            "copy to an outside-root absolute destination must be denied"
+        );
+        assert!(!parent.join("inbharat-copy-outside.bin").exists());
+
+        // A directory source is refused honestly (no tree copy).
+        assert!(
+            fs.copy_file("assets", "x-dir.bin").is_err(),
+            "directory source must be refused"
+        );
+
+        // No temp residue anywhere under the root after success + failures.
+        for entry in std::fs::read_dir(root)
+            .map_err(|error| Failure::invalid("test.setup", format!("cannot list root: {error}")))?
+        {
+            let name = entry
+                .map_err(|error| Failure::invalid("test.setup", format!("read_dir: {error}")))?
+                .file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !name.starts_with(".inbharat-tmp-"),
+                "temp residue left behind: {name}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn copy_file_self_copy_overwrite_and_limits() -> HarnessResult<()> {
+        let (root, _cleanup, fs) = abs_fs("copylimits")?;
+        fs.write_text_atomic("a.txt", "first")?;
+
+        // Self-copy is a no-op reporting the byte count, content untouched.
+        assert_eq!(fs.copy_file("a.txt", "a.txt")?, 5);
+        assert_eq!(fs.read_text("a.txt")?, "first");
+
+        // Overwrite: an existing destination is atomically replaced.
+        fs.write_text_atomic("b.txt", "old-destination")?;
+        fs.copy_file("a.txt", "b.txt")?;
+        assert_eq!(fs.read_text("b.txt")?, "first");
+
+        // Byte limit: a fence with a tiny write budget refuses a bigger copy
+        // and the destination is not created.
+        let tiny = RootedFs::new(&root)?.with_limits(1024, 4);
+        assert!(tiny.copy_file("a.txt", "too-big.txt").is_err());
+        assert!(!root.join("too-big.txt").exists());
+
+        // Broker-level: the default trait implementation refuses honestly,
+        // and the local broker delegates to the fenced filesystem.
+        let broker = LocalExecutionBroker::new(RootedFs::new(&root)?, Vec::<String>::new());
+        assert_eq!(broker.copy_file(Path::new("a.txt"), Path::new("c.txt"))?, 5);
+        assert_eq!(fs.read_text("c.txt")?, "first");
+
+        // Read-only source: `fs::copy` would carry the read-only flag over
+        // and wedge every later overwrite of the destination — the copy
+        // must arrive WRITABLE (and the source keeps its own flag).
+        #[cfg(windows)]
+        {
+            let setup = |message: &str| Failure::invalid("test.setup", message);
+            let source_path = root.join("a.txt");
+            let mut source_permissions = fs::metadata(&source_path)
+                .map_err(|error| setup(&format!("source metadata: {error}")))?
+                .permissions();
+            source_permissions.set_readonly(true);
+            fs::set_permissions(&source_path, source_permissions)
+                .map_err(|error| setup(&format!("make read-only: {error}")))?;
+            assert_eq!(fs.copy_file("a.txt", "writable-copy.txt")?, 5);
+            let copy_permissions = fs::metadata(root.join("writable-copy.txt"))
+                .map_err(|error| setup(&format!("copy metadata: {error}")))?
+                .permissions();
+            assert!(
+                !copy_permissions.readonly(),
+                "the copy must be writable or the agent can never replace it"
+            );
+            // The writable copy accepts an overwrite; the read-only source
+            // is untouched.
+            fs.copy_file("c.txt", "writable-copy.txt")?;
+            assert_eq!(fs.read_text("writable-copy.txt")?, "first");
+            // Restore writability so the cleanup delete succeeds.
+            let mut source_permissions = fs::metadata(&source_path)
+                .map_err(|error| setup(&format!("source metadata: {error}")))?
+                .permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            source_permissions.set_readonly(false);
+            fs::set_permissions(&source_path, source_permissions)
+                .map_err(|error| setup(&format!("restore writable: {error}")))?;
+        }
         Ok(())
     }
 

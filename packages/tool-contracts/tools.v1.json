@@ -1078,6 +1078,34 @@
       }
     },
     {
+      "id": "fs.copy",
+      "description": "Binary-safe copy of one file inside the rooted workspace fence — byte-exact for images and other binary files, unlike a fs.read + fs.write round-trip which is UTF-8-only and corrupts them.",
+      "platforms": [
+        "desktop"
+      ],
+      "risk_class": "CONFIRM",
+      "permission": "capability:FileWrite",
+      "input_schema": "{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\",\"description\":\"source file inside the root\"},\"to\":{\"type\":\"string\",\"description\":\"destination inside the root — parents are created if missing; an existing destination file is atomically replaced\"}},\"required\":[\"from\",\"to\"],\"additionalProperties\":false}",
+      "timeout_ms": 10000,
+      "timeout_note": "harness manifest default_timeout, enforced by the dispatch pipeline",
+      "verification": "result states both paths and the exact bytes copied",
+      "audit": true,
+      "status": "active",
+      "harness": {
+        "side_effect": "Write",
+        "confirmation_mode": "OnSideEffect",
+        "capabilities": [
+          "FileRead",
+          "FileWrite"
+        ],
+        "supported_levels": [
+          "L1",
+          "L2",
+          "L3"
+        ]
+      }
+    },
+    {
       "id": "process.run",
       "description": "Run an allowlisted direct-argv program with bounded output.",
       "platforms": [

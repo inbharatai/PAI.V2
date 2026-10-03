@@ -124,7 +124,13 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   folder opens an **in-chat approval card** so the user can grant that folder
   mid-run without leaving the chat — a decline or timeout hands the model the
   honest off-limits reason, and a declined folder is never re-asked in that
-  session), `doc.create` writing real
+  session), `fs.mkdir` (defect-#29 lane: a "create a folder with files" task
+  was impossible before it), `fs.copy` (the binary-safe copy — byte-exact for
+  images and other binary files across granted folders, because `fs.read` +
+  `fs.write` is UTF-8-only and silently corrupts a PNG/JPG "copy"; the
+  design-website lane this unlocked is taught in the model briefing: author
+  graphics as inline SVG, copy the user's image files with `fs.copy`, watch
+  the result with `web.preview`), `doc.create` writing real
   PDF/DOCX/MD/TXT documents through the same fence (the pure-Rust writers
   are round-trip tested against the built-in parsers, so a writer bug cannot
   pass its own reader), `process.run` with allowlisted direct-argv

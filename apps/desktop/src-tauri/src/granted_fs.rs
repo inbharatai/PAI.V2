@@ -262,6 +262,68 @@ impl GrantedFolders {
         let (fenced, remainder) = self.route(path.as_ref())?;
         fenced.resolve_existing(remainder)
     }
+
+    /// Binary-safe copy between any two granted folders (design-website
+    /// lane, 2026-10-03). `fs.read` is UTF-8-only, so an agent "copying" an
+    /// image through read+write corrupts it — this path never touches a
+    /// text lane. Both ends are routed independently, so a missing grant
+    /// on EITHER end asks the human exactly like a read or a write would.
+    ///
+    /// Same-root copies run on the vendored `RootedFs::copy_file` (fully
+    /// fenced, atomic at the destination). A cross-root copy cannot run on
+    /// any single fence: the source is resolved and containment-checked
+    /// through its own root, bounded by BOTH budgets (it is a read of the
+    /// source and a write of the destination), and the bytes then go
+    /// through the destination fence's atomic binary lane.
+    pub(crate) fn copy_file(
+        &self,
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+    ) -> HarnessResult<u64> {
+        let (source, from_rel) = self.route(from.as_ref())?;
+        let (destination, to_rel) = self.route(to.as_ref())?;
+        if source.root() == destination.root() {
+            return source.copy_file(from_rel, to_rel);
+        }
+        let canonical = source.resolve_existing(from_rel)?;
+        let metadata = std::fs::metadata(&canonical).map_err(|error| {
+            Failure::new(
+                inbharat_harness_core::ErrorCode::FilesystemDenied,
+                FailureClass::Resource,
+                "fs.copy",
+                "cannot read source metadata",
+            )
+            .with_detail("io_error", error.to_string())
+        })?;
+        if !metadata.is_file() {
+            return Err(Failure::new(
+                inbharat_harness_core::ErrorCode::FilesystemDenied,
+                FailureClass::Policy,
+                "fs.copy",
+                "source is not a file (copying a directory tree is not supported)",
+            ));
+        }
+        let bound = source.max_read_bytes().min(destination.max_write_bytes());
+        if metadata.len() > u64::try_from(bound).unwrap_or(u64::MAX) {
+            return Err(Failure::new(
+                inbharat_harness_core::ErrorCode::BudgetExceeded,
+                FailureClass::Resource,
+                "fs.copy",
+                "copy exceeds configured byte limit",
+            ));
+        }
+        let bytes = std::fs::read(&canonical).map_err(|error| {
+            Failure::new(
+                inbharat_harness_core::ErrorCode::FilesystemDenied,
+                FailureClass::Resource,
+                "fs.copy",
+                "cannot read source file",
+            )
+            .with_detail("io_error", error.to_string())
+        })?;
+        destination.write_bytes_atomic(to_rel, &bytes)?;
+        Ok(bytes.len() as u64)
+    }
 }
 
 /// Lexical containment check of an absolute path against one root, with the
@@ -344,6 +406,10 @@ impl ExecutionBroker for GrantedFolderBroker {
 
     fn create_dir_all(&self, relative: &Path) -> HarnessResult<()> {
         self.folders.create_dir_all(relative)
+    }
+
+    fn copy_file(&self, from: &Path, to: &Path) -> HarnessResult<u64> {
+        self.folders.copy_file(from, to)
     }
 
     fn run_process(
@@ -571,6 +637,100 @@ mod tests {
     #[test]
     fn an_empty_grant_set_is_refused() {
         assert!(GrantedFolders::new(vec![]).is_err());
+    }
+
+    // -- binary-safe copy (design-website lane, 2026-10-03) --
+
+    #[test]
+    fn copy_file_round_trips_binary_same_root_and_cross_root() {
+        // A PNG-shaped payload (high-bit bytes, NOT valid UTF-8) must arrive
+        // byte-identical whether the copy stays inside one granted folder or
+        // crosses from one grant into another — the text lane corrupts
+        // exactly this content, which is why fs.copy exists.
+        let layout = layout();
+        let payload: Vec<u8> = (0..=255_u16)
+            .map(|index| index as u8 ^ 0xA5)
+            .chain([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+            .collect();
+        let extra_fence = RootedFs::new(&layout.extra).expect("extra fence");
+        extra_fence
+            .write_bytes_atomic("assets/photo.png", &payload)
+            .expect("seed binary");
+
+        let folders = folders(&layout);
+        // Same-root: inside the extra grant.
+        let copied = folders
+            .copy_file(
+                layout.extra.join("assets").join("photo.png"),
+                layout.extra.join("site").join("images").join("photo.png"),
+            )
+            .expect("same-root copy");
+        assert_eq!(copied, payload.len() as u64);
+        assert_eq!(
+            fs::read(layout.extra.join("site").join("images").join("photo.png"))
+                .expect("re-read same-root copy"),
+            payload
+        );
+        // Cross-root: extra grant → workspace grant.
+        let copied = folders
+            .copy_file(
+                layout.extra.join("assets").join("photo.png"),
+                layout.workspace.join("site").join("photo.png"),
+            )
+            .expect("cross-root copy");
+        assert_eq!(copied, payload.len() as u64);
+        assert_eq!(
+            fs::read(layout.workspace.join("site").join("photo.png"))
+                .expect("re-read cross-root copy"),
+            payload
+        );
+
+        // Through the broker the model actually calls.
+        let broker = GrantedFolderBroker::new(folders, Vec::<String>::new());
+        let copied = broker
+            .copy_file(
+                Path::new(&layout.extra.join("assets").join("photo.png")),
+                Path::new(&layout.workspace.join("via-broker.png")),
+            )
+            .expect("broker copy");
+        assert_eq!(copied, payload.len() as u64);
+        assert_eq!(
+            fs::read(layout.workspace.join("via-broker.png")).expect("re-read broker copy"),
+            payload
+        );
+    }
+
+    #[test]
+    fn copy_file_denies_outside_on_either_end_without_creating_anything() {
+        let layout = layout();
+        let folders = folders(&layout);
+        fs::write(layout.outside.join("seed.png"), b"seeded").expect("seed outside");
+        // Outside SOURCE: denied (and the in-chat hook is absent here, so
+        // the denial stands exactly like a read refusal).
+        let error = folders
+            .copy_file(
+                layout.outside.join("seed.png"),
+                layout.workspace.join("stolen.png"),
+            )
+            .expect_err("outside source");
+        assert_eq!(
+            error.code,
+            inbharat_harness_core::ErrorCode::FilesystemDenied
+        );
+        assert!(!layout.workspace.join("stolen.png").exists());
+        // Outside DESTINATION: denied, nothing escapes the union.
+        fs::write(layout.workspace.join("real.png"), b"real").expect("seed workspace");
+        let error = folders
+            .copy_file(
+                layout.workspace.join("real.png"),
+                layout.outside.join("leak.png"),
+            )
+            .expect_err("outside destination");
+        assert_eq!(
+            error.code,
+            inbharat_harness_core::ErrorCode::FilesystemDenied
+        );
+        assert!(!layout.outside.join("leak.png").exists());
     }
 
     // -- in-chat approval hook (2026-10-03) --

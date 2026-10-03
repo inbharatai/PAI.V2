@@ -16,7 +16,9 @@ use crate::{
 use inbharat_harness_core::jobs::{run_scoped_subagent, SubagentProvider};
 use inbharat_harness_core::providers::{EnforcementQuality, SandboxGrant, SandboxRequest};
 use inbharat_harness_core::{
-    tools::{ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool},
+    tools::{
+        CopyFileTool, ListFilesTool, MakeDirTool, ReadFileTool, RunProcessTool, WriteFileTool,
+    },
     AttachmentMetadata, BudgetLimits, CancelCause, CancellationToken, Capability, CapabilitySet,
     ConfirmationMode, ConfirmationOutcome, Determinism, ErrorCode, ExecutionLevel, Failure,
     FailureClass, HarnessBuilder, HarnessResult, MemoryOptions, PermissionDecision,
@@ -140,6 +142,15 @@ fn progress_detail(tool: &str, arguments: &ToolArguments) -> String {
                 "Creating directory".to_owned()
             } else {
                 format!("Creating directory {path}")
+            }
+        }
+        "fs.copy" => {
+            let from = arg("from");
+            let to = arg("to");
+            match (from.is_empty(), to.is_empty()) {
+                (false, false) => format!("Copying {from} → {to}"),
+                (false, true) => format!("Copying {from}"),
+                _ => "Copying file".to_owned(),
             }
         }
         "process.run" => {
@@ -898,6 +909,18 @@ fn desktop_system_prefix(full_access: bool) -> String {
              files first, then give the entry .html path; the preview window \
              reloads itself as you keep editing, the user watches it build, \
              and no web server is started\n\
+             - Build DESIGNED, visually rich websites — modern landing pages, \
+             portfolios, dashboards — not plain text pages: use CSS gradients, \
+             flexbox/grid layouts, cards with shadows and rounded corners, \
+             web fonts, animations, a coherent color palette, and author any \
+             graphic (logo, icon, illustration) yourself as inline SVG inside \
+             the HTML so it scales crisply. When the user's own image files \
+             (PNG, JPG, GIF, WebP) should appear in the site or a folder, copy \
+             them with fs.copy — it is binary-safe and byte-exact, while \
+             fs.read + fs.write would CORRUPT images (they are UTF-8 \
+             text-only). Reference copied images with a relative <img> tag \
+             and open the site with web.preview. Never claim images or \
+             graphics are impossible — SVG authoring and fs.copy cover both\n\
              - Spawn sub-agents via agent.spawn to complete complex work: give \
              each one a COMPLETE, self-contained task (every path and detail, \
              because it sees nothing else — not even this conversation) and \
@@ -2754,10 +2777,13 @@ impl Tool for DesktopPreviewTool {
 }
 
 /// The full-access tool set: the harness built-ins (fenced fs.read/fs.list/
-/// fs.write + allowlisted direct-argv process.run), plus the desktop search,
-/// patch, document, preview and browser adapters. Every tool stays behind
-/// the harness pipeline. The fs tools are fenced to the granted-folder set —
-/// the workspace root plus every additional user-granted folder.
+/// fs.write/fs.mkdir/fs.copy + allowlisted direct-argv process.run), plus the
+/// desktop search, patch, document, preview and browser adapters. Every tool
+/// stays behind the harness pipeline. The fs tools are fenced to the
+/// granted-folder set — the workspace root plus every additional
+/// user-granted folder. fs.copy is the binary-safe lane: images and other
+/// binary files arrive byte-exact instead of being corrupted by the UTF-8
+/// read+write round-trip.
 fn desktop_workspace_tools(
     folders: GrantedFolders,
     app: tauri::AppHandle,
@@ -2769,6 +2795,7 @@ fn desktop_workspace_tools(
         Arc::new(ListFilesTool::default()),
         Arc::new(WriteFileTool::default()),
         Arc::new(MakeDirTool::default()),
+        Arc::new(CopyFileTool::default()),
         Arc::new(RunProcessTool::default()),
         Arc::new(DesktopSearchTool::new(folders.clone())),
         Arc::new(DesktopPatchTool::new(folders.clone())),
@@ -2857,6 +2884,9 @@ fn subagent_system_prefix() -> String {
          report back if a needed login is missing so the PARENT tells the user\n\
          - Create real documents (PDF, DOCX, MD, TXT) via doc.create\n\
          - Open a live website preview via web.preview (the entry .html path)\n\
+         - Copy the user's image files with fs.copy — it is binary-safe, while \
+         fs.read + fs.write would corrupt images; author graphics yourself as \
+         inline SVG\n\
          Do the whole task yourself: create the real files, run the real \
          commands, read the exact error output when something fails, fix it \
          and re-run until it genuinely works. Never claim a task is complete \
@@ -4607,6 +4637,50 @@ mod workspace_tool_tests {
         );
     }
 
+    /// The design-website lane (2026-10-03): the user's standing ask is that
+    /// the agent "build design websites with images" like any mainstream
+    /// assistant. The briefing must teach the three real capabilities that
+    /// make that possible — designed CSS/SVG authoring, the binary-safe
+    /// copy for the user's image files, and the live preview — AND the one
+    /// trap (fs.read+fs.write corrupts binary images) so the model never
+    /// fakes a copy through the text lane. An untaught lane is an unused
+    /// lane (the defect-#38 lesson).
+    #[test]
+    fn briefing_teaches_the_design_website_lane() {
+        let prompt = desktop_system_prefix(true);
+        assert!(
+            prompt.contains("Build DESIGNED, visually rich websites"),
+            "the briefing must open the design lane explicitly"
+        );
+        assert!(
+            prompt.contains("author any graphic (logo, icon, illustration) yourself as inline SVG"),
+            "the briefing must teach SVG as the self-serve graphics path"
+        );
+        assert!(
+            prompt.contains("copy them with fs.copy — it is binary-safe and byte-exact"),
+            "the briefing must route image copies through fs.copy"
+        );
+        assert!(
+            prompt.contains("fs.read + fs.write would CORRUPT images (they are UTF-8 text-only)"),
+            "the briefing must name the text-lane trap"
+        );
+        assert!(
+            prompt.contains("Never claim images or graphics are impossible"),
+            "the briefing must forbid claiming the design lane is impossible"
+        );
+        assert!(
+            !desktop_system_prefix(false).contains("fs.copy"),
+            "read-only mode must not claim the copy lane"
+        );
+
+        // The sub-agent inherits the same binary-safety rule.
+        let subagent = subagent_system_prefix();
+        assert!(
+            subagent.contains("fs.read + fs.write would corrupt images"),
+            "the sub-agent briefing must carry the text-lane trap"
+        );
+    }
+
     /// 2026-09-14 live agent progress: the human phrasing of a tool call must
     /// carry the concrete file/command (the user watches "Writing
     /// app/index.html (1024 bytes)", not a generic "calling tool"), while a
@@ -4643,6 +4717,18 @@ mod workspace_tool_tests {
             progress_detail("fs.mkdir", &string_args(&[("path", "dist")])),
             "Creating directory dist"
         );
+        assert_eq!(
+            progress_detail(
+                "fs.copy",
+                &string_args(&[("from", "assets/photo.png"), ("to", "site/img/photo.png")])
+            ),
+            "Copying assets/photo.png → site/img/photo.png"
+        );
+        assert_eq!(
+            progress_detail("fs.copy", &string_args(&[("from", "logo.png")])),
+            "Copying logo.png"
+        );
+        assert_eq!(progress_detail("fs.copy", &args(&[])), "Copying file");
         assert_eq!(
             progress_detail("process.run", &string_args(&[("program", "node")])),
             "Running node"
