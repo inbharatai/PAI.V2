@@ -1809,7 +1809,8 @@ impl ModelManager {
 /// D1: State wrapper for ModelManager so it can be held as Tauri managed state.
 /// Uses tokio::sync::Mutex so the guard can be held across .await points (Send).
 pub struct ModelManagerState {
-    pub manager: tokio::sync::Mutex<Option<ModelManager>>,
+    pub manager: tokio::sync::Mutex<Option<std::sync::Arc<ModelManager>>>,
+    active: std::sync::Mutex<Option<std::sync::Arc<ModelManager>>>,
     pub server_port: std::sync::Mutex<u16>,
     generation: std::sync::atomic::AtomicU64,
     suspended: std::sync::atomic::AtomicBool,
@@ -1820,10 +1821,17 @@ impl ModelManagerState {
     pub fn new() -> Self {
         Self {
             manager: tokio::sync::Mutex::new(None),
+            active: std::sync::Mutex::new(None),
             server_port: std::sync::Mutex::new(8342),
             generation: std::sync::atomic::AtomicU64::new(0),
             suspended: std::sync::atomic::AtomicBool::new(false),
             startup_cancel: std::sync::Mutex::new(inbharat_harness_core::CancellationToken::new()),
+        }
+    }
+
+    fn stop_active(&self) {
+        if let Some(manager) = self.active.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = manager.stop_server();
         }
     }
 
@@ -1837,6 +1845,7 @@ impl ModelManagerState {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.stop_active();
     }
 
     pub(crate) fn resume(&self) {
@@ -1865,6 +1874,7 @@ impl ModelManagerState {
         *cancel = inbharat_harness_core::CancellationToken::new();
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.stop_active();
     }
 
     /// Emergency cleanup used when the Pocket AI is removed or the app exits.
@@ -2458,6 +2468,33 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Model file not found"));
         assert_eq!(manager.get_status(), ModelStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn lock_stops_inference_while_an_async_request_holds_the_manager() {
+        let state = ModelManagerState::new();
+        let manager = std::sync::Arc::new(ModelManager::new());
+        let mut command = if cfg!(windows) {
+            std::process::Command::new("ping")
+        } else {
+            std::process::Command::new("sleep")
+        };
+        if cfg!(windows) {
+            command.args(["-n", "30", "127.0.0.1"]);
+        } else {
+            command.arg("30");
+        }
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        *manager.llama_process.lock().unwrap() = Some(command.spawn().unwrap());
+        *state.active.lock().unwrap() = Some(std::sync::Arc::clone(&manager));
+        *state.manager.lock().await = Some(std::sync::Arc::clone(&manager));
+        let _inflight_request = state.manager.lock().await;
+        let started = std::time::Instant::now();
+        state.suspend();
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(manager.llama_process.lock().unwrap().is_none());
     }
 
     #[test]
@@ -3084,7 +3121,7 @@ pub async fn start_model_server(
         previous.stop_server()?;
     }
     startup.set_phase(crate::startup::StartupPhase::StartingModel);
-    let manager = ModelManager::new();
+    let manager = std::sync::Arc::new(ModelManager::new());
     // Default to the best detected backend.
     let best_backend = manager
         .detect_backends()
@@ -3106,12 +3143,23 @@ pub async fn start_model_server(
         .server_port
         .lock()
         .map_err(|e| format!("State lock error: {}", e))? = port;
-    if state.suspended.load(Ordering::SeqCst)
+    // Publish under the same admission mutex as suspend: a lock racing the
+    // final health response must either cancel this child or see it to stop.
+    let admission = state
+        .startup_cancel
+        .lock()
+        .map_err(|_| "Startup cancellation lock failed")?;
+    if admission.is_cancelled()
+        || state.suspended.load(Ordering::SeqCst)
         || generation != state.generation.load(Ordering::SeqCst)
     {
         let _ = manager.stop_server();
         return Err("Model startup was cancelled by lock or disconnect".to_owned());
     }
+    *state
+        .active
+        .lock()
+        .map_err(|_| "Active model lock failed")? = Some(std::sync::Arc::clone(&manager));
     *active_manager = Some(manager);
     startup.set_phase(crate::startup::StartupPhase::VerifyingModel);
     Ok(port)
