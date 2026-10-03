@@ -94,6 +94,12 @@ function App() {
     setCurrentView('chat');
   }, []);
 
+  useEffect(() => {
+    const cancelAutomaticBoot = () => { bootGeneration.current += 1; };
+    window.addEventListener('unoone:model-manual-control', cancelAutomaticBoot);
+    return () => window.removeEventListener('unoone:model-manual-control', cancelAutomaticBoot);
+  }, []);
+
   // Load settings to get auto-lock timer; re-fetch when vaultId changes
   useEffect(() => {
     if (screen !== 'main' || !vaultId) return;
