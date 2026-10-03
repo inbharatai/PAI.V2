@@ -122,6 +122,67 @@ impl BrowserStateHolder {
 }
 
 // ---------------------------------------------------------------------------
+// Popup shim — live-caught 2026-10-03: "it opened Gmail, but clicking Sign in
+// does nothing." The browser-lane window swallows NEW-WINDOW requests: wry
+// has no new-window handler, so `window.open` returns null and
+// `target="_blank"` anchors die silently. Same-tab navigations work (the
+// Navigate action uses `location.href`), so the fix is to make the window a
+// single-window browser: an idempotent shim rewrites blank-target anchors to
+// the current tab and routes `window.open` through `location.assign`. The
+// shim is JS state, so every page navigation destroys it — a lazily-started
+// keep-alive thread re-evals it into the live session's window every second,
+// and every settled navigation re-injects it immediately after
+// `poll_page_ready` so post-Navigate clicks never race the next tick.
+// ---------------------------------------------------------------------------
+
+/// The single-window shim. Idempotent: the second eval returns `'present'`
+/// without touching the page. `window.open` navigates the CURRENT tab (the
+/// one flow that must not break — sign-in buttons that open
+/// accounts.google.com) and returns the window itself so callers that use
+/// the returned reference keep working; an empty URL returns null rather
+/// than clobbering the page. Blank-target anchors are rewritten at click
+/// capture time, before the browser turns them into a dead new-window
+/// request.
+const POPUP_SHIM_SCRIPT: &str = r#"(function(){
+  if (window.__unoonePopupShim) { return 'present'; }
+  window.__unoonePopupShim = true;
+  window.open = function(u){ if (u) { location.assign(String(u)); return window; } return null; };
+  document.addEventListener('click', function(e){
+    var el = e.target;
+    while (el && el !== document.body) {
+      if (el.tagName === 'A' && el.target && el.target.toLowerCase() === '_blank') { el.target = '_self'; return; }
+      el = el.parentElement;
+    }
+  }, true);
+  return 'installed';
+})()"#;
+
+/// Whether the keep-alive thread has been started. One thread per process,
+/// started lazily by the first session bind; it idles when no session is
+/// active, so there is no stop lifecycle to keep honest.
+static POPUP_SHIM_THREAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Start the popup-shim keep-alive thread once. Each tick: if a session is
+/// active, re-eval the shim into its window (a no-op when the page still has
+/// it, a reinstall after a page-driven navigation destroyed it). Eval errors
+/// are ignored — a dead window must not kill the thread; the session liveness
+/// probe (`window_answers`) on the next action handles dead windows.
+fn ensure_popup_shim_thread(app: &tauri::AppHandle, state: &Arc<BrowserStateHolder>) {
+    if POPUP_SHIM_THREAD.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let app = app.clone();
+    let state = state.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(1000));
+        let Ok(Some(session)) = with_session(&state, |s| s.clone()) else {
+            continue;
+        };
+        let _ = eval_bridge(&app, &session.window_label, POPUP_SHIM_SCRIPT);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Web session persistence — honest status, recorded once in the vault.
 //
 // Every browser-lane window shares ONE WebView2 environment (the defect-#41
@@ -614,9 +675,15 @@ fn poll_page_ready(
                 if let Some(u) = url.as_deref() {
                     match evaluate_redirect(u, target) {
                         RedirectVerdict::Reached => {
+                            // The settled page is a fresh document — any shim
+                            // installed on the previous page is gone. Re-install
+                            // immediately so the FIRST post-navigation click is
+                            // covered, without waiting for the keep-alive tick.
+                            let _ = eval_bridge(app, window_label, POPUP_SHIM_SCRIPT);
                             return Ok((url, title, RedirectVerdict::Reached));
                         }
                         verdict @ RedirectVerdict::RequiresReview { .. } => {
+                            let _ = eval_bridge(app, window_label, POPUP_SHIM_SCRIPT);
                             // Surfaced, never silently accepted as success.
                             return Ok((url, title, verdict));
                         }
@@ -767,6 +834,9 @@ pub fn browser_start_session(
     // Record the honest web-session persistence status in the vault, once
     // (deduped) — best-effort: a locked vault never blocks the session.
     note_web_session_persistence(&app);
+    // One process-wide keep-alive thread keeps the popup shim alive across
+    // page-driven navigations for this session's lifetime.
+    ensure_popup_shim_thread(&app, &state);
     Ok(BrowserActionResult {
         success: true,
         verified: true,
@@ -955,6 +1025,9 @@ fn ensure_session(
     app: &tauri::AppHandle,
     state: &Arc<BrowserStateHolder>,
 ) -> Result<(String, Option<String>, Option<String>), String> {
+    // Session about to exist (or already bound): guarantee the popup-shim
+    // keep-alive thread is running. Idempotent — one thread per process.
+    ensure_popup_shim_thread(app, state);
     let existing = with_session(state, |session| session.clone())?;
     if let Some(session) = existing {
         if window_answers(app, &session.window_label) {
@@ -1581,6 +1654,59 @@ mod tests {
     fn navigate_script_validates_first() {
         assert!(build_navigate_script("javascript:alert(1)").is_err());
         assert!(build_navigate_script("https://ok.test").is_ok());
+    }
+
+    // -- popup shim (live-caught 2026-10-03: swallowed new-window requests) --
+
+    #[test]
+    fn popup_shim_guards_its_own_install() {
+        // Idempotency is load-bearing: the keep-alive thread re-evals this
+        // exact script into the live page every second, so the marker check
+        // must run BEFORE the marker is set (and every later eval must be a
+        // no-op 'present' return).
+        let check = POPUP_SHIM_SCRIPT
+            .find("if (window.__unoonePopupShim)")
+            .expect("marker guard present");
+        let install = POPUP_SHIM_SCRIPT
+            .find("window.__unoonePopupShim = true")
+            .expect("marker install present");
+        assert!(check < install, "guard must precede the install");
+        assert!(POPUP_SHIM_SCRIPT.contains("return 'present';"));
+    }
+
+    #[test]
+    fn popup_shim_routes_window_open_into_the_current_tab() {
+        // wry swallows new-window requests (window.open returned null in the
+        // live repro), so the shim must navigate the CURRENT tab and return
+        // the window itself — callers that use the returned reference keep
+        // working. An empty URL must return null, not clobber the page.
+        assert!(POPUP_SHIM_SCRIPT.contains("window.open = function(u){"));
+        assert!(POPUP_SHIM_SCRIPT.contains("location.assign(String(u)); return window;"));
+        assert!(POPUP_SHIM_SCRIPT.contains("return null;"));
+    }
+
+    #[test]
+    fn popup_shim_rewrites_blank_targets_at_click_capture() {
+        // target="_blank" anchors die silently in wry; rewriting at capture
+        // time (before the browser turns the click into a dead new-window
+        // request) converts them to same-tab navigations, which work.
+        assert!(POPUP_SHIM_SCRIPT.contains("addEventListener('click'"));
+        assert!(POPUP_SHIM_SCRIPT.contains("el.target = '_self'"));
+        // The listener must be capture-phase: a site's own bubbling handler
+        // could otherwise run first. The `true` flag terminates the
+        // addEventListener call for THIS handler.
+        let registration = POPUP_SHIM_SCRIPT
+            .find("addEventListener('click'")
+            .expect("click listener registration");
+        let capture_flag = POPUP_SHIM_SCRIPT[registration..]
+            .find("}, true);")
+            .expect("capture-phase flag terminates the addEventListener call");
+        assert!(
+            capture_flag
+                < POPUP_SHIM_SCRIPT[registration..]
+                    .find("return 'installed';")
+                    .unwrap_or(POPUP_SHIM_SCRIPT.len())
+        );
     }
 
     #[test]
