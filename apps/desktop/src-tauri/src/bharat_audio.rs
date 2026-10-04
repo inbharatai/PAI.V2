@@ -373,6 +373,25 @@ fn sweep_stale_tts_outputs(dir: &Path) {
 /// messages still synthesize as a single chunk.
 const TTS_CHUNK_CHAR_TARGET: usize = 280;
 
+/// Recursion depth for deadline-timeout chunk re-cuts (see `synthesize_chunk`).
+const TTS_CHUNK_SPLIT_DEPTH: u32 = 2;
+
+/// Diffusion steps passed as the pinned CLI's common-generation option
+/// `--num-inference-steps`. The pinned upstream benchmark (docs/reports/
+/// omnivoice_weight_type_benchmark.md, RTX 4090, SafeTensors, Bengali
+/// reference voice) measured the generator dominating synthesis cost
+/// (generate_ms ≈97% of the 32-step run) and reported usable speech with
+/// F16 generator and tokenizer at both 32 steps (689 ms) and 16 steps
+/// (371 ms, ~1.9×). On the CPU-only desktop runtime the same generator runs
+/// orders of magnitude slower and a 280-char chunk straddles the 180 s
+/// process deadline (measured 2026-10-04: 155–180+ s per chunk at the
+/// engine's 32-step default — some chunks time out, some barely pass), so a
+/// declared `cpu` backend is qualified down to 16 steps. GPU-declaring
+/// backends (`cuda`, `vulkan`, `metal`, `best`) keep the engine default for
+/// quality headroom; a benchmark is from one GPU/voice and must be re-proven
+/// per language before further reduction.
+const TTS_CPU_INFERENCE_STEPS: u32 = 16;
+
 /// Split `text` into sentence-bounded chunks of at most `target` characters
 /// (counted in chars, since synthesized languages include Devanagari and
 /// other non-ASCII scripts). Sentences accumulate into the current chunk
@@ -620,6 +639,113 @@ fn run_command_timeout(
         ));
     }
     Ok((stdout, stderr))
+}
+
+/// Build one `audiocpp_cli` TTS request. `backend == "cpu"` is qualified down
+/// to `TTS_CPU_INFERENCE_STEPS` (see the const's note); every other declared
+/// backend keeps the engine's own step default.
+fn tts_spawn(
+    cli: &Path,
+    family: &str,
+    model: &Path,
+    backend: &str,
+    language: &str,
+    text: &str,
+    out: &Path,
+) -> Command {
+    let mut cmd = Command::new(cli);
+    cmd.arg("--task")
+        .arg("tts")
+        .arg("--family")
+        .arg(family)
+        .arg("--model")
+        .arg(model)
+        .arg("--backend")
+        .arg(backend)
+        .arg("--text")
+        .arg(text)
+        .arg("--out")
+        .arg(out)
+        .arg("--language")
+        .arg(language);
+    if backend == "cpu" {
+        cmd.arg("--num-inference-steps")
+            .arg(TTS_CPU_INFERENCE_STEPS.to_string());
+    }
+    cmd
+}
+
+/// Deadline self-recovery: re-cut a timed-out chunk at sentence boundaries
+/// into roughly half-size pieces (the same tested splitter as `synthesize`)
+/// so each piece completes inside the process deadline. Empty when the
+/// chunk cannot be cut further.
+fn split_tts_chunk_for_retry(chunk: &str) -> Vec<String> {
+    let target = chunk.chars().count() / 2;
+    if target < TTS_RETRY_MIN_SPLIT_CHARS {
+        return Vec::new();
+    }
+    split_tts_chunks(chunk, target)
+}
+
+const TTS_RETRY_MIN_SPLIT_CHARS: usize = 40;
+
+/// Synthesize one chunk into sequential `parts`. On a deadline timeout the
+/// chunk is re-cut (up to `TTS_CHUNK_SPLIT_DEPTH` levels) and the pieces are
+/// synthesized in order; any other failure, or an un-dividable chunk,
+/// surfaces as-is.
+fn synthesize_chunk(
+    cli: &Path,
+    family: &str,
+    model: &Path,
+    backend: &str,
+    language: &str,
+    output_dir: &Path,
+    chunk: &str,
+    parts: &mut Vec<PathBuf>,
+    depth: u32,
+) -> Result<(), String> {
+    let output = output_dir.join(format!(
+        "inbharat_tts_{}_part{}.wav",
+        uuid::Uuid::new_v4().simple(),
+        parts.len()
+    ));
+    let _ = std::fs::remove_file(&output);
+    let cmd = tts_spawn(cli, family, model, backend, language, chunk, &output);
+    match run_command_timeout(cmd, INFERENCE_TIMEOUT) {
+        Ok(_) => {
+            parts.push(output);
+            Ok(())
+        }
+        Err(error) if depth < TTS_CHUNK_SPLIT_DEPTH && error.contains("exceeded") => {
+            let pieces = split_tts_chunk_for_retry(chunk);
+            if pieces.len() < 2 {
+                return Err(error);
+            }
+            crate::boot_trace::mark_detail(
+                "synthesize: chunk RETRY split",
+                &format!(
+                    "depth={depth} pieces={} chars={}",
+                    pieces.len(),
+                    chunk.chars().count()
+                ),
+            );
+            for piece in &pieces {
+                synthesize_chunk(
+                    cli,
+                    family,
+                    model,
+                    backend,
+                    language,
+                    output_dir,
+                    piece,
+                    parts,
+                    depth + 1,
+                )?;
+            }
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn query_readiness(root: &Path) -> Result<AudioCppReadiness, String> {
@@ -1344,32 +1470,22 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
     );
     let mut chunk_paths = Vec::with_capacity(chunks.len());
     for (index, chunk) in chunks.iter().enumerate() {
-        let chunk_output = output_dir.join(format!(
-            "inbharat_tts_{}_part{}.wav",
-            uuid::Uuid::new_v4().simple(),
-            index
-        ));
-        let _ = std::fs::remove_file(&chunk_output);
-        let mut cmd = Command::new(&cli);
-        cmd.arg("--task")
-            .arg("tts")
-            .arg("--family")
-            .arg(&task.family)
-            .arg("--model")
-            .arg(&model)
-            .arg("--backend")
-            .arg(&manifest.backend)
-            .arg("--text")
-            .arg(chunk)
-            .arg("--out")
-            .arg(&chunk_output)
-            .arg("--language")
-            .arg(&cli_language);
-        if let Err(error) = run_command_timeout(cmd, INFERENCE_TIMEOUT) {
+        let mut parts: Vec<PathBuf> = Vec::new();
+        if let Err(error) = synthesize_chunk(
+            &cli,
+            &task.family,
+            &model,
+            &manifest.backend,
+            &cli_language,
+            &output_dir,
+            chunk,
+            &mut parts,
+            0,
+        ) {
             // A failed run may still have written partial WAVs — remove
             // every part so the scratch area never accumulates broken
             // output.
-            for path in chunk_paths.iter().chain(std::iter::once(&chunk_output)) {
+            for path in chunk_paths.iter().chain(parts.iter()) {
                 let _ = std::fs::remove_file(path);
             }
             crate::boot_trace::mark_detail(
@@ -1378,6 +1494,7 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
             );
             return Err(error);
         }
+        chunk_paths.extend(parts);
         crate::boot_trace::mark_detail(
             "synthesize: chunk done",
             &format!(
@@ -1387,7 +1504,6 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
                 start.elapsed().as_secs_f32()
             ),
         );
-        chunk_paths.push(chunk_output);
     }
     concatenate_wav_chunks(&chunk_paths, &output)?;
     for path in &chunk_paths {
@@ -1668,6 +1784,42 @@ mod tests {
             200,
             "every word must survive the hard split, whole"
         );
+    }
+
+    #[test]
+    fn split_tts_chunk_for_retry_halves_at_sentence_bounds() {
+        let text = vec![
+            "First sentence here.",
+            "Second sentence here.",
+            "Third sentence here.",
+            "Fourth sentence here.",
+            "Fifth sentence here.",
+            "Sixth sentence here.",
+        ]
+        .join(" ");
+        let pieces = split_tts_chunk_for_retry(&text);
+        assert!(pieces.len() >= 2, "a retry must have pieces");
+        for piece in &pieces {
+            assert!(!piece.trim().is_empty());
+            assert!(piece.chars().count() < text.chars().count());
+        }
+        // No text lost: the space-join of the pieces reconstructs the chunk.
+        let joined: String = pieces.join(" ");
+        assert_eq!(joined, text);
+    }
+
+    #[test]
+    fn split_tts_chunk_for_retry_refuses_too_short_chunks() {
+        // Below the retry floor there is nothing to re-cut safely.
+        let tiny = "Short reply."; // 12 chars < 2 * TTS_RETRY_MIN_SPLIT_CHARS
+        let pieces = split_tts_chunk_for_retry(tiny);
+        assert!(
+            pieces.is_empty(),
+            "chunks under the retry floor must not be cut further: {pieces:?}"
+        );
+        // A run of words large enough to re-cut still splits into pieces.
+        let words = vec!["alpha"; 40].join(" "); // 200 chars > 2 * floor
+        assert!(split_tts_chunk_for_retry(&words).len() >= 2);
     }
 
     #[test]
