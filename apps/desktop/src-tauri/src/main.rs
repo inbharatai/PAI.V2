@@ -59,6 +59,7 @@ use base64::Engine;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{Emitter, Manager};
 use unoone_vault_core::{PrivacyLevel, Record, RecordType, Vault};
 
@@ -434,6 +435,45 @@ fn scan_removable_drives() -> Vec<String> {
 /// expensive (it hashes every package asset), so only one may run at a time.
 static ASSET_VALIDATION_RUNNING: AtomicBool = AtomicBool::new(false);
 
+/// A transient device drop (the stick re-presents within seconds after an IO
+/// error) fails a validation pass mid-file with device IO errors. Whole-package
+/// revalidation is fail-closed either way — a genuine integrity mismatch stays
+/// failed and re-runs produce the same failures — so re-running the full pass
+/// can never verify unverified bytes; it only buys the sweep a healthy window.
+const VALIDATE_TRANSIENT_ATTEMPTS: u32 = 3;
+const VALIDATE_TRANSIENT_BACKOFF: Duration = Duration::from_secs(4);
+
+/// Run package validation, retrying up to `VALIDATE_TRANSIENT_ATTEMPTS`
+/// backoff-spaced attempts while the final result is failed. The returned
+/// report is from the last attempt.
+fn validate_with_transient_retry(
+    root: &std::path::Path,
+    scope: unoone_usb_manifest::ValidationScope,
+) -> unoone_usb_manifest::ValidationReport {
+    let mut last = None;
+    for attempt in 1..=VALIDATE_TRANSIENT_ATTEMPTS {
+        let report = unoone_usb_manifest::validate_package(root, scope);
+        if report.package.is_some() {
+            if attempt > 1 {
+                boot_trace::mark_detail(
+                    "validation: recovered on retry",
+                    &format!("attempt={attempt}"),
+                );
+            }
+            return report;
+        }
+        last = Some(report);
+        if attempt < VALIDATE_TRANSIENT_ATTEMPTS {
+            boot_trace::mark_detail(
+                "validation: failed — retrying after backoff",
+                &format!("attempt={attempt}"),
+            );
+            std::thread::sleep(VALIDATE_TRANSIENT_BACKOFF);
+        }
+    }
+    last.expect("at least one validation attempt ran")
+}
+
 /// Run the BootGate first (identity + runtime executables — seconds, not the
 /// multi-GB asset sweep), release model boot via
 /// `StartupCoordinator::boot_gate_passed`, then continue with the full
@@ -457,10 +497,8 @@ fn start_background_asset_validation(app_handle: tauri::AppHandle, root: &std::p
         // spawn before releasing model boot. Fail-closed on any failure.
         let boot_started = std::time::Instant::now();
         boot_trace::mark("boot gate: begin (identity + runtimes)");
-        let boot_report = unoone_usb_manifest::validate_package(
-            &root,
-            unoone_usb_manifest::ValidationScope::BootGate,
-        );
+        let boot_report =
+            validate_with_transient_retry(&root, unoone_usb_manifest::ValidationScope::BootGate);
         match boot_report.package {
             Some(package) => {
                 // Identity connected early so the UI short-circuits detection.
@@ -485,7 +523,7 @@ fn start_background_asset_validation(app_handle: tauri::AppHandle, root: &std::p
         // digest-verified host cache.
         let sweep_started = std::time::Instant::now();
         boot_trace::mark("background sweep: begin (DesktopLaunch)");
-        let report = unoone_usb_manifest::validate_package(
+        let report = validate_with_transient_retry(
             &root,
             unoone_usb_manifest::ValidationScope::DesktopLaunch,
         );

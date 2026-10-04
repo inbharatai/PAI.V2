@@ -55,6 +55,10 @@ pub struct StartupCoordinator {
     /// Full DesktopLaunch sweep completed. Authority for
     /// `is_asset_validation_complete` (the model-server gate).
     asset_sweep_complete: Mutex<bool>,
+    /// Newest root ever connected, retained across disconnects so the mount
+    /// monitor can re-detect a package whose volume re-presented itself
+    /// after a transient device drop (self-heal).
+    last_root: Mutex<Option<PathBuf>>,
 }
 
 impl StartupCoordinator {
@@ -72,6 +76,7 @@ impl StartupCoordinator {
             validation_failures: Mutex::new(Vec::new()),
             boot_gate_complete: Mutex::new(false),
             asset_sweep_complete: Mutex::new(false),
+            last_root: Mutex::new(None),
         }
     }
 
@@ -126,6 +131,9 @@ impl StartupCoordinator {
         if let Ok(mut root) = self.connected_root.lock() {
             *root = Some(package.root.clone());
         }
+        if let Ok(mut last_root) = self.last_root.lock() {
+            *last_root = Some(package.root.clone());
+        }
         if let Ok(mut vault_id) = self.vault_id.lock() {
             *vault_id = Some(package.vault_id.clone());
         }
@@ -135,7 +143,7 @@ impl StartupCoordinator {
         // Non-regressing: when the background sweep finishes after the model
         // is already serving, the phase must stay at READY/STARTING_MODEL —
         // only the sweep-complete flag (set by full_sweep_completed) advances.
-        self.set_phase_if_booting(StartupPhase::PaiConnected);
+        self.set_phase_if_booting_or_recovering(StartupPhase::PaiConnected);
     }
 
     pub fn reject(&self, problems: Vec<ValidationFailure>) {
@@ -239,7 +247,7 @@ impl StartupCoordinator {
         if let Ok(mut flag) = self.asset_sweep_complete.lock() {
             *flag = true;
         }
-        self.set_phase_if_booting(StartupPhase::PaiConnected);
+        self.set_phase_if_booting_or_recovering(StartupPhase::PaiConnected);
     }
 
     pub fn limited(&self) {
@@ -248,6 +256,66 @@ impl StartupCoordinator {
 
     fn connected_root(&self) -> Option<PathBuf> {
         self.connected_root.lock().ok()?.clone()
+    }
+
+    fn current_phase(&self) -> StartupPhase {
+        self.phase
+            .lock()
+            .map(|phase| *phase)
+            .unwrap_or(StartupPhase::Error)
+    }
+
+    /// Newest root ever connected, retained across disconnects. The mount
+    /// monitor's self-heal re-detects the package from it when a transiently
+    /// dropped volume re-presents itself.
+    pub fn last_connected_root(&self) -> Option<PathBuf> {
+        self.last_root.lock().ok()?.clone()
+    }
+
+    /// True while the coordinator sits in a failure state that a transient
+    /// device drop can cause — and that re-validation can clear. `LimitedMode`
+    /// counts only when it carries validation failures (asset-latch); a
+    /// Limited state raised for llama health recovers via its own flow.
+    pub fn is_recoverable_failure(&self) -> bool {
+        if self.is_validating_assets() {
+            return false;
+        }
+        match self.current_phase() {
+            StartupPhase::Disconnected | StartupPhase::PaiInvalid => true,
+            StartupPhase::LimitedMode => self
+                .validation_failures
+                .lock()
+                .map(|failures| !failures.is_empty())
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// `set_phase_if_booting`, extended to advance out of the failure states
+    /// self-heal leaves behind (`PaiInvalid`, `Disconnected`, asset-latched
+    /// `LimitedMode`): without this the boot gates could pass but the
+    /// user-visible phase would stay latched on the failure banner.
+    pub fn set_phase_if_booting_or_recovering(&self, phase: StartupPhase) {
+        if let Ok(mut current) = self.phase.lock() {
+            if matches!(
+                *current,
+                StartupPhase::Starting
+                    | StartupPhase::WaitingForPai
+                    | StartupPhase::ValidatingPai
+                    | StartupPhase::PaiConnected
+                    | StartupPhase::BootAssetsVerified
+                    | StartupPhase::CheckingAssets
+                    | StartupPhase::WaitingForUnlock
+                    | StartupPhase::Unlocking
+                    | StartupPhase::ScanningHost
+            ) || matches!(
+                *current,
+                StartupPhase::Disconnected | StartupPhase::PaiInvalid | StartupPhase::LimitedMode
+            ) {
+                *current = phase;
+                crate::boot_trace::mark(&format!("phase(if_booting/recovering) -> {phase:?}"));
+            }
+        }
     }
 
     fn disconnect(&self) {
@@ -309,20 +377,92 @@ pub fn normalize_candidate_root(path: &Path) -> Option<PathBuf> {
 }
 
 pub fn start_mount_monitor(app: AppHandle) {
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(2));
-        let state = app.state::<StartupCoordinator>();
-        if let Some(root) = state.connected_root() {
-            if !root.join("manifest.json").is_file() {
-                state.disconnect();
-                let _ = app.emit("pai-disconnected", root.display().to_string());
-                let cleanup_app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    cleanup_after_removal(cleanup_app).await;
-                });
+    thread::spawn(move || {
+        let mut last_self_heal: Option<std::time::Instant> = None;
+        loop {
+            thread::sleep(Duration::from_secs(2));
+            let state = app.state::<StartupCoordinator>();
+
+            // Transient-drop self-heal FIRST: this dying stick re-presents
+            // its volume within seconds after an IO drop, so a sweep-latched
+            // failure (or a genuine disconnect) recovers on its own as soon
+            // as the package root reads again — re-validation is fail-closed
+            // (a genuine integrity mismatch stays rejected). Cooled down so
+            // a long dead window does not churn the flaky volume.
+            if state.is_recoverable_failure() {
+                let cooled = last_self_heal
+                    .map(|past| past.elapsed() >= SELF_HEAL_COOLDOWN)
+                    .unwrap_or(true);
+                let root = state
+                    .connected_root()
+                    .or_else(|| state.last_connected_root());
+                if cooled {
+                    if let Some(root) = root {
+                        if root.join("manifest.json").is_file() {
+                            last_self_heal = Some(std::time::Instant::now());
+                            crate::boot_trace::mark(
+                                "mount monitor: package re-readable — self-heal revalidation",
+                            );
+                            let heal_app = app.clone();
+                            thread::spawn(move || {
+                                if let Err(error) = revalidate_and_connect(heal_app, root) {
+                                    crate::boot_trace::mark_detail(
+                                        "mount monitor: self-heal failed",
+                                        &error,
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if let Some(root) = state.connected_root() {
+                if !root.join("manifest.json").is_file() {
+                    state.disconnect();
+                    let _ = app.emit("pai-disconnected", root.display().to_string());
+                    let cleanup_app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        cleanup_after_removal(cleanup_app).await;
+                    });
+                }
             }
         }
     });
+}
+
+/// Cooldown between self-heal revalidation attempts. Observed drop windows
+/// are seconds long, but revalidation itself re-sweeps up to
+/// `VALIDATE_TRANSIENT_ATTEMPTS` times — 45 s keeps a dying volume from
+/// being hammered while still healing within a user-tolerable wait.
+pub(crate) const SELF_HEAL_COOLDOWN: Duration = Duration::from_secs(45);
+
+/// Re-run package-identity validation and the background asset sweep for a
+/// root that previously validated (the mount monitor's self-heal path).
+/// Fail-closed: any final validation failure re-rejects the package.
+pub(crate) fn revalidate_and_connect(app: AppHandle, root: PathBuf) -> Result<(), String> {
+    if !root.join("manifest.json").is_file() {
+        return Err(format!(
+            "package root no longer readable: {}",
+            root.display()
+        ));
+    }
+    let state = app.state::<StartupCoordinator>();
+    let report = unoone_usb_manifest::validate_package(
+        &root,
+        unoone_usb_manifest::ValidationScope::PackageIdentity,
+    );
+    let Some(package) = report.package else {
+        state.reject(report.failures.clone());
+        crate::boot_trace::mark("self-heal: package identity still failing");
+        return Err("package identity validation failed".to_string());
+    };
+    crate::boot_trace::mark("self-heal: identity revalidated");
+    state.connect(&package);
+    state.set_phase(StartupPhase::CheckingAssets);
+    crate::start_background_asset_validation(app, &root);
+    Ok(())
 }
 
 async fn cleanup_after_removal(app: AppHandle) {
@@ -362,6 +502,7 @@ mod set_phase_if_booting_tests {
             validation_failures: Mutex::new(Vec::new()),
             boot_gate_complete: Mutex::new(false),
             asset_sweep_complete: Mutex::new(false),
+            last_root: Mutex::new(None),
         }
     }
 
@@ -465,5 +606,69 @@ mod boot_gate_tests {
 
     fn phase_of(c: &StartupCoordinator) -> StartupPhase {
         c.phase.lock().map(|p| *p).unwrap_or(StartupPhase::Error)
+    }
+}
+
+#[cfg(test)]
+mod self_heal_tests {
+    use super::*;
+
+    fn coordinator_at(phase: StartupPhase) -> StartupCoordinator {
+        StartupCoordinator {
+            phase: Mutex::new(phase),
+            supplied_root: Mutex::new(None),
+            connected_root: Mutex::new(None),
+            vault_id: Mutex::new(None),
+            validation_failures: Mutex::new(Vec::new()),
+            boot_gate_complete: Mutex::new(false),
+            asset_sweep_complete: Mutex::new(false),
+            last_root: Mutex::new(None),
+        }
+    }
+
+    fn phase_of(c: &StartupCoordinator) -> StartupPhase {
+        c.phase.lock().map(|p| *p).unwrap_or(StartupPhase::Error)
+    }
+
+    // A transient device drop can fail the whole sweep with device IO errors;
+    // the latch must be recoverable ONLY through the gate-verified transitions
+    // (plain probes must stay blocked — see the 2026-10-01 regression).
+    #[test]
+    fn sweep_latch_recovers_through_gates() {
+        let c = coordinator_at(StartupPhase::Ready);
+        c.reject(Vec::new());
+        assert_eq!(phase_of(&c), StartupPhase::PaiInvalid);
+        assert!(c.is_recoverable_failure());
+
+        // Plain boot probes stay latched on the failure state...
+        c.set_phase_if_booting(StartupPhase::PaiConnected);
+        assert_eq!(phase_of(&c), StartupPhase::PaiInvalid);
+
+        // ...but the sweep-complete gate clears it.
+        c.full_sweep_completed();
+        assert_eq!(phase_of(&c), StartupPhase::PaiConnected);
+        assert!(!c.is_recoverable_failure());
+    }
+
+    // The UI sets LIMITED for several reasons; only the asset-latch variant
+    // (it carries validation failures) may self-heal — a llama-health Limited
+    // state recovers through its own flow and must not be cleared by a sweep.
+    #[test]
+    fn limited_without_failures_is_not_recoverable() {
+        let c = coordinator_at(StartupPhase::LimitedMode);
+        assert!(!c.is_recoverable_failure());
+    }
+
+    #[test]
+    fn disconnected_is_recoverable_and_keeps_last_root() {
+        let c = coordinator_at(StartupPhase::Disconnected);
+        *c.last_root.lock().unwrap() = Some(PathBuf::from("D:/UNOONE"));
+        assert!(c.is_recoverable_failure());
+        assert_eq!(c.last_connected_root(), Some(PathBuf::from("D:/UNOONE")));
+        // A genuine disconnect wipes the gates but must retain the root the
+        // self-heal re-detects the package from.
+        c.disconnect();
+        assert_eq!(c.last_connected_root(), Some(PathBuf::from("D:/UNOONE")));
+        assert!(!c.is_boot_gate_complete());
     }
 }
