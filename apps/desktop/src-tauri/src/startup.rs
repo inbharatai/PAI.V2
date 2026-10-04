@@ -379,6 +379,7 @@ pub fn normalize_candidate_root(path: &Path) -> Option<PathBuf> {
 pub fn start_mount_monitor(app: AppHandle) {
     thread::spawn(move || {
         let mut last_self_heal: Option<std::time::Instant> = None;
+        let mut heal_attempts: u32 = 0;
         loop {
             thread::sleep(Duration::from_secs(2));
             let state = app.state::<StartupCoordinator>();
@@ -387,11 +388,18 @@ pub fn start_mount_monitor(app: AppHandle) {
             // its volume within seconds after an IO drop, so a sweep-latched
             // failure (or a genuine disconnect) recovers on its own as soon
             // as the package root reads again — re-validation is fail-closed
-            // (a genuine integrity mismatch stays rejected). Cooled down so
-            // a long dead window does not churn the flaky volume.
-            if state.is_recoverable_failure() {
+            // (a genuine integrity mismatch stays rejected). Each failed
+            // cycle backs the next one off further (see `self_heal_backoff`)
+            // so a long dead window does not churn the flaky volume — the
+            // first cycles cost hardware reads, and hammering a weak NAND
+            // region just generates more drops.
+            if !state.is_recoverable_failure() {
+                // Any healthy boot (connected, validating, connected+idle)
+                // resets the escalation ladder: the next drop starts cool.
+                heal_attempts = 0;
+            } else {
                 let cooled = last_self_heal
-                    .map(|past| past.elapsed() >= SELF_HEAL_COOLDOWN)
+                    .map(|past| past.elapsed() >= self_heal_backoff(heal_attempts))
                     .unwrap_or(true);
                 let root = state
                     .connected_root()
@@ -400,6 +408,7 @@ pub fn start_mount_monitor(app: AppHandle) {
                     if let Some(root) = root {
                         if root.join("manifest.json").is_file() {
                             last_self_heal = Some(std::time::Instant::now());
+                            heal_attempts = heal_attempts.saturating_add(1);
                             crate::boot_trace::mark(
                                 "mount monitor: package re-readable — self-heal revalidation",
                             );
@@ -432,11 +441,27 @@ pub fn start_mount_monitor(app: AppHandle) {
     });
 }
 
-/// Cooldown between self-heal revalidation attempts. Observed drop windows
-/// are seconds long, but revalidation itself re-sweeps up to
-/// `VALIDATE_TRANSIENT_ATTEMPTS` times — 45 s keeps a dying volume from
-/// being hammered while still healing within a user-tolerable wait.
+/// Base cooldown between self-heal revalidation attempts. Observed drop
+/// windows are seconds long, but revalidation itself re-sweeps up to
+/// `VALIDATE_TRANSIENT_ATTEMPTS` times, and each failed cycle burns a
+/// full sweep's worth of reads on the volume. Consecutive failures
+/// escalate the wait so a persistently failing stick is probed, not
+/// hammered: 45 s → 90 → 180 → 360 → 720, then every 15 min.
 pub(crate) const SELF_HEAL_COOLDOWN: Duration = Duration::from_secs(45);
+
+/// Wait before heal attempt N (0-based since the last healthy boot).
+/// Doubles per failed attempt up to a 15-minute cap; a healthy boot
+/// resets the ladder.
+pub(crate) fn self_heal_backoff(attempts: u32) -> Duration {
+    const MAX: Duration = Duration::from_secs(900);
+    if attempts == 0 {
+        return SELF_HEAL_COOLDOWN;
+    }
+    SELF_HEAL_COOLDOWN
+        .checked_mul(1u32 << attempts.min(5))
+        .unwrap_or(MAX)
+        .min(MAX)
+}
 
 /// Re-run package-identity validation and the background asset sweep for a
 /// root that previously validated (the mount monitor's self-heal path).
@@ -657,6 +682,19 @@ mod self_heal_tests {
     fn limited_without_failures_is_not_recoverable() {
         let c = coordinator_at(StartupPhase::LimitedMode);
         assert!(!c.is_recoverable_failure());
+    }
+
+    // A persistently failing stick is probed, not hammered: each failed
+    // cycle doubles the wait, capped at 15 minutes.
+    #[test]
+    fn self_heal_backoff_escalates_and_caps() {
+        assert_eq!(self_heal_backoff(0), Duration::from_secs(45));
+        assert_eq!(self_heal_backoff(1), Duration::from_secs(90));
+        assert_eq!(self_heal_backoff(2), Duration::from_secs(180));
+        assert_eq!(self_heal_backoff(3), Duration::from_secs(360));
+        assert_eq!(self_heal_backoff(4), Duration::from_secs(720));
+        assert_eq!(self_heal_backoff(5), Duration::from_secs(900));
+        assert_eq!(self_heal_backoff(50), Duration::from_secs(900));
     }
 
     #[test]

@@ -689,28 +689,42 @@ fn split_tts_chunk_for_retry(chunk: &str) -> Vec<String> {
 
 const TTS_RETRY_MIN_SPLIT_CHARS: usize = 40;
 
+/// Static parameters for one synthesize run — everything
+/// `synthesize_chunk` needs besides the text and its retry depth.
+struct TtsInvoke<'a> {
+    cli: &'a Path,
+    family: &'a str,
+    model: &'a Path,
+    backend: &'a str,
+    language: &'a str,
+    output_dir: &'a Path,
+}
+
 /// Synthesize one chunk into sequential `parts`. On a deadline timeout the
 /// chunk is re-cut (up to `TTS_CHUNK_SPLIT_DEPTH` levels) and the pieces are
 /// synthesized in order; any other failure, or an un-dividable chunk,
 /// surfaces as-is.
 fn synthesize_chunk(
-    cli: &Path,
-    family: &str,
-    model: &Path,
-    backend: &str,
-    language: &str,
-    output_dir: &Path,
+    ctx: &TtsInvoke<'_>,
     chunk: &str,
     parts: &mut Vec<PathBuf>,
     depth: u32,
 ) -> Result<(), String> {
-    let output = output_dir.join(format!(
+    let output = ctx.output_dir.join(format!(
         "inbharat_tts_{}_part{}.wav",
         uuid::Uuid::new_v4().simple(),
         parts.len()
     ));
     let _ = std::fs::remove_file(&output);
-    let cmd = tts_spawn(cli, family, model, backend, language, chunk, &output);
+    let cmd = tts_spawn(
+        ctx.cli,
+        ctx.family,
+        ctx.model,
+        ctx.backend,
+        ctx.language,
+        chunk,
+        &output,
+    );
     match run_command_timeout(cmd, INFERENCE_TIMEOUT) {
         Ok(_) => {
             parts.push(output);
@@ -730,17 +744,7 @@ fn synthesize_chunk(
                 ),
             );
             for piece in &pieces {
-                synthesize_chunk(
-                    cli,
-                    family,
-                    model,
-                    backend,
-                    language,
-                    output_dir,
-                    piece,
-                    parts,
-                    depth + 1,
-                )?;
+                synthesize_chunk(ctx, piece, parts, depth + 1)?;
             }
             Ok(())
         }
@@ -1469,19 +1473,17 @@ pub fn synthesize(vault_root: &str, text: &str, language: &str) -> Result<Bharat
         &format!("chunks={total_chunks} chunk_target={TTS_CHUNK_CHAR_TARGET} chars"),
     );
     let mut chunk_paths = Vec::with_capacity(chunks.len());
+    let ctx = TtsInvoke {
+        cli: &cli,
+        family: &task.family,
+        model: &model,
+        backend: &manifest.backend,
+        language: &cli_language,
+        output_dir: &output_dir,
+    };
     for (index, chunk) in chunks.iter().enumerate() {
         let mut parts: Vec<PathBuf> = Vec::new();
-        if let Err(error) = synthesize_chunk(
-            &cli,
-            &task.family,
-            &model,
-            &manifest.backend,
-            &cli_language,
-            &output_dir,
-            chunk,
-            &mut parts,
-            0,
-        ) {
+        if let Err(error) = synthesize_chunk(&ctx, chunk, &mut parts, 0) {
             // A failed run may still have written partial WAVs — remove
             // every part so the scratch area never accumulates broken
             // output.
