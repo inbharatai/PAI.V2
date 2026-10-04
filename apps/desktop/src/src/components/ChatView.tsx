@@ -81,6 +81,14 @@ export function ChatView() {
   // unwinds (the loop checks its token at the next step boundary, so the
   // in-flight tool call finishes first — never a hard mid-action kill).
   const [stopRequested, setStopRequested] = useState(false);
+  // Sticky follow: auto-scroll on every streamed token ONLY while the user
+  // is reading the bottom of the panel. Scrolling up mid-stream — to re-read
+  // history or reach the Stop control — releases the lock and the stream
+  // stops yanking them back. Live-reported 2026-10-04: scrollIntoView fired
+  // on every streamedAnswer chunk, so the reader was dragged to the bottom
+  // on the next token after every scroll-up attempt, and Stop was
+  // effectively unreachable once an answer was streaming.
+  const autoFollowRef = useRef(true);
   // 'loading' = the model server is provably on its way up (startup phase
   // still inside the pre-Ready model path). check_model_health rejects with
   // "manager not initialized" during that whole window, so a plain failure
@@ -289,7 +297,11 @@ export function ChatView() {
   };
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // Follow only when the user has not scrolled away (autoFollowRef is
+    // flipped by onScroll below); 'auto' (instant) so a live stream doesn't
+    // animate over the reader's position.
+    if (!autoFollowRef.current) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
   }, [messages, streamedAnswer]);
 
   const checkModelStatus = useCallback(async () => {
@@ -908,7 +920,17 @@ export function ChatView() {
 
   return (
     <div className="chat-view">
-      <div className="chat-messages">
+      <div
+        className="chat-messages"
+        onScroll={e => {
+          const el = e.currentTarget;
+          // Distance from the bottom decides the follow lock: any real
+          // distance means the user scrolled up deliberately. Programmatic
+          // scrollIntoView lands at distance 0 and keeps the lock on.
+          const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+          autoFollowRef.current = fromBottom < 48;
+        }}
+      >
         {messages.length === 0 && (
           <div className="empty-state">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '48px', height: '48px', opacity: 0.5 }}>
@@ -1135,6 +1157,50 @@ export function ChatView() {
           color: 'var(--danger, #f87171)',
         }}>
           {serverError}
+        </div>
+      )}
+
+      {/* Pinned stop control: OUTSIDE the scrollable messages list, so the
+          Stop button stays reachable no matter where the user has scrolled
+          while a run is generating (live-reported 2026-10-04 the in-bubble
+          Stop was effectively unreachable mid-stream). The in-bubble control
+          below remains as a secondary affordance. */}
+      {isGenerating && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          padding: '6px 16px',
+          borderTop: '1px solid var(--border, #333)',
+          background: 'var(--surface-secondary, #1a1a1a)',
+          fontSize: '12px',
+          color: 'var(--text-secondary, #888)',
+        }}>
+          <span className="spinner" style={{ flexShrink: 0 }} />
+          <span>
+            {stopRequested
+              ? 'Stopping — finishing the current step…'
+              : streamedAnswer
+                ? 'Answering… (scroll freely — Stop is pinned here)'
+                : 'Working…'}
+          </span>
+          <button
+            type="button"
+            onClick={handleStop}
+            disabled={stopRequested}
+            style={{
+              marginLeft: 'auto',
+              padding: '2px 12px',
+              fontSize: '12px',
+              borderRadius: '6px',
+              border: '1px solid var(--border, #333)',
+              background: 'transparent',
+              color: 'var(--text-primary, #eee)',
+              cursor: stopRequested ? 'default' : 'pointer',
+            }}
+          >
+            ■ Stop
+          </button>
         </div>
       )}
 
