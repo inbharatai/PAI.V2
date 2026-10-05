@@ -104,11 +104,14 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
   `inbharat-harness`): a routing planner (L0 deterministic fast path /
   L1 model / L3 full agent loop with a 48-step budget), model-visible
   capability contract, audited tool calls, and per-step transcripts in the UI.
-- **Streaming plain answers (2026-09-16):** tool-free chat turns stream
-  token-by-token to the bubble over SSE from the local llama-server
-  (`chat-token` Tauri events); agentic (tool-bearing) turns stay buffered so
-  complete tool calls reach the loop. The authoritative result replaces the
-  streamed text when the turn lands.
+- **Progress-aware local inference (updated 2026-10-05):** plain and
+  tool-bearing main-agent turns stream over SSE from the local llama-server
+  (`chat-token` Tauri events). Tool-call fragments are assembled before the
+  completed call reaches the agent loop, and child agents use the same SSE
+  transport without duplicating their tokens in the parent UI. Each received
+  chunk refreshes the 180 s idle deadline, while a separate 12-minute hard
+  ceiling still stops a genuinely stuck generation. The authoritative result
+  replaces streamed text when the turn lands.
 - **Reasoning-aware inference layer (2026-09-16):** one shared request type
   carries `disable_reasoning` — the vision lanes (describe/OCR) pin think-off
   (`enable_thinking: false`, `reasoning_budget: 0`), measured live on the
@@ -229,6 +232,7 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 | Mobile app (Android) | V2 agent pipeline + Pocket AI USB auto-open; M1-M3 truthful fixes (USB detection reasons, Room TTL/clear-on-detach cache, unused permission removed). Compiles, lints, tests, and `assembleDebug` passes; **cross-platform vault contract proven bidirectionally in CI** (Kotlin↔Rust Argon2id + AES-GCM record layer AND XChaCha20 master-key wrap — `packages/vault-core/test-vectors/`, `VaultCryptoCrossPlatformTest`). Physical phone test pending |
 | Desktop frontend (React) | BUILDS — Vite build passes, oxlint clean, real Tauri API calls, no mock data |
 | Desktop backend (Rust) | BUILDS AND TESTS — fmt/check/test/clippy clean on **both windows-latest and macos-latest**; 70/70+ vault-core (Wave-1 regressions + cross-platform vectors), 20/20 recording-policy, 16/16 text-util, 16/16 usb-manifest, 9/9 document-migration, 13/13 browser-policy, 2/2 chat-memory round-trip (vault `MESSAGE` record persistence: ordering + limit tail, tombstones and foreign records skipped), 12/12 granted-folder fence (multi-root longest-prefix routing, `C:\root` vs `C:\rootx` boundary, grant validation, and the in-chat approval hook lane — a relative-path denial never asks the human), 6/6 in-chat folder-grant approval (60 s deny-by-default human card, persisted-store re-check so mid-run grants resolve, declined folders never re-asked, Grant/Deny/timeout all return truthful reasons to the model), 4/4 prose-dump corrective retry (scripted dump then acts; opt-out stands; a model that already acted is never corrected; bounded to one nudge), 5/5 doc-writer round-trips (pure-Rust PDF/DOCX/MD/TXT writers re-parsed by the built-in readers), 5/5 live-preview (bounded mirror walk, reload-only-on-change, honest end when the site folder vanishes), 47/47 browser workspace (vault web-session note round-trip, dedupe, tombstones, honest persistence facts, and the popup shim: guards its own install, routes `window.open`, rewrites blank targets at click capture). The deferred dead-code sweep landed: `wait_for_exit()`, `get_backend()`, the never-read config/model_info fields and `is_confirmation_required()` are gone with clippy `-D warnings` still clean |
+| Desktop USB/runtime resilience | **VERIFIED 2026-10-05** — Power is copied into a SHA-256-addressed `%LOCALAPPDATA%\UnoOne\PowerCache\<digest>` directory and launched from that verified host copy, so Windows does not keep executable pages mapped from an unstable removable drive. Automatic repair retries are bounded at 45/90/180/360/720/900 seconds, recovery checkpoints use `.partial`, and manifest generation excludes incomplete `.partial` artifacts. This protects the app and copied package; it does not claim to repair failing USB hardware. |
 | Windows Dock / Starter | **INTEGRITY-VERIFIED ON DRIVE** — manifest-declared, hash-verified, native `--verify-only` exits 0; transactional staging with automatic rollback proven live |
 | Vault encryption (`packages/vault-core`) | IMPLEMENTED AND CORRECTNESS-HARDENED — Argon2id (256 MiB / t=3 / p=4) + AES-256-GCM for new records (legacy XChaCha20-Poly1305 stays readable, identified by nonce length) + HKDF-SHA-256 + BIP-39 recovery + write-ahead journal; transactional first-use setup refuses re-initialisation and preserves packaged `vault.id` bytes. Per-vault random salts on both the password and recovery paths. The KDF parameters are pinned as a cross-platform contract with the Kotlin `encrypted-vault` package (`SPEC_ARGON2_*` plus a `const` assertion that makes drift a compile error in release builds), because the test profile deliberately uses reduced parameters and would not catch a change that broke Android↔Windows unlock. **Wave 1** additionally fixed four release blockers: header slot selection now picks the newest committed generation (a password change written to the inactive slot used to be silently discarded on restart), record metadata is authenticated and re-verified on every read (privacy level, tombstone, type, revision and timestamps were previously editable on disk while content still decrypted), record writes are wrapped in real journal transactions with fsync-and-verify before promotion, and record IDs must be canonical UUID v4 before touching a path |
 | Model inference | Bundled llama.cpp only; direct runtime test verified (real answer, 127.0.0.1-only, clean stop) — see `docs/verification/2026-07-30/59_DIRECT_GEMMA.md` |
@@ -601,7 +605,7 @@ the two path dependencies above resolve unchanged.
 | Quantisation | Q4_K_M |
 | Source | Google Gemma 4 12B IT, GGUF Q4_K_M by llama.cpp community |
 | Licence | [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
-| Inference verified | Live on the staged drive (2026-09-15): chat, STS one-call loop, OCR (verbatim text read back), vision describe (post-defect-#44 fix), multi-agent tool runs — all through the manifest-verified llama-server on `D:\UNOONE` |
+| Inference verified | Live on the staged drive (2026-09-15): chat, STS one-call loop, OCR (verbatim text read back), vision describe (post-defect-#44 fix), multi-agent tool runs. Re-verified from the recovered Desktop package (2026-10-05): manifest-valid launch, GPU model load, SSE tool call, and clean local health check. |
 | Native context (read from the artifact) | **131,072 tokens** — `gemma4.context_length` in the GGUF header, parsed by `apps/desktop/src-tauri/src/gguf_meta.rs` (verified live against the staged drive model 2026-10-02) |
 | Session context | **Host-adaptive and model-adaptive** — `start_server` clamps the requested context to (1) the artifact's trained context and (2) the host RAM tier (≥24 GiB → 32,768; ≥12 GiB → 16,384; else 4,096), with every clamp reason written to `unoone-logs/llama-server.log` and shown in the Model panel's "Adaptive context budget" row. The Model panel offers the artifact's native context as a dropdown option whenever it exceeds the tier ladder. Unreadable artifact metadata is surfaced as "unverified", never guessed |
 | KV-cache cost | Derived from the artifact's shape metadata (48 layers, 16 KV heads, 512 head_dim → ~0.8 MiB/token at q8_0): 32,768 tokens ≈ 25.5 GiB, which is why the 64 GiB dev host tops out at 32K rather than 131K — the estimate is displayed, not hidden |
@@ -671,6 +675,27 @@ cd android-app/UnoOneAgent && ./gradlew test
 ```
 
 ## Latest verified results
+
+### Desktop resilience and autonomous-agent verification (2026-10-05)
+
+The recovery and runtime changes were exercised on the target Windows laptop,
+not inferred from build output:
+
+| Gate | Result |
+|---|---|
+| GPU identity | NVIDIA GeForce RTX 5050 Laptop GPU, **8,151 MiB** total VRAM reported by `nvidia-smi`; the earlier 4 GB WMI value was not used |
+| Inference topology | llama-server starts with `--parallel 1`, a 16,384-token session context, full available GPU offload, and q8_0 KV cache |
+| Throughput | 128-token live completion measured **9.75 tokens/s**, up from approximately **6.1 tokens/s** with four competing slots on this machine |
+| Autonomous tool turn | Live request completed in **6.23 s** with `finish_reason: tool_calls`, selected `fs.list`, and returned valid structured arguments |
+| Long-running generations | SSE activity refreshes a 180 s idle timeout; a distinct 12-minute hard ceiling remains, so active work is not killed merely because total generation time crosses the old fixed deadline |
+| USB-safe launch | Starter/Dock launch the digest-verified host-cached Power executable and pass the original package root explicitly; no executable is run directly from the unstable USB path |
+| Recovered local package | Desktop copy passes `Start UnoOne.exe --verify-only` with `valid=true` and zero failures; incomplete recovery checkpoints are intentionally excluded from the manifest |
+| Regression gates | Desktop suite **275/275**, harness-bridge subset **43/43**, adapter suite **27/27**, strict Rust clippy (`-D warnings`), and release build all pass |
+
+The USB device itself still produced Windows Event 51/153 and UASPStor 129
+transport resets under load. These code changes make UnoOne safer and more
+recoverable around that failure; they do not relabel a hardware/transport fault
+as a Docker or application defect.
 
 ### Speech + Android hardening cycle (branch `speech/universal-audio-hardening`, 2026-09-07)
 
