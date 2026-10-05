@@ -19,7 +19,7 @@ mod windows_app {
     use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
-    use unoone_usb_manifest::{validate_package, ValidationScope};
+    use unoone_usb_manifest::{stage_desktop_executable, validate_package, ValidationScope};
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
     };
@@ -42,6 +42,7 @@ mod windows_app {
 
     const RUN_VALUE: &str = "UnoOneDock";
     const APP_DIR: &str = "UnoOne\\Dock";
+    const POWER_CACHE_DIR: &str = "UnoOne\\PowerCache";
     const TRAY_ID: u32 = 1;
     const WM_TRAYICON: u32 = 0x8000 + 42;
 
@@ -60,7 +61,6 @@ mod windows_app {
     #[derive(Clone)]
     struct ConnectedPackage {
         vault_id: String,
-        desktop_executable: PathBuf,
     }
 
     pub fn main() {
@@ -309,8 +309,21 @@ mod windows_app {
                 }
                 let connected = ConnectedPackage {
                     vault_id: package.vault_id.clone(),
-                    desktop_executable: package.desktop_executable.clone(),
                 };
+                if launch {
+                    let result = power_cache_root()
+                        .and_then(|cache| stage_desktop_executable(&package, &cache))
+                        .and_then(|executable| launch_power(&root, &executable));
+                    if let Err(error) = result {
+                        notify(
+                            state.hwnd,
+                            "UnoOne Power launch failed",
+                            &error,
+                            NotifyKind::Error,
+                        );
+                        continue;
+                    }
+                }
                 state.connected.insert(root.clone(), connected.clone());
                 notify(
                     state.hwnd,
@@ -318,16 +331,6 @@ mod windows_app {
                     &format!("Validated {} at {}", connected.vault_id, root.display()),
                     NotifyKind::Info,
                 );
-                if launch {
-                    if let Err(error) = launch_power(&root, &connected.desktop_executable) {
-                        notify(
-                            state.hwnd,
-                            "UnoOne Power launch failed",
-                            &error,
-                            NotifyKind::Error,
-                        );
-                    }
-                }
             } else if state.invalid_notified.insert(root.clone()) {
                 let summary = report
                     .failures
@@ -389,6 +392,13 @@ mod windows_app {
                     executable.display()
                 )
             })
+    }
+
+    fn power_cache_root() -> Result<PathBuf, String> {
+        env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join(POWER_CACHE_DIR))
+            .ok_or_else(|| "LOCALAPPDATA is unavailable for the desktop host cache".to_string())
     }
 
     unsafe fn add_tray_icon(hwnd: HWND) {

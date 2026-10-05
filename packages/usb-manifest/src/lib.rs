@@ -209,6 +209,61 @@ pub struct ValidationReport {
     pub package: Option<ValidatedPackage>,
 }
 
+/// Copy a validated package's desktop executable into a hash-addressed host
+/// cache and verify the staged bytes before returning the launch path.
+///
+/// Running the desktop image from the removable volume makes Windows unable
+/// to page code after a transient USB disconnect (`STATUS_IN_PAGE_ERROR`). The
+/// cache keeps executable code resident on the host while the application
+/// continues to treat `package.root` as the removable, fail-closed data root.
+pub fn stage_desktop_executable(
+    package: &ValidatedPackage,
+    cache_root: &Path,
+) -> Result<PathBuf, String> {
+    let asset = &package.manifest.platforms.windows.desktop;
+    if asset.kind != AssetKind::DesktopExecutable {
+        return Err("Manifest desktop asset has the wrong kind".to_string());
+    }
+    if asset.sha256.len() != 64 || hex::decode(&asset.sha256).is_err() {
+        return Err("Manifest desktop SHA-256 is invalid".to_string());
+    }
+
+    let cache_dir = cache_root.join(asset.sha256.to_ascii_uppercase());
+    let destination = cache_dir.join("UnoOnePower.exe");
+    if verify_staged_asset(&destination, asset).is_ok() {
+        return Ok(destination);
+    }
+
+    fs::create_dir_all(&cache_dir)
+        .map_err(|error| format!("Cannot create desktop host cache: {error}"))?;
+    let pending = cache_dir.join(format!("UnoOnePower.{}.pending", std::process::id()));
+    let _ = fs::remove_file(&pending);
+
+    let staged = (|| {
+        fs::copy(&package.desktop_executable, &pending).map_err(|error| {
+            format!(
+                "Cannot stage {} into the desktop host cache: {error}",
+                package.desktop_executable.display()
+            )
+        })?;
+        verify_staged_asset(&pending, asset)?;
+
+        if destination.exists() {
+            fs::remove_file(&destination)
+                .map_err(|error| format!("Cannot replace invalid desktop host cache: {error}"))?;
+        }
+        fs::rename(&pending, &destination)
+            .map_err(|error| format!("Cannot commit desktop host cache: {error}"))?;
+        verify_staged_asset(&destination, asset)?;
+        Ok(destination.clone())
+    })();
+
+    if staged.is_err() {
+        let _ = fs::remove_file(&pending);
+    }
+    staged
+}
+
 impl ValidationReport {
     fn fail(code: ValidationFailureCode, path: Option<String>, message: impl Into<String>) -> Self {
         Self {
@@ -585,6 +640,27 @@ fn validate_asset(root: &Path, asset: &AssetSpec, failures: &mut Vec<ValidationF
     validate_hash_text(&asset.sha256, &path, &asset.path, failures);
 }
 
+fn verify_staged_asset(path: &Path, asset: &AssetSpec) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("Cached desktop executable is unavailable: {error}"))?;
+    if metadata.len() != asset.size_bytes {
+        return Err(format!(
+            "Cached desktop executable expected {} bytes, found {}",
+            asset.size_bytes,
+            metadata.len()
+        ));
+    }
+    let actual = sha256_file(path)
+        .map_err(|error| format!("Cached desktop executable cannot be hashed: {error}"))?;
+    if !actual.eq_ignore_ascii_case(&asset.sha256) {
+        return Err(format!(
+            "Cached desktop executable SHA-256 mismatch: expected {}, found {actual}",
+            asset.sha256
+        ));
+    }
+    Ok(())
+}
+
 fn validate_hash_text(
     expected: &str,
     path: &Path,
@@ -854,6 +930,44 @@ mod tests {
         let mut file = File::create(root.join(MANIFEST_FILE)).unwrap();
         file.write_all(serde_json::to_string_pretty(manifest).unwrap().as_bytes())
             .unwrap();
+    }
+
+    #[test]
+    fn desktop_executable_is_staged_verified_and_repaired_in_host_cache() {
+        let (temp, manifest) = fixture();
+        write_manifest(temp.path(), &manifest);
+        let package = validate_package(temp.path(), ValidationScope::PackageIdentity)
+            .package
+            .expect("fixture package must validate");
+        let cache = tempfile::tempdir().unwrap();
+
+        let staged = stage_desktop_executable(&package, cache.path()).unwrap();
+        assert_eq!(fs::read(&staged).unwrap(), b"power");
+        assert_ne!(staged, package.desktop_executable);
+
+        fs::write(&staged, b"evil!").unwrap();
+        let repaired = stage_desktop_executable(&package, cache.path()).unwrap();
+        assert_eq!(repaired, staged);
+        assert_eq!(fs::read(repaired).unwrap(), b"power");
+    }
+
+    #[test]
+    fn corrupt_source_never_commits_a_desktop_host_cache() {
+        let (temp, manifest) = fixture();
+        write_manifest(temp.path(), &manifest);
+        let package = validate_package(temp.path(), ValidationScope::PackageIdentity)
+            .package
+            .expect("fixture package must validate");
+        fs::write(&package.desktop_executable, b"evil!").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+
+        let error = stage_desktop_executable(&package, cache.path()).unwrap_err();
+        assert!(error.contains("SHA-256 mismatch"), "{error}");
+        let destination = cache
+            .path()
+            .join(manifest.platforms.windows.desktop.sha256)
+            .join("UnoOnePower.exe");
+        assert!(!destination.exists());
     }
 
     /// Stages the Android APK and declares it as the mobile platform's

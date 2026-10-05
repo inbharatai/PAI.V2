@@ -1790,7 +1790,7 @@ mod tests {
 
     #[test]
     fn split_tts_chunk_for_retry_halves_at_sentence_bounds() {
-        let text = vec![
+        let text = [
             "First sentence here.",
             "Second sentence here.",
             "Third sentence here.",

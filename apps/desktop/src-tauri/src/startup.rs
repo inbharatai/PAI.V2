@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use unoone_usb_manifest::{ValidatedPackage, ValidationFailure};
 
@@ -378,8 +378,7 @@ pub fn normalize_candidate_root(path: &Path) -> Option<PathBuf> {
 
 pub fn start_mount_monitor(app: AppHandle) {
     thread::spawn(move || {
-        let mut last_self_heal: Option<std::time::Instant> = None;
-        let mut heal_attempts: u32 = 0;
+        let mut self_heal = SelfHealThrottle::default();
         loop {
             thread::sleep(Duration::from_secs(2));
             let state = app.state::<StartupCoordinator>();
@@ -393,39 +392,38 @@ pub fn start_mount_monitor(app: AppHandle) {
             // so a long dead window does not churn the flaky volume — the
             // first cycles cost hardware reads, and hammering a weak NAND
             // region just generates more drops.
-            if !state.is_recoverable_failure() {
-                // Any healthy boot (connected, validating, connected+idle)
-                // resets the escalation ladder: the next drop starts cool.
-                heal_attempts = 0;
-            } else {
-                let cooled = last_self_heal
-                    .map(|past| past.elapsed() >= self_heal_backoff(heal_attempts))
-                    .unwrap_or(true);
+            let recoverable = state.is_recoverable_failure();
+            let healthy = state.is_asset_validation_complete();
+            if recoverable {
                 let root = state
                     .connected_root()
                     .or_else(|| state.last_connected_root());
-                if cooled {
-                    if let Some(root) = root {
-                        if root.join("manifest.json").is_file() {
-                            last_self_heal = Some(std::time::Instant::now());
-                            heal_attempts = heal_attempts.saturating_add(1);
-                            crate::boot_trace::mark(
-                                "mount monitor: package re-readable — self-heal revalidation",
-                            );
-                            let heal_app = app.clone();
-                            thread::spawn(move || {
-                                if let Err(error) = revalidate_and_connect(heal_app, root) {
-                                    crate::boot_trace::mark_detail(
-                                        "mount monitor: self-heal failed",
-                                        &error,
-                                    );
-                                }
-                            });
-                        }
+                if let Some(root) = root {
+                    if root.join("manifest.json").is_file()
+                        && self_heal.should_attempt(Instant::now(), recoverable, healthy)
+                    {
+                        crate::boot_trace::mark(
+                            "mount monitor: package re-readable — self-heal revalidation",
+                        );
+                        let heal_app = app.clone();
+                        thread::spawn(move || {
+                            if let Err(error) = revalidate_and_connect(heal_app, root) {
+                                crate::boot_trace::mark_detail(
+                                    "mount monitor: self-heal failed",
+                                    &error,
+                                );
+                            }
+                        });
                     }
                 }
                 continue;
             }
+
+            // Only a completed full sweep proves the recovery succeeded and
+            // resets the ladder. Transitional states such as CheckingAssets
+            // must retain it; resetting there collapsed every live retry back
+            // to the 45-second rung and repeatedly hammered an unstable drive.
+            self_heal.should_attempt(Instant::now(), recoverable, healthy);
 
             if let Some(root) = state.connected_root() {
                 if !root.join("manifest.json").is_file() {
@@ -448,6 +446,39 @@ pub fn start_mount_monitor(app: AppHandle) {
 /// escalate the wait so a persistently failing stick is probed, not
 /// hammered: 45 s → 90 → 180 → 360 → 720, then every 15 min.
 pub(crate) const SELF_HEAL_COOLDOWN: Duration = Duration::from_secs(45);
+
+#[derive(Default)]
+struct SelfHealThrottle {
+    attempts: u32,
+    next_allowed: Option<Instant>,
+}
+
+impl SelfHealThrottle {
+    /// Return true only when a recoverable failure has remained present for
+    /// the current backoff interval. Validation-in-progress states preserve
+    /// the ladder; only a completed full sweep resets it.
+    fn should_attempt(&mut self, now: Instant, recoverable: bool, healthy: bool) -> bool {
+        if healthy {
+            self.attempts = 0;
+            self.next_allowed = None;
+            return false;
+        }
+        if !recoverable {
+            return false;
+        }
+
+        if self.next_allowed.is_none() {
+            self.next_allowed = Some(now + self_heal_backoff(self.attempts));
+        }
+        if now < self.next_allowed.expect("self-heal deadline initialized") {
+            return false;
+        }
+
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_allowed = Some(now + self_heal_backoff(self.attempts));
+        true
+    }
+}
 
 /// Wait before heal attempt N (0-based since the last healthy boot).
 /// Doubles per failed attempt up to a 15-minute cap; a healthy boot
@@ -695,6 +726,29 @@ mod self_heal_tests {
         assert_eq!(self_heal_backoff(4), Duration::from_secs(720));
         assert_eq!(self_heal_backoff(5), Duration::from_secs(900));
         assert_eq!(self_heal_backoff(50), Duration::from_secs(900));
+    }
+
+    #[test]
+    fn self_heal_throttle_waits_preserves_and_resets_the_ladder() {
+        let start = Instant::now();
+        let mut throttle = SelfHealThrottle::default();
+
+        // The first failed boot waits instead of immediately launching a
+        // second validation pass.
+        assert!(!throttle.should_attempt(start, true, false));
+        assert!(!throttle.should_attempt(start + Duration::from_secs(44), true, false));
+        assert!(throttle.should_attempt(start + Duration::from_secs(45), true, false));
+
+        // CheckingAssets is transitional, not proof of recovery: it must not
+        // reset the counter. The next retry therefore waits the 90-second rung.
+        assert!(!throttle.should_attempt(start + Duration::from_secs(46), false, false));
+        assert!(!throttle.should_attempt(start + Duration::from_secs(134), true, false));
+        assert!(throttle.should_attempt(start + Duration::from_secs(135), true, false));
+
+        // A completed full sweep is the sole reset signal.
+        assert!(!throttle.should_attempt(start + Duration::from_secs(136), false, true));
+        assert!(!throttle.should_attempt(start + Duration::from_secs(137), true, false));
+        assert!(throttle.should_attempt(start + Duration::from_secs(182), true, false));
     }
 
     #[test]

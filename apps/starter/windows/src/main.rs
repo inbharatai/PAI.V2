@@ -3,7 +3,9 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use unoone_usb_manifest::{validate_package, AssetKind, ValidationScope};
+use unoone_usb_manifest::{stage_desktop_executable, validate_package, AssetKind, ValidationScope};
+
+const POWER_CACHE_DIR: &str = "UnoOne\\PowerCache";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -60,7 +62,12 @@ fn run(args: &[String]) -> Result<(), String> {
         format!("This Pocket AI package is missing or has been modified.\n\n{details}")
     })?;
 
-    Command::new(&package.desktop_executable)
+    let cache_root = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|path| path.join(POWER_CACHE_DIR))
+        .ok_or_else(|| "LOCALAPPDATA is unavailable for the desktop host cache".to_string())?;
+    let desktop_executable = stage_desktop_executable(&package, &cache_root)?;
+    Command::new(&desktop_executable)
         .arg("--vault-root")
         .arg(&package.root)
         .arg("--launched-by-starter")
