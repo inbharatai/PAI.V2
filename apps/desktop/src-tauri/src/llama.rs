@@ -1294,6 +1294,13 @@ impl ModelManager {
             &config.repeat_penalty.to_string(),
             "-n",
             &config.max_tokens.to_string(),
+            // UnoOne owns one local interactive model session. llama-server's
+            // auto default selected four slots on the target RTX 5050 laptop,
+            // multiplying KV-cache pressure and reducing measured 12B decode
+            // throughput from ~9.75 to ~6.1 tokens/second. Concurrent HTTP
+            // requests can queue behind the one active generation.
+            "--parallel",
+            "1",
         ]);
 
         // GPU layers

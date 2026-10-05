@@ -15,7 +15,12 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
+// A 12B Q4 model on the supported 8 GiB laptop-GPU tier can sustain only
+// about 6-10 generated tokens/second. Treat this as the maximum *idle* gap
+// for SSE generation; each received progress chunk refreshes the deadline.
+// A separate hard ceiling below still bounds a continuously active request.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
+const STREAM_HARD_TIMEOUT_MULTIPLIER: u32 = 4;
 
 /// Gap 1 (2026-09-16): the provider's live token tap — a cheap, non-blocking
 /// callback fired once per generated answer token of a streamed completion
@@ -845,7 +850,7 @@ fn post_sse_localhost(
         .flush()
         .map_err(|error| PaiLlamaLocalProvider::failure("pai.model.write", error.to_string()))?;
 
-    let response = read_sse_response(&mut stream, deadline, cancel, on_delta);
+    let response = read_sse_response(&mut stream, timeout, cancel, on_delta);
     if response.is_err() {
         let _ = stream.shutdown(Shutdown::Both);
     }
@@ -859,7 +864,7 @@ fn post_sse_localhost(
 /// Content-Length — whichever comes first.
 fn read_sse_response(
     stream: &mut TcpStream,
-    deadline: Instant,
+    idle_timeout: Duration,
     cancel: &CancellationToken,
     on_delta: &mut dyn FnMut(SseDelta) -> HarnessResult<()>,
 ) -> HarnessResult<()> {
@@ -873,21 +878,34 @@ fn read_sse_response(
     let mut chunk_remaining: usize = 0;
     let mut received: usize = 0;
     let mut done = false;
+    let mut progress_deadline = Instant::now() + idle_timeout;
+    let hard_deadline =
+        Instant::now() + idle_timeout.saturating_mul(STREAM_HARD_TIMEOUT_MULTIPLIER);
 
     while !done {
         cancel.check("pai.model.read")?;
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= hard_deadline {
             return Err(Failure::new(
                 ErrorCode::Timeout,
                 FailureClass::Resource,
                 "pai.model.read",
-                "local model generation exceeded its deadline",
+                "local model generation exceeded its hard safety ceiling",
+            ));
+        }
+        if now >= progress_deadline {
+            return Err(Failure::new(
+                ErrorCode::Timeout,
+                FailureClass::Resource,
+                "pai.model.read",
+                "local model generation stalled without progress",
             ));
         }
 
         match stream.read(&mut scratch) {
             Ok(0) => break, // server closed the connection: stream over
             Ok(count) => {
+                progress_deadline = Instant::now() + idle_timeout;
                 if received.saturating_add(count) > MAX_HTTP_RESPONSE_BYTES {
                     return Err(Failure::new(
                         ErrorCode::BudgetExceeded,
@@ -968,7 +986,13 @@ fn read_sse_response(
             } else if let Some(remaining) = identity_remaining {
                 let take = pending.len().min(remaining);
                 if take == 0 {
-                    done = true; // declared body fully delivered
+                    // Headers and the first SSE event may arrive in separate
+                    // TCP reads. An empty pending buffer is only end-of-body
+                    // after Content-Length bytes have actually been consumed;
+                    // otherwise return to the socket loop and wait for more.
+                    if remaining == 0 {
+                        done = true;
+                    }
                     break;
                 }
                 feed_sse_bytes(&pending[..take], &mut line_buffer, on_delta, &mut done)?;
@@ -1773,6 +1797,101 @@ mod transcript_tests {
             let _ = stream.flush();
         });
         (port, rx)
+    }
+
+    /// SSE stand-in that deliberately takes longer than one idle timeout to
+    /// finish while continuing to deliver progress before each idle deadline.
+    fn capture_slow_sse_server(
+        parts: Vec<&'static str>,
+        part_delay: Duration,
+    ) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        let port = listener.local_addr().expect("mock addr").port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("mock accept");
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let header_end;
+            loop {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    header_end = buffer
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .unwrap_or(0);
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+                if let Some(position) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = position;
+                    break;
+                }
+            }
+            let headers = String::from_utf8_lossy(&buffer[..header_end]).into_owned();
+            let content_length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while buffer.len() < header_end + 4 + content_length {
+                let n = stream.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            let body = buffer[header_end + 4..].to_vec();
+            let _ = tx.send(String::from_utf8_lossy(&body).into_owned());
+
+            let response_length: usize = parts.iter().map(|part| part.len()).sum();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {response_length}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+            for part in parts {
+                let _ = stream.write_all(part.as_bytes());
+                let _ = stream.flush();
+                std::thread::sleep(part_delay);
+            }
+        });
+        (port, rx)
+    }
+
+    #[test]
+    fn active_sse_progress_refreshes_the_idle_deadline() {
+        let parts = vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n",
+            concat!(
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],",
+                "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n"
+            ),
+            "data: [DONE]\n\n",
+        ];
+        let (port, _rx) = capture_slow_sse_server(parts, Duration::from_millis(60));
+        let provider = PaiLlamaLocalProvider::new("test-model", port)
+            .expect("build provider")
+            .with_timeout(Duration::from_millis(100))
+            .with_token_emitter(std::sync::Arc::new(|_| {}));
+        let request = vision_request(vec![]);
+        let cancel = CancellationToken::new();
+        let started = Instant::now();
+        let response = provider
+            .stream(&request, &cancel, &mut |_chunk| Ok(()))
+            .expect("steady SSE progress must outlive one idle window");
+        assert_eq!(response.text, "AB");
+        assert!(
+            started.elapsed() > Duration::from_millis(100),
+            "the response must span more than one idle timeout"
+        );
     }
 
     /// Gap 1 regression (live-caught 2026-09-16): the streaming gate was

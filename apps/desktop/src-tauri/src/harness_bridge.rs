@@ -3008,7 +3008,12 @@ impl PaiSubagentProvider {
                     "subagent.model",
                     error.to_string(),
                 )
-            })?;
+            })?
+            // Child agents do not render tokens in the parent chat, but they
+            // still need SSE progress-aware deadlines. A no-op tap selects
+            // the same resilient streaming transport as the main agent while
+            // preserving the child's isolated transcript and final report.
+            .with_token_emitter(Arc::new(|_| {}));
         let model = Arc::new(child_model_builder);
         let memory = Arc::new(
             PaiVaultMemoryProvider::new(
