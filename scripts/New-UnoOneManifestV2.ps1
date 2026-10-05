@@ -100,7 +100,12 @@ foreach ($file in Get-ChildItem -LiteralPath $runtimeRoot -Recurse -File | Sort-
 }
 
 $modelAssets = @()
-foreach ($file in Get-ChildItem -LiteralPath $modelRoot -Recurse -File | Sort-Object FullName) {
+# Resumable recovery tools keep incomplete weights beside their final target
+# with a .partial suffix. Never integrity-bind or advertise those temporary
+# files as runnable models.
+foreach ($file in Get-ChildItem -LiteralPath $modelRoot -Recurse -File |
+    Where-Object { $_.Name -notlike '*.partial' } |
+    Sort-Object FullName) {
     $kind = Get-AssetKind -File $file -Area "model"
     $asset = New-Asset -File $file -Kind $kind -Id ("model-" + $file.BaseName.ToLowerInvariant())
     if ($kind -in @("WHISPER_MODEL", "PIPER_MODEL")) {
