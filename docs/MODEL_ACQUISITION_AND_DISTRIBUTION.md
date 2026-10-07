@@ -1,5 +1,10 @@
 # UnoOne Model Acquisition and Distribution
 
+> **Updated 2026-10-07:** corrected the claim that the bundled Android manifest has an empty Gemma
+> URL/hash/size — both Gemma 4 `.litertlm` brains (E2B and E4B) are now pinned with URL, SHA-256 and
+> byte size; added a short section on the desktop GGUF tiers (12B / E4B / E2B with per-tier mmproj)
+> and their admission policy. No desktop hash is reproduced here unless the repository records it.
+
 ## Objective
 
 UnoOne users must not depend on Hugging Face, Kaggle, Google AI Edge Gallery or another third-party model catalogue after a release artifact has been approved. Third-party services may be used as an upstream acquisition source during engineering, subject to licence and provenance checks. Production downloads must come from UnoOne-controlled storage and a signed catalogue.
@@ -25,7 +30,16 @@ UnoOne users must not depend on Hugging Face, Kaggle, Google AI Edge Gallery or 
 | `device-qualified` | Stability/performance gate passed | RAM, latency, temperature, battery and sequential-task results |
 | `production-approved` | Legal, integrity, security and device gates approved | signed release record and catalogue entry |
 
-The bundled Android manifest intentionally has an empty Gemma URL, hash and size until these gates produce a real approved record.
+The same stages apply to the Gemma 4 E4B (Medium) brain. The bundled Android manifest
+(`modelmanager/src/main/assets/models_manifest.json`) now pins the upstream `litert-community`
+Hugging Face URL, exact SHA-256 and byte size for both brains — `gemma-4-e2b`
+(`gemma-4-E2B-it.litertlm`, 2,588,147,712 bytes, `181938105e0e…b97139a63c`) and `gemma-4-e4b`
+(`gemma-4-E4B-it.litertlm`, 3,659,530,240 bytes, `0b2a8980ce15…b145bd52e0`). That is integrity
+metadata only: the URLs resolve the upstream `main` branch rather than an immutable revision, they
+are not UnoOne-controlled storage, and no `qualify_artifact.py` record is committed. E2B has a
+recorded device load on the primary Xiaomi 14 (`DEVICE_VERIFICATION.md` §2); E4B has none. Neither
+brain is `device-qualified` or `production-approved` (both `BrainModelSpec`s keep
+`isDeviceVerified = false`).
 
 ## Engineering acquisition flow
 
@@ -107,6 +121,37 @@ Development builds may read the bundled unsigned catalogue with a visible warnin
 - HTTPS UnoOne-controlled download origin.
 
 A bad signature, empty production checksum, origin mismatch or unsupported runtime must fail closed.
+
+## Desktop GGUF tiers (Pocket AI drive)
+
+The desktop app (UnoOnePower) does not use the Android `.litertlm` pipeline above. Its models are
+llama.cpp GGUF files staged on the Pocket AI drive under `MODELS/DESKTOP/` and declared in the
+drive's schema-v2 `manifest.json`. The package may declare three tiers (see the repository README,
+"Desktop model ladder"):
+
+| Tier | Artifact | Size | SHA-256 in this repository | Admission floor (total RAM) |
+|---|---|---:|---|---:|
+| 12B (flagship) | `gemma-4-12B-it-Q4_K_M.gguf` | 7,662,531,872 B | `D333B368…054044B` (README "Model Verification") | 16 GiB |
+| E4B (Medium) | Gemma 4 E4B GGUF | 4,977,171,584 B (README) | not recorded | 8 GiB |
+| E2B (Lite) | Gemma 4 E2B GGUF | 3,106,738,272 B (README) | not recorded | 4 GiB |
+
+- **Per-tier mmproj:** each tier has its own same-tier multimodal projector (manifest kind `MMPROJ`).
+  `apps/desktop/src-tauri/src/llama.rs` attaches a projector only when
+  `desktop_model_policy::tier()` of the projector's id/path matches the text model's tier, so a 12B
+  projector is never attached to an E4B/E2B model.
+- **Integrity:** `scripts/New-UnoOneManifestV2.ps1` measures every file under `MODELS/DESKTOP/` at
+  staging time (SHA-256 + byte size; incomplete `.partial` files excluded) and writes the result into
+  the drive manifest; `packages/usb-manifest` re-verifies size and SHA-256 (`Start UnoOne.exe
+  --verify-only`). The E4B/E2B and projector digests therefore live in the drive manifest, not in
+  this repository, and are not reproduced here.
+- **Admission:** `apps/desktop/src-tauri/src/desktop_model_policy.rs` — a tier boots only if the
+  host's TOTAL RAM clears the tier floor above **and** weights × 1.1 + projector + KV estimate +
+  1 GiB ≤ total RAM. Non-finite or invalid measurements fail closed; momentary free-RAM pressure is
+  not a veto; a missing tier is never downloaded. `llama.rs` tries the admitted tiers largest-first.
+- **Not yet covered by this pipeline:** `scripts/models/qualify_artifact.py` does not accept GGUF
+  (`ALLOWED_RUNTIMES` is `litertlm`, `onnx`, `sherpa-onnx`, `tflite`), and the release-catalogue
+  schema (`distribution/catalog/release-catalog.schema.json`) has no GGUF runtime either; desktop
+  tiers currently reach users only on the staged drive.
 
 ## What the backend does
 

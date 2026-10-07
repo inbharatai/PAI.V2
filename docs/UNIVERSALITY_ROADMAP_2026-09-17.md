@@ -4,6 +4,16 @@
 **Directive (user, verbatim intent):** the harness and audio.cpp must be universal for both mobile and desktop — one codebase, both platforms — and so must the tools usage.
 **Trigger:** the mobile-version check found the staged phone APK predating the entire speech-language contract (fixed same day: fresh build staged from main `a7773fd`); the audit below records what is shared, what is mirrored, and what is still divergent.
 
+> **Updated 2026-10-07:** the §1 "Tool vocabulary — DIVERGENT, no shared tool contract" row is no
+> longer current. Phase U1 was delivered (as P0-A in
+> [`UNIVERSAL_CAPABILITY_PLAN_2026-10-01.md`](UNIVERSAL_CAPABILITY_PLAN_2026-10-01.md)):
+> `packages/tool-contracts/tools.v1.json` is now the one shared tool contract (63 tools — 47 Android,
+> of which 5 are blocked, and 16 desktop — with platform availability, permission and risk class),
+> embedded in Rust by the `packages/tool-contracts` crate and drift-checked against the Kotlin
+> production tables by `scripts/check_tool_contract_sync.py` in both `android-ci.yml` and
+> `desktop-ci.yml`. The engines and per-platform tool sets still differ; the vocabulary contract is
+> shared. The rest of this document is kept as the dated 2026-09-17 record.
+
 ## 1. Universality audit — where we actually stand (2026-09-17)
 
 | Plane | Desktop (UnoOnePower) | Android (UnoOneAgent) | Verdict |
