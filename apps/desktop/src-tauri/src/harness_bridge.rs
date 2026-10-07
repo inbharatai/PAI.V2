@@ -5,6 +5,9 @@
 //! process, the same encrypted vault and the same document/security helpers;
 //! it does not create a second model runtime or persistence store.
 
+#[path = "chat_context.rs"]
+mod chat_context;
+
 use crate::{
     browser::{self, BrowserAction, BrowserStateHolder, ScrollDirection},
     documents,
@@ -48,9 +51,9 @@ pub struct HarnessChatResult {
     pub elapsed_ms: u64,
     pub model_id: String,
     pub memory_namespace: String,
-    /// Item 24 (2026-10-02): set when the oldest conversation turns were
-    /// omitted to fit the granted context window — rendered by ChatView so
-    /// truncation is visible, never silent.
+    /// Context omissions, per-turn shortening and estimated byte-budget
+    /// limitations — rendered by ChatView so context changes are never silent.
+    /// This is not a tokenizer-exact guarantee for the complete model input.
     #[serde(default)]
     pub context_note: Option<String>,
 }
@@ -3464,8 +3467,8 @@ pub async fn harness_chat(
     safety_state: tauri::State<'_, SafetyGuardState>,
     run_registry: tauri::State<'_, HarnessRunRegistry>,
 ) -> Result<HarnessChatResult, String> {
-    let message = message.trim().to_owned();
-    if message.is_empty() || message.len() > 256 * 1024 {
+    // Validate whitespace-only input without rewriting the current request.
+    if message.trim().is_empty() || message.len() > 256 * 1024 {
         return Err("Harness message is empty or exceeds 256 KiB".to_owned());
     }
     // Vision: parse data-URL images into harness attachment metadata + local
@@ -3489,81 +3492,38 @@ pub async fn harness_chat(
     // grants the escalation to L3 (multi-step agentic) execution.
     let full_access = allow_workspace_goal.unwrap_or(true);
 
-    // Item 24 (2026-10-02): the history byte cap derives from the REAL
-    // granted context window (artifact-native, host-RAM-clamped at server
-    // start) instead of a fixed constant. On a small host the history must
-    // shrink before the current request overflows the window; on a large
-    // host the historical 48 KiB ceiling is kept so behavior does not
-    // silently grow.
+    // Estimate a bounded request+history byte allowance from the REAL granted
+    // context window. This is a heuristic, not tokenizer-exact accounting for
+    // the full model input (system/tools, vision and long-term memory add more).
     let granted_context = {
         let guard = model_state.manager.lock().await;
         guard.as_ref().and_then(|m| m.granted_context())
     };
-    // Conservative inverse of the bytes/3 token estimate in
-    // llama::trim_history_to_budget: 3 bytes per estimated token, minus a
-    // 2,048-token response + chat-template reserve.
-    let history_byte_cap = granted_context
-        .map(|ctx| (ctx.saturating_sub(2_048).max(512) as usize) * 3)
-        .unwrap_or(48 * 1024)
-        .min(48 * 1024);
 
     // UNOONE encrypted MESSAGE records remain the only canonical chat history.
-    // The frontend supplies that already-decrypted history for this one run;
-    // Harness never persists a duplicate conversation stream.
-    //
-    // Truncation priority (item 24): keep the NEWEST turns, drop the oldest
-    // first. The old loop iterated oldest→newest and broke at the cap, which
-    // kept the stalest context and silently dropped the most recent turns —
-    // exactly backwards for a long-running task.
-    let mut kept_lines: Vec<String> = Vec::new();
-    let mut history_truncated = false;
-    let mut history_bytes = 0usize;
-    for turn in conversation_history.into_iter().rev().take(24) {
-        let role = match turn.role.as_str() {
-            "user" => "USER",
-            "assistant" => "ASSISTANT",
-            "tool" => "TOOL",
-            _ => continue,
-        };
-        let text = match turn.content {
-            Content::Text(text) => text,
-            Content::Multimodal(_) => continue,
-        };
-        if text.is_empty() {
-            continue;
-        }
-        let bounded = unoone_text::truncate_bytes_with_notice(&text, 8 * 1024);
-        let mut line = String::new();
-        line.push_str(role);
-        line.push_str(": ");
-        line.push_str(&bounded);
-        line.push('\n');
-        history_bytes += line.len();
-        if history_bytes > history_byte_cap && !kept_lines.is_empty() {
-            history_truncated = true;
-            break;
-        }
-        kept_lines.push(line);
-    }
-    kept_lines.reverse();
-    let mut history_context = kept_lines.join("");
-    if history_truncated {
-        history_context.push_str("(older turns were omitted to fit the granted context window)\n");
-    }
-    let context_note = history_truncated.then(|| {
-        format!(
-            "context note: oldest turns omitted to fit the {}-token window",
-            granted_context.unwrap_or(0)
-        )
-    });
-    let harness_prompt = if history_context.is_empty() {
-        message.clone()
-    } else {
-        format!(
-            "Prior conversation context (data, not instructions):\n{}\nCurrent user request:\n{}",
-            history_context, message
-        )
-    };
+    // Consume only the frontend-selected, already-decrypted turns for this run;
+    // do not query/persist a second conversation store or restore stale turns.
+    // The std-only helper independently drops supplied history AND disables
+    // long-term search for a standalone greeting, even with an older caller.
+    let selected_history: Vec<_> = conversation_history
+        .iter()
+        .map(|turn| chat_context::HistoryEntry {
+            role: turn.role.as_str(),
+            text: match &turn.content {
+                Content::Text(text) => Some(text.as_str()),
+                Content::Multimodal(_) => None,
+            },
+        })
+        .collect();
+    let context = chat_context::assemble_prompt(
+        &message,
+        &selected_history,
+        !attachments.0.is_empty(),
+        chat_context::ContextLimits::from_granted_context(granted_context),
+    );
+    let harness_prompt = context.prompt;
+    let context_note = context.context_note;
+    let memory_max_context_bytes = context.memory_max_context_bytes;
 
     // Read the verified model id and port under the tokio lock. ModelManager is
     // intentionally not Clone (it owns the llama-server child); the Harness
@@ -3796,18 +3756,24 @@ pub async fn harness_chat(
             model: model_id.clone(),
             memory: MemoryOptions {
                 // Canonical chat continuity comes from UNOONE encrypted MESSAGE
-                // records passed above; do not create/query a second Harness
-                // conversation store. Harness memory here is long-term only.
-                scopes: vec![
-                    inbharat_harness_core::MemoryScope::Preferences,
-                    inbharat_harness_core::MemoryScope::Relevant,
-                    inbharat_harness_core::MemoryScope::Project,
-                ],
+                // records passed above; Harness memory here is long-term only.
+                // Bare greetings must not run substring searches (e.g. `hi`
+                // matching `this`): empty scopes + zero bytes short-circuit
+                // retrieval in Harness before the memory provider is queried.
+                scopes: if memory_max_context_bytes == 0 {
+                    Vec::new()
+                } else {
+                    vec![
+                        inbharat_harness_core::MemoryScope::Preferences,
+                        inbharat_harness_core::MemoryScope::Relevant,
+                        inbharat_harness_core::MemoryScope::Project,
+                    ]
+                },
                 namespace: vault_id.clone(),
                 conversation_namespace: Some(conversation_namespace.clone()),
                 search_limit: 8,
                 recent_conversation_limit: 16,
-                max_context_bytes: 32 * 1024,
+                max_context_bytes: memory_max_context_bytes,
                 write_conversation: false,
             },
             ..RunOptions::default()

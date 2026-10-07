@@ -12,6 +12,8 @@ import { BrowserWorkspace } from './components/BrowserWorkspace';
 import { CapabilityProfile } from './components/CapabilityProfile';
 import { DocumentsView } from './components/DocumentsView';
 import { AccessibilityView } from './components/AccessibilityView';
+import { CodingTaskView } from './components/CodingTaskView';
+import { KnowledgeView } from './components/KnowledgeView';
 import { tauriApi, type StartupPhase, type PendingGrantInfo } from './lib/tauri';
 import { listen } from '@tauri-apps/api/event';
 import { ensureBrowserWorkspaceWindow } from './lib/browserWorkspaceWindow';
@@ -407,6 +409,10 @@ function App() {
         return <ModelManager />;
       case 'browser':
         return <BrowserWorkspace />;
+      case 'coding':
+        return <CodingTaskView />;
+      case 'knowledge':
+        return <KnowledgeView />;
       case 'documents':
         return <DocumentsView />;
       case 'accessibility':

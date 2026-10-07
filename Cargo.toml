@@ -25,3 +25,12 @@ members = [
 # the explicit path dependencies below still load normally.
 exclude = ["vendor/inbharat-harness"]
 resolver = "2"
+
+# Argon2id (256 MiB, 3 passes) is ~13x slower unoptimised, and the test suites
+# create and unlock many vaults. Optimise only these crates in dev/test builds
+# (release builds are unaffected; no behavioural change).
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

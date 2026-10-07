@@ -1029,3 +1029,548 @@ html, body, #root {
     display: none;
   }
 }
+/* ===== Coding Task View (Stage 5) =====
+   Appended, scoped classes only: no existing selector is changed. Interactive
+   targets inside the view and its dialogs keep the app's 44px minimum
+   (the chat composer convention). */
+.coding-task-view .btn,
+.ct-dialog .btn,
+.ct-header-actions .btn,
+.coding-task-view select,
+.ct-header-actions select {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.coding-task-view .ct-check,
+.ct-dialog .ct-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.coding-task-view .ct-check input,
+.ct-dialog .ct-check input {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.ct-inline-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.ct-inline-label select {
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  max-width: 360px;
+}
+
+.ct-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.ct-muted {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ct-warn-text {
+  font-size: 13px;
+  color: var(--warning);
+}
+
+.ct-honest {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--warning);
+  margin-bottom: 4px;
+}
+
+.ct-alert {
+  padding: 12px 16px;
+  background: var(--danger-bg);
+  color: var(--danger);
+  border: 1px solid rgba(255, 76, 106, 0.3);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.ct-notice,
+.ct-banner {
+  padding: 12px 16px;
+  background: var(--warning-bg);
+  color: var(--text-primary);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.ct-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ct-tone-ok { background: var(--success-bg); color: var(--success); }
+.ct-tone-bad { background: var(--danger-bg); color: var(--danger); }
+.ct-tone-warn { background: var(--warning-bg); color: var(--warning); }
+.ct-tone-neutral { background: var(--bg-tertiary); color: var(--text-secondary); }
+
+.ct-task-head {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ct-objective {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.ct-repo,
+.ct-capability-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ct-repo code,
+.coding-task-view code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.ct-outcome {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.ct-outcome-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+}
+
+.ct-outcome-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ct-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin: 8px 0;
+}
+
+.ct-table th,
+.ct-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.ct-table th {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.ct-list {
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ct-journal {
+  list-style: none;
+  font-size: 12px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.ct-details {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.ct-details summary {
+  cursor: pointer;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.ct-pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.ct-log {
+  max-height: 320px;
+}
+
+.ct-files {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ct-files li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ct-file-btn {
+  justify-content: flex-start;
+  padding: 8px 12px;
+}
+
+.ct-file-btn.ct-selected {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.ct-diff-pane {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+}
+
+.ct-hunk {
+  margin: 8px 0;
+}
+
+.ct-diff {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.ct-diff td {
+  padding: 0 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.ct-diff .ct-ln {
+  width: 1%;
+  min-width: 36px;
+  text-align: right;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.ct-diff .ct-sign {
+  width: 1%;
+  user-select: none;
+}
+
+.ct-diff-insert { background: var(--success-bg); }
+.ct-diff-delete { background: var(--danger-bg); }
+
+.ct-argv code {
+  color: var(--text-secondary);
+}
+
+.ct-gate {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+}
+
+.ct-gate-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.ct-excerpt {
+  white-space: pre-wrap;
+}
+
+.ct-recon {
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+
+.ct-reasons {
+  padding-left: 20px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.ct-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 50;
+}
+
+.ct-dialog {
+  width: 640px;
+  max-width: 92vw;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 24px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ct-dialog h3 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ct-fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+
+.ct-fieldset legend {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 0 4px;
+}
+
+.ct-hashes code {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.ct-patch {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+}
+
+/* ===== Knowledge View + Coding Task Learning panel (Stage 6) =====
+   Appended, scoped classes only: no existing selector is changed. The view
+   reuses the Stage 5 ct-* building blocks; interactive targets inside the
+   view and its dialogs keep the app's 44px minimum. */
+.knowledge-view .btn,
+.kn-dialog .btn,
+.kn-header-actions .btn,
+.knowledge-view select,
+.knowledge-view .kn-input {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.knowledge-view .ct-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.knowledge-view .ct-check input {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.knowledge-view code,
+.kn-dialog code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.knowledge-view .btn.ct-selected {
+  border-color: var(--accent-border);
+  background: var(--accent-bg);
+}
+
+.kn-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.kn-input,
+.kn-textarea {
+  padding: 8px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  outline: none;
+}
+
+.kn-input:focus,
+.kn-textarea:focus {
+  border-color: var(--accent-border);
+}
+
+.kn-textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+}
+
+.kn-grow {
+  flex: 1;
+  min-width: 200px;
+}
+
+.kn-short {
+  width: 120px;
+}
+
+.kn-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+  margin: 8px 0;
+}
+
+.kn-grid .ct-inline-label {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.kn-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kn-hits,
+.kn-candidates {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.kn-hit,
+.kn-candidates li,
+.kn-plan {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  font-size: 13px;
+}
+
+.kn-plan {
+  margin-top: 8px;
+}
+
+.kn-title {
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.kn-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.kn-snippet,
+.kn-statement {
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 6px 0;
+}
+
+.kn-excerpt {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-secondary);
+}
+
+.kn-method {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 6px 0;
+}
+
+.kn-ref {
+  padding: 2px 8px;
+}

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { tauriApi, type VaultStatus } from '../lib/tauri';
 
-export type ViewId = 'chat' | 'recordings' | 'memory' | 'vault' | 'model' | 'browser' | 'documents' | 'accessibility' | 'settings' | 'hardware' | 'capability';
+export type ViewId = 'chat' | 'recordings' | 'memory' | 'vault' | 'model' | 'browser' | 'coding' | 'knowledge' | 'documents' | 'accessibility' | 'settings' | 'hardware' | 'capability';
 
 interface SidebarProps {
   currentView: ViewId;
@@ -86,6 +86,26 @@ export function Sidebar({ currentView, onNavigate, onLock }: SidebarProps) {
           <circle cx="12" cy="12" r="10" />
           <line x1="2" y1="12" x2="22" y2="12" />
           <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+        </svg>
+      ),
+    },
+    {
+      id: 'coding',
+      label: 'Coding Task',
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="16 18 22 12 16 6" />
+          <polyline points="8 6 2 12 8 18" />
+        </svg>
+      ),
+    },
+    {
+      id: 'knowledge',
+      label: 'Knowledge',
+      icon: (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
         </svg>
       ),
     },
