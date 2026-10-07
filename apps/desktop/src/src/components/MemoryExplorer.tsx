@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { tauriApi } from '../lib/tauri';
 
 interface Memory {
@@ -10,16 +10,35 @@ interface Memory {
   source: string;
 }
 
+// Typing settles for this long before a search is issued.
+const SEARCH_DEBOUNCE_MS = 300;
+
 export function MemoryExplorer() {
   const [memories, setMemories] = useState<Memory[]>([]);
-  // No search box anymore: the panel always loads the wildcard view (the
-  // former dead searchQuery state could never change after the input was
-  // removed — 2026-09-15 dead-code sweep).
-  const searchQuery = '';
+  // Stage 6 fix of the dead search (`const searchQuery = ''`): the search box
+  // drives `searchInput`; after the debounce the trimmed text becomes
+  // `searchQuery`, which is sent to `search_memories` (empty = wildcard).
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // Only the newest request may update the list (a slow older search never
+  // overwrites a newer one).
+  const requestSeq = useRef(0);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    const id = window.setTimeout(() => setSearchQuery(searchInput.trim()), SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [searchInput]);
 
   const loadMemories = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError('');
     try {
@@ -33,6 +52,7 @@ export function MemoryExplorer() {
         limit: 50,
         min_relevance: 0.0,
       }, vaultRoot);
+      if (!mounted.current || seq !== requestSeq.current) return;
       setMemories(result.map((m: { id: string; memory_type: string; title: string; preview: string; created_at: string }) => ({
         id: m.id,
         type: m.memory_type.toLowerCase(),
@@ -42,10 +62,11 @@ export function MemoryExplorer() {
         source: 'Vault',
       })));
     } catch (e) {
+      if (!mounted.current || seq !== requestSeq.current) return;
       setError(`Failed to load memories: ${e instanceof Error ? e.message : String(e)}`);
       setMemories([]);
     } finally {
-      setLoading(false);
+      if (mounted.current && seq === requestSeq.current) setLoading(false);
     }
   }, [searchQuery]);
 
@@ -65,6 +86,29 @@ export function MemoryExplorer() {
             </svg>
             Refresh
           </button>
+        </div>
+      </div>
+
+      {/* Search bar (same look as the Documents view's search bar) */}
+      <div style={{ padding: '0 24px 16px', borderBottom: '1px solid var(--border)' }}>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <input
+            type="text"
+            placeholder="Search memories…"
+            aria-label="Search memories"
+            value={searchInput}
+            onChange={e => setSearchInput(e.target.value)}
+            style={{
+              flex: 1,
+              padding: '10px 16px',
+              background: 'var(--bg-tertiary)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              color: 'var(--text-primary)',
+              fontSize: '14px',
+              outline: 'none',
+            }}
+          />
         </div>
       </div>
 
@@ -96,6 +140,11 @@ export function MemoryExplorer() {
                 </div>
               </div>
             ))}
+          </div>
+        ) : searchQuery ? (
+          <div className="empty-state">
+            <h3>No memories match</h3>
+            <p>Nothing in the vault matches “{searchQuery}”.</p>
           </div>
         ) : (
           <div className="empty-state">
