@@ -5,6 +5,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod coding_task;
+pub mod isolation;
+pub mod knowledge;
+pub mod knowledge_distiller;
+pub mod knowledge_retrieval;
+pub mod knowledge_service;
+pub mod knowledge_verification;
+pub mod task_diff;
+pub mod task_learning;
+pub mod task_ledger;
+pub mod task_preview;
+pub mod task_workspace;
+pub mod task_worktree;
+
 mod llama_local;
 mod memory;
 mod model_policy;
