@@ -25,8 +25,8 @@ data or inference goes to a cloud.
 
 ```mermaid
 flowchart LR
-    subgraph DRIVE["Pocket AI pen drive · exFAT · UNOONE"]
-        MAN["manifest.json<br/>path · size · SHA-256 of every asset"]
+    subgraph DRIVE["Pocket AI pen drive"]
+        MAN["manifest.json<br/>sizes + SHA-256"]
         APPS["APPS<br/>Windows apps · Android APK"]
         MODELS["MODELS<br/>desktop GGUF tiers · mobile LiteRT"]
         RUNTIMES["RUNTIMES · SPEECH<br/>llama.cpp · voice · audio.cpp"]
@@ -141,7 +141,7 @@ flowchart TB
 ### Launch and integrity (Windows)
 
 ```mermaid
-flowchart LR
+flowchart TB
     INSERT["Drive inserted"] --> DOCK["UnoOne Dock<br/>or Start UnoOne.exe"]
     DOCK --> CHECK{"manifest.json schema v2<br/>VERSION · vault.id · architecture<br/>size + SHA-256 of every asset"}
     CHECK -->|"any mismatch, symlink,<br/>junction or traversal"| STOP["Refuse to launch"]
@@ -195,7 +195,7 @@ More: [Android architecture](docs/ARCHITECTURE.md).
 ### Knowledge and verified learning
 
 ```mermaid
-flowchart LR
+flowchart TB
     SRC["Pasted text · files in granted folders<br/>· a finished coding task"] --> EV["Evidence<br/>immutable, encrypted"]
     EV --> CAND["Candidate<br/>cites the exact passage"]
     CAND -->|"tests run in the Linux sandbox:<br/>old code fails · fix passes · tests unchanged"| VP["VerifiedPattern<br/>signed receipts"]
