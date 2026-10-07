@@ -1,7 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { tauriApi } from '../lib/tauri';
-import type { ConversationTurn as TauriConversationTurn, Content } from '../lib/tauri';
+import type { ConversationTurn as TauriConversationTurn } from '../lib/tauri';
+import { selectChatContext } from '../lib/chatContext';
+import type { ActiveChatTask, ChatContextMetadata } from '../lib/chatContext';
 
 /** Live agent activity streamed from the backend while a run is in flight
  * (2026-09-14: the panel previously showed a bare spinner for minutes while
@@ -34,6 +36,8 @@ interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  // Explicit provenance keeps restored vault pairs distinct from live tasks.
+  context?: ChatContextMetadata;
   steps?: AgentStep[];
   // Set when the user has this assistant message spoken back (STS out).
   audioUrl?: string;
@@ -131,6 +135,10 @@ export function ChatView() {
   // is long-term only; canonical chat history stays in UNOONE MESSAGE records
   // passed in as read-only context, never duplicated into Harness memory.
   const conversationIdRef = useRef<string>(crypto.randomUUID());
+  // A live session may contain many tasks. Reset only this model-context
+  // boundary, never the visible transcript or encrypted MESSAGE records.
+  const activeTaskRef = useRef<ActiveChatTask | null>(null);
+  const [contextNote, setContextNote] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   // Full access is the default the user directed: the agent may read/write
   // the host workspace, run allowlisted commands and drive the browser.
@@ -163,15 +171,19 @@ export function ChatView() {
   const liveProgressRef = useRef<AgentProgressEvent[]>([]);
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     void listen<AgentProgressEvent>('agent-progress', event => {
+      if (disposed) return;
       setLiveProgress(prev => [...prev.slice(-49), event.payload]);
       liveProgressRef.current = [...liveProgressRef.current.slice(-49), event.payload];
     }).then(fn => {
-      unlisten = fn;
+      // Registration may settle after StrictMode cleanup or an actual unmount.
+      if (disposed) fn();
+      else unlisten = fn;
     }).catch(() => {
       // Without the event stream the run still works; only the live feed is missing.
     });
-    return () => unlisten?.();
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   // Gap 1 (2026-09-16): token-by-token streaming of plain chat answers. The
@@ -184,19 +196,22 @@ export function ChatView() {
   const streamedAnswerRef = useRef('');
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let disposed = false;
     void listen<{ conversation_id: string; delta: string }>('chat-token', event => {
+      if (disposed) return;
       // Tokens from a conversation this panel is no longer showing are ignored.
       const active = conversationIdRef.current || 'default';
       if (event.payload.conversation_id !== active) return;
       streamedAnswerRef.current += event.payload.delta;
       setStreamedAnswer(streamedAnswerRef.current);
     }).then(fn => {
-      unlisten = fn;
+      if (disposed) fn();
+      else unlisten = fn;
     }).catch(() => {
       // Without the token stream the reply still arrives in full; only the
       // live typing is missing.
     });
-    return () => unlisten?.();
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   // Cross-panel bridge (2026-09-14 OCR/blind-aid alignment): the
@@ -383,14 +398,17 @@ export function ChatView() {
     return () => { cancelled = true; };
   }, []);
 
-  // Persistent conversation memory (directive: run-trail memory): the chat
-  // history lives in the encrypted vault as MESSAGE records — every device
-  // that unlocks this vault reads the same memory. On mount the most recent
-  // turns are restored so the model starts with continuity instead of a
-  // blank slate; they are ordinary history turns, so the request pipeline
-  // and the context budget treat them like any other turn. A locked or
-  // absent vault degrades to the previous session-only chat.
-  const [memoryRestoredCount, setMemoryRestoredCount] = useState(0);
+  // The encrypted vault's MESSAGE records remain the canonical transcript.
+  // Restore them for display with their original session provenance, NOT as
+  // the current task's model history. Only an explicit, unambiguous named
+  // continuation selects a bounded archived task. Locked/absent vaults still
+  // degrade to session-only chat; no record is cleared or rewritten here.
+  // Derive the badge from archive pairs actually admitted to the displayed
+  // transcript. A late recall ignored after a live send must not claim a
+  // restore happened; separate count state raced React's message updater.
+  const memoryRestoredCount = messages.filter(message =>
+    message.role === 'user' && message.context?.provenance === 'archive'
+  ).length;
   const memoryRestoreAttemptedRef = useRef(false);
   useEffect(() => {
     if (memoryRestoreAttemptedRef.current) return;
@@ -404,22 +422,28 @@ export function ChatView() {
           const restored: ChatMessage[] = [];
           for (const turn of turns) {
             const at = Date.parse(turn.timestamp) || Date.now();
+            const restoredContext: ChatContextMetadata = {
+              provenance: 'archive',
+              session_id: turn.session_id,
+              pair_id: crypto.randomUUID(),
+            };
             restored.push({
               id: crypto.randomUUID(),
               role: 'user',
               content: turn.user_message,
               timestamp: at,
+              context: { ...restoredContext, user_text: turn.user_message },
             });
             restored.push({
               id: crypto.randomUUID(),
               role: 'assistant',
               content: turn.assistant_message,
               timestamp: at,
+              context: { ...restoredContext },
             });
           }
           return restored;
         });
-        setMemoryRestoredCount(turns.length);
       })
       .catch(() => {
         // Vault locked / unavailable — session-only chat, as before.
@@ -605,6 +629,28 @@ export function ChatView() {
 
     const images = pendingImages;
     const files = pendingFiles;
+    // Classify only the user's input, never attachment text/names. Attachments
+    // prevent a greeting fast path but do not invent an archive task name.
+    const saidText = input.trim();
+    const hasAttachments = images.length > 0 || files.length > 0;
+    const contextSelection = selectChatContext({
+      userText: saidText,
+      hasAttachments: hasAttachments,
+      messages,
+      activeTask: activeTaskRef.current,
+      sessionId: conversationIdRef.current,
+      newTaskId: crypto.randomUUID(),
+    });
+    // Commit a new boundary BEFORE awaiting either model lane: subsequent
+    // deictic followups cannot revive an unrelated previous live task.
+    activeTaskRef.current = contextSelection.activeTask;
+    setContextNote(contextSelection.note);
+    const turnContext: ChatContextMetadata = {
+      provenance: 'live',
+      session_id: conversationIdRef.current,
+      pair_id: crypto.randomUUID(),
+      task_id: contextSelection.activeTask.id,
+    };
     // Non-image attachments travel as labelled text blocks appended to the
     // prompt (bounded by the parsers / 256 KB client cap upstream), so the
     // model sees their contents directly in this turn.
@@ -619,10 +665,10 @@ export function ChatView() {
       role: 'user',
       content: composedPrompt,
       timestamp: Date.now(),
+      context: { ...turnContext, user_text: saidText, has_attachments: hasAttachments },
     };
-    // What the user actually said — persisted to the vault as memory. The
-    // attachment blocks are not: they are per-turn payload, not memory.
-    const saidText = input.trim();
+    // Only saidText is persisted below. Attachment blocks stay per-turn
+    // payload, not encrypted conversation memory or retrieval hints.
     // Stopped runs leave a UI bubble but are not replies — they must not
     // enter the persistent conversation memory.
     let persistTurn = true;
@@ -641,9 +687,9 @@ export function ChatView() {
     setStopRequested(false);
 
     try {
-      const conversationHistory: TauriConversationTurn[] = messages
-        .filter(m => m.role === 'user' || m.role === 'assistant')
-        .map(msg => ({ role: msg.role as 'user' | 'assistant' | 'tool', content: msg.content as Content }));
+      // Identical selected, bounded context goes to Harness AND the existing
+      // read-only rollback. API signatures and persistence are unchanged.
+      const conversationHistory: TauriConversationTurn[] = contextSelection.history;
 
       // Production text plane: the unified Harness routes L0/L1/L2/L3 and runs
       // the single agent loop against the verified 127.0.0.1 llama-server. The
@@ -708,6 +754,7 @@ export function ChatView() {
             role: 'assistant',
             content: `⏹ Stopped — ${cause}. The step that was running finished, then the loop stopped; nothing further ran.`,
             timestamp: Date.now(),
+            context: { ...turnContext, cancelled: true },
             steps: progressSteps.length > 0 ? progressSteps : undefined,
           };
         } else if (fullAccess) {
@@ -747,6 +794,11 @@ export function ChatView() {
           };
         }
       }
+      assistantMessage = {
+        ...assistantMessage,
+        context: assistantMessage.context ?? { ...turnContext },
+        steps: [{ type: 'Thinking', text: contextSelection.note }, ...(assistantMessage.steps ?? [])],
+      };
       setMessages(prev => [...prev, assistantMessage]);
       // Persistent memory: the completed turn is written to the encrypted
       // vault as a MESSAGE record so the next session — on this or any
@@ -960,7 +1012,12 @@ export function ChatView() {
 
         {memoryRestoredCount > 0 && (
           <div style={{ padding: '8px 16px', fontSize: '12px', color: 'var(--text-secondary, #888)', textAlign: 'center' }}>
-            ↺ Restored {memoryRestoredCount} turn{memoryRestoredCount === 1 ? '' : 's'} of conversation memory from your vault — the model starts with this history.
+            ↺ Restored {memoryRestoredCount} turn{memoryRestoredCount === 1 ? '' : 's'} from your vault for display. Archive is not automatic model context — name a task to continue a bounded, matching history.
+          </div>
+        )}
+        {contextNote && (
+          <div role="status" style={{ padding: '8px 16px', fontSize: '12px', color: 'var(--text-secondary, #888)' }}>
+            {contextNote}
           </div>
         )}
         {messages.map(msg => (
@@ -1019,7 +1076,7 @@ export function ChatView() {
                       gap: '4px',
                     }}
                   >
-                    <span>{stepSummary(msg.steps)}</span>
+                    <span>{stepSummary(msg.steps) || 'Activity'}</span>
                     <span style={{ fontSize: '9px' }}>
                       {expandedSteps.has(msg.id) ? '▲' : '▼'}
                     </span>

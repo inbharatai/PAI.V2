@@ -22,6 +22,9 @@ mod capability;
 // the single canonical store — the same records serve the agent's
 // search plane and any vault-aware client on any host.
 mod chat_memory;
+// Stage 5 coding task workspace: thin Tauri glue over the adapter's
+// CodingTaskService (isolated gates, review, apply to a task worktree).
+mod coding_task_commands;
 mod document_migration;
 mod documents;
 // Pure-Rust document renderers behind doc.create (PDF via lopdf, DOCX via
@@ -36,6 +39,10 @@ mod env_learning;
 mod gguf_meta;
 mod granted_fs;
 mod harness_bridge;
+// Stage 6 knowledge review + coding-task learning loop: thin Tauri glue over
+// the adapter's KnowledgeService (bounded deterministic distiller) and
+// TaskLearning. Nothing is promoted without an explicit main-window UI event.
+mod knowledge_commands;
 mod llama;
 // Live website preview (web.preview): a bounded mirror of the agent's site
 // under $TEMP (asset-protocol scoped), a frontend-created preview window,
@@ -169,6 +176,17 @@ fn main() {
     // D2: Agent loop state
     let agent_state = agent::AgentLoopState::new();
 
+    // Stage 5 coding tasks share the single canonical vault Arc; building the
+    // service never spawns (the isolation capability is probed lazily).
+    let coding_task_state =
+        coding_task_commands::CodingTaskState::new(Arc::clone(&vault_state.vault));
+    // Stage 6 knowledge + task learning share the same vault Arc and the SAME
+    // CodingTaskService instance; building them never spawns or writes.
+    let knowledge_state = knowledge_commands::KnowledgeState::new(
+        Arc::clone(&vault_state.vault),
+        Arc::clone(&coding_task_state.0),
+    );
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let startup = app.state::<startup::StartupCoordinator>();
@@ -193,6 +211,8 @@ fn main() {
         .manage(harness_bridge::HarnessRunRegistry::new())
         // In-chat folder-grant approval cards (see harness_bridge.rs).
         .manage(harness_bridge::PendingGrantRequests::default())
+        .manage(coding_task_state)
+        .manage(knowledge_state)
         .invoke_handler(tauri::generate_handler![
             // Vault commands
             detect_vault,
@@ -294,6 +314,48 @@ fn main() {
             preview::preview_stop,
             preview::preview_focus,
             bharat_audio::get_bharat_audio_status,
+            // Stage 5 coding task workspace (design §8.2). Commands that change
+            // task state answer only the `main` window.
+            coding_task_commands::coding_task_capability,
+            coding_task_commands::coding_task_list,
+            coding_task_commands::coding_task_open,
+            coding_task_commands::coding_task_view,
+            coding_task_commands::coding_task_file_diff,
+            coding_task_commands::coding_task_confirm_plan,
+            coding_task_commands::coding_task_run_gate,
+            coding_task_commands::coding_task_review_file,
+            coding_task_commands::coding_task_revert_file,
+            coding_task_commands::coding_task_apply,
+            coding_task_commands::coding_task_revert_applied,
+            coding_task_commands::coding_task_start_preview,
+            coding_task_commands::coding_task_stop_preview,
+            coding_task_commands::coding_task_preview_logs,
+            coding_task_commands::coding_task_http_checks,
+            coding_task_commands::coding_task_resolve_interrupted,
+            coding_task_commands::coding_task_resume,
+            coding_task_commands::coding_task_cancel,
+            coding_task_commands::coding_task_export_patch,
+            // Stage 6 knowledge review + task learning (design §3.1). Commands
+            // that change knowledge/promotion state answer only the `main` window.
+            knowledge_commands::knowledge_status,
+            knowledge_commands::knowledge_initialize,
+            knowledge_commands::knowledge_rebuild_index,
+            knowledge_commands::knowledge_search,
+            knowledge_commands::knowledge_list,
+            knowledge_commands::knowledge_detail,
+            knowledge_commands::knowledge_reject,
+            knowledge_commands::knowledge_revoke_approval,
+            knowledge_commands::knowledge_export_preview,
+            knowledge_commands::knowledge_export,
+            knowledge_commands::knowledge_distill_preview,
+            knowledge_commands::knowledge_distill,
+            knowledge_commands::knowledge_distill_runs,
+            knowledge_commands::task_relevant_patterns,
+            knowledge_commands::task_propose_candidate,
+            knowledge_commands::task_verification_preview,
+            knowledge_commands::task_verify_candidate,
+            knowledge_commands::task_approve_pattern,
+            knowledge_commands::task_revoke_pattern,
         ])
         .setup(|app| {
             startup::start_mount_monitor(app.handle().clone());
@@ -987,6 +1049,13 @@ fn setup_vault(
 /// a concurrent chat cannot register a new run after the cancellation sweep.
 fn stop_desktop_work(app: &tauri::AppHandle) {
     app.state::<DesktopVaultState>().emergency_lock();
+    // Admission is closed (vault dropped): cancel coding-task runs, stop task
+    // previews and bump the task epoch so late results are discarded.
+    app.state::<coding_task_commands::CodingTaskState>()
+        .on_lock();
+    // Stage 6: abort in-flight distillation/verification and forget used UI
+    // event ids (the services already fail closed on the locked vault).
+    app.state::<knowledge_commands::KnowledgeState>().on_lock();
     app.state::<llama::ModelManagerState>().suspend();
     app.state::<harness_bridge::HarnessRunRegistry>().stop_all();
     app.state::<harness_bridge::PendingGrantRequests>()
