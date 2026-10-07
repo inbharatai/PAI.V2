@@ -200,8 +200,10 @@ yet been staged onto the physical drive or exercised on Windows hardware.
   content hash; **apply** writes only to a separate task worktree
   (`%LOCALAPPDATA%\UnoOne\coding-tasks`); a bounded repair loop stops with
   evidence; dynamic sites preview through an authenticated 127.0.0.1 bridge.
-  On Windows, sandboxed checks, preview and apply are unavailable by design;
-  viewing, diffs, review and patch export work.
+  **Opening a task needs the Linux sandbox.** On Windows and macOS the Coding
+  Task screen is view-only: it can show, review and export tasks created on a
+  Linux host that shares the vault, but it cannot open new tasks, run checks,
+  preview or apply.
 - **Local distiller + Knowledge screens:** pasted text (any platform) or files
   from granted folders (Linux only for now — fd-safe file capture is
   unavailable elsewhere) become evidence plus cited candidates (deterministic extraction:
@@ -251,7 +253,7 @@ yet been staged onto the physical drive or exercised on Windows hardware.
 | Accessibility (OCR, Blind View) | IMPLEMENTED — OCR/description via Gemma mmproj; confidence honestly `Option<f32>` (unmeasured, never fabricated) |
 | Security (vault writes) | IMPLEMENTED — `vault_write_record` writes encrypted records; recording and document content encrypted end-to-end |
 | Chat context accuracy | IMPLEMENTED AND TESTED (2026-10-07) — selector, greeting parity, real-core and mounted Chat tests pass locally; desktop Rust in CI. Not yet live-verified on the staged drive |
-| Knowledge, verified learning, coding workspace | IMPLEMENTED AND TESTED (2026-10-07) — each part independently reviewed with all findings fixed; adapter suites pass with the real Linux sandbox; CI green on three OSes. Sandboxed execution is Linux-only; on Windows it is unavailable by design. Not yet staged on the drive or run on Windows hardware |
+| Knowledge, verified learning, coding workspace | IMPLEMENTED AND TESTED (2026-10-07) — each part independently reviewed with all findings fixed; adapter suites pass with the real Linux sandbox; CI green on three OSes. **On Windows:** knowledge search, review and export and pasted-text distillation work; verified learning, local-file distillation and coding tasks (view-only) need a Linux host. Not yet staged on the drive or run on Windows hardware |
 | macOS | Rust workspace compiles and unit-tests on `macos-latest` in CI; **no macOS app bundle; not tested on Mac hardware** |
 
 Timestamped verification packages in the repo run through
