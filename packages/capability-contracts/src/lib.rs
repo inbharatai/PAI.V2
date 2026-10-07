@@ -21,6 +21,8 @@
 //! Every type round-trips the checked-in example fixtures (see tests), so the
 //! JSON contract and the Rust types cannot drift silently.
 
+pub mod knowledge;
+
 use serde::{Deserialize, Serialize};
 
 /// The checked-in contract document, embedded at compile time.

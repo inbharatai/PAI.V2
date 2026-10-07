@@ -13,10 +13,24 @@ description = "Pocket AI product adapters for the reusable InBharat Harness"
 # product tree; product-specific code stays here, universal code stays there.
 inbharat-harness-core = { path = "../../vendor/inbharat-harness/crates/core" }
 unoone-vault-core = { path = "../vault-core" }
+unoone-capability-contracts = { path = "../capability-contracts" }
 unoone-runtime-select = { path = "../runtime-select" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+hmac = "0.12"
+# Stage5 per-file diff (task_diff.rs): dependency EDGE on the already-locked
+# similar 2.7.0 (in Cargo.lock via mockito); no new package or version.
+similar = { version = "2.7", default-features = false, features = ["text"] }
+# Stage5 preview bridge: HTTP/1.1 request/response head parsing. Dependency
+# EDGE on the already-locked httparse 1.10.1; no new package or version.
+httparse = "1"
+
+# Stage4 snapshot admission: safe fd-relative openat(O_NOFOLLOW) + fstat (the
+# crate forbids unsafe code). Dependency EDGE on the already-locked rustix 1.1.4
+# (same "fs" feature tempfile already uses); no new package or version.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
