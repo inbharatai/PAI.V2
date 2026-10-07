@@ -27,7 +27,7 @@ reports three states:
 
 ### Gemma (LLM) — honest status
 
-UnoOne has **two Gemma 4 planning-brain tiers** (see [README → Local model contract](../README.md#local-model-contract);
+UnoOne has **two Gemma 4 planning-brain tiers** (see [features → Local model contract](FEATURES.md#local-model-contract);
 authoritative spec `core/src/main/java/com/unoone/agent/core/model/BrainModel.kt`):
 
 - **Gemma 4 E2B (Lite, default)** — manifest id `gemma-4-e2b`, folder `brain/gemma-4-e2b/`, file
