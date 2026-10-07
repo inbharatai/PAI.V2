@@ -203,10 +203,18 @@ pub fn admit_relative_path(path: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const GLUE: &str = include_str!("../knowledge_commands.rs");
-    const MAIN: &str = include_str!("../main.rs");
-    const HARNESS_BRIDGE: &str = include_str!("../harness_bridge.rs");
-    const SELF_SRC: &str = include_str!("glue_policy.rs");
+    use std::sync::LazyLock;
+
+    // Sources are scanned as LF text: a Windows checkout (git core.autocrlf)
+    // yields CRLF files, and these scans match multi-line patterns.
+    fn lf(src: &str) -> String {
+        src.replace("\r\n", "\n")
+    }
+    static GLUE: LazyLock<String> = LazyLock::new(|| lf(include_str!("../knowledge_commands.rs")));
+    static MAIN: LazyLock<String> = LazyLock::new(|| lf(include_str!("../main.rs")));
+    static HARNESS_BRIDGE: LazyLock<String> =
+        LazyLock::new(|| lf(include_str!("../harness_bridge.rs")));
+    static SELF_SRC: LazyLock<String> = LazyLock::new(|| lf(include_str!("glue_policy.rs")));
 
     /// Design §3.1 frozen command surface:
     /// (command, main-window only, receiver, delegated call, emits update event).
@@ -683,7 +691,7 @@ mod tests {
 
     #[test]
     fn glue_exposes_exactly_the_frozen_surface() {
-        let found = commands(GLUE);
+        let found = commands(&GLUE);
         let names: Vec<&str> = found.iter().map(|c| c.name.as_str()).collect();
         let frozen: Vec<&str> = SURFACE.iter().map(|s| s.0).collect();
         assert_eq!(names, frozen);
@@ -758,7 +766,7 @@ mod tests {
 
     #[test]
     fn glue_params_match_the_js_argument_table() {
-        let found = commands(GLUE);
+        let found = commands(&GLUE);
         for (command, (name, expected)) in found.iter().zip(PARAMS) {
             assert_eq!(command.name, name);
             let got: Vec<String> = params(&command.signature)
@@ -777,7 +785,7 @@ mod tests {
 
     #[test]
     fn local_file_roots_pass_the_grant_gate_before_hashing_and_distilling() {
-        let found = commands(GLUE);
+        let found = commands(&GLUE);
         for name in ["knowledge_distill_preview", "knowledge_distill"] {
             let command = found.iter().find(|c| c.name == name).unwrap();
             let admit = command
@@ -797,7 +805,7 @@ mod tests {
 
     #[test]
     fn task_ids_are_parsed_and_errors_are_fixed_classifications() {
-        let found = commands(GLUE);
+        let found = commands(&GLUE);
         for command in found.iter().filter(|c| c.name.starts_with("task_")) {
             assert!(
                 command.body.contains("let task = task_id_of(&task_id)?;"),

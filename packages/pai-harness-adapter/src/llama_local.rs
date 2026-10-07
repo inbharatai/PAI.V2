@@ -1876,10 +1876,15 @@ mod transcript_tests {
             ),
             "data: [DONE]\n\n",
         ];
-        let (port, _rx) = capture_slow_sse_server(parts, Duration::from_millis(60));
+        // Each gap (220 ms) must stay under the idle timeout (400 ms) while two
+        // gaps (440 ms) exceed it. The 180 ms slack absorbs scheduler stalls on
+        // loaded CI runners (60 ms vs 100 ms flaked on macOS); the "spans more
+        // than one idle window" assertion only gets safer under load, and the
+        // hard ceiling (4 x 400 ms) stays far away.
+        let (port, _rx) = capture_slow_sse_server(parts, Duration::from_millis(220));
         let provider = PaiLlamaLocalProvider::new("test-model", port)
             .expect("build provider")
-            .with_timeout(Duration::from_millis(100))
+            .with_timeout(Duration::from_millis(400))
             .with_token_emitter(std::sync::Arc::new(|_| {}));
         let request = vision_request(vec![]);
         let cancel = CancellationToken::new();
@@ -1889,7 +1894,7 @@ mod transcript_tests {
             .expect("steady SSE progress must outlive one idle window");
         assert_eq!(response.text, "AB");
         assert!(
-            started.elapsed() > Duration::from_millis(100),
+            started.elapsed() > Duration::from_millis(400),
             "the response must span more than one idle timeout"
         );
     }

@@ -6922,11 +6922,16 @@ mod tests {
         // (`task_diff`'s TEST code runs host python/patch as an independent
         // verifier of exported patches; that is test-only and never product.)
         let production = |src: &'static str| -> &'static str {
-            let end = ["\n#[cfg(test)]\nmod tests", "\n#[cfg(all(test"]
-                .iter()
-                .filter_map(|m| src.find(m))
-                .min()
-                .unwrap_or(src.len());
+            // CRLF variant: a Windows checkout (git core.autocrlf) gives CRLF.
+            let end = [
+                "\n#[cfg(test)]\nmod tests",
+                "\n#[cfg(test)]\r\nmod tests",
+                "\n#[cfg(all(test",
+            ]
+            .iter()
+            .filter_map(|m| src.find(m))
+            .min()
+            .unwrap_or(src.len());
             &src[..end]
         };
         for (name, src) in [

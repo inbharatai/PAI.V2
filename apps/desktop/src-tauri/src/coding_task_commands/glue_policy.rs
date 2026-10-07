@@ -111,10 +111,19 @@ pub fn admit_granted_root(requested: &Path, granted: &[PathBuf]) -> Result<PathB
 mod tests {
     use super::*;
 
-    const GLUE: &str = include_str!("../coding_task_commands.rs");
-    const MAIN: &str = include_str!("../main.rs");
-    const HARNESS_BRIDGE: &str = include_str!("../harness_bridge.rs");
-    const SELF_SRC: &str = include_str!("glue_policy.rs");
+    use std::sync::LazyLock;
+
+    // Sources are scanned as LF text: a Windows checkout (git core.autocrlf)
+    // yields CRLF files, and these scans match multi-line patterns.
+    fn lf(src: &str) -> String {
+        src.replace("\r\n", "\n")
+    }
+    static GLUE: LazyLock<String> =
+        LazyLock::new(|| lf(include_str!("../coding_task_commands.rs")));
+    static MAIN: LazyLock<String> = LazyLock::new(|| lf(include_str!("../main.rs")));
+    static HARNESS_BRIDGE: LazyLock<String> =
+        LazyLock::new(|| lf(include_str!("../harness_bridge.rs")));
+    static SELF_SRC: LazyLock<String> = LazyLock::new(|| lf(include_str!("glue_policy.rs")));
 
     /// Design §8.2 frozen command surface: (command, main-window only, service method).
     const SURFACE: [(&str, bool, &str); 19] = [
@@ -362,7 +371,7 @@ mod tests {
 
     #[test]
     fn glue_exposes_exactly_the_frozen_surface() {
-        let found = commands(GLUE);
+        let found = commands(&GLUE);
         let names: Vec<&str> = found.iter().map(|c| c.name.as_str()).collect();
         let frozen: Vec<&str> = SURFACE.iter().map(|(n, _, _)| *n).collect();
         assert_eq!(names, frozen);
@@ -418,7 +427,7 @@ mod tests {
 
     #[test]
     fn capability_url_reaches_only_the_main_window() {
-        let view = commands(GLUE)
+        let view = commands(&GLUE)
             .into_iter()
             .find(|c| c.name == "coding_task_view")
             .unwrap();
@@ -427,7 +436,7 @@ mod tests {
             .contains("if !glue_policy::is_main_window(window.label())"));
         assert!(view.body.contains("view.preview.capability_url = None;"));
         // No other command returns a raw TaskView to a non-main caller.
-        for command in commands(GLUE) {
+        for command in commands(&GLUE) {
             let returns_view = command.signature.contains("Result<TaskView, String>")
                 || command.signature.contains("Result<PreviewView, String>");
             if returns_view && command.name != "coding_task_view" {
