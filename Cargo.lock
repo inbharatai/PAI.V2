@@ -3242,11 +3242,16 @@ dependencies = [
 name = "pai-harness-adapter"
 version = "0.1.0"
 dependencies = [
+ "hmac",
+ "httparse",
  "inbharat-harness-core",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
+ "similar",
  "tempfile",
+ "unoone-capability-contracts",
  "unoone-runtime-select",
  "unoone-vault-core",
 ]
