@@ -1,8 +1,15 @@
 # UnoOne Local Architecture
 
+> **Updated 2026-10-07:** removed the stale ONNX/NNAPI "mock inference" LocalBrain description and
+> the Gemma 3n claim — the brain is `GemmaPlanner` on LiteRT-LM with the Gemma 4 E2B (Lite, default)
+> / E4B (Medium) `.litertlm` tiers; TTS is Sherpa-ONNX VITS (not Piper); the module list now covers
+> all 16 Gradle modules (adds `languagepacks`, `securebrowser`, `vault`) and the 8-entity Room schema;
+> the Blind Aid detector is named (bundled EfficientDet-Lite2); NNAPI wording replaced by the real
+> LiteRT-LM GPU → NPU → CPU fallback.
+
 ## Overview
 
-UnoOne is a local-first Android AI agent. Every core capability runs on the device. Cloud is optional and only used for model downloads, never for inference or data storage.
+UnoOne is a local-first Android AI agent. Every core capability runs on the device. Cloud is optional and only used for model downloads, never for inference or data storage. The app is split into 16 Gradle modules (`android-app/UnoOneAgent/settings.gradle.kts`).
 
 ## Core Principles
 
@@ -43,8 +50,8 @@ UnoOne is a local-first Android AI agent. Every core capability runs on the devi
    │• Sherpa │ │•Rule  │ │•4-tier │ │•Tap/Type/Fill   │
    │  STT    │ │ based │ │ risk   │ │•Scroll/Swipe    │
    │• Sherpa │ │ parser│ │ class. │ │•Go Back/Home    │
-   │  TTS    │ │•ONNX  │ │•Block  │ │•Read Screen     │
-   │• Keyword│ │  LLM  │ │•Confirm│ │•Find+Click      │
+   │  TTS    │ │•Gemma │ │•Block  │ │•Read Screen     │
+   │• Keyword│ │ LiteRT│ │•Confirm│ │•Find+Click      │
    │  Spotter│ │•Memory│ │        │ │•Context Track   │
    │•Android│ │  context│        │ │•Notifications   │
    │  STT   │ │       │ │        │ │•Long Press      │
@@ -89,24 +96,26 @@ UnoOne is a local-first Android AI agent. Every core capability runs on the devi
 - `AgentStatus` — LISTENING / TRANSCRIBING / UNDERSTANDING / TOOL_SELECTED / SAFETY_CHECK / EXECUTING / VERIFYING / SPEAKING / DONE / FAILED
 
 ### 3. storage
-- Room database with 5 entities: NoteEntity, SkillEntity, MemoryEntity, ActionLogEntity, ModelMetadataEntity
-- 5 DAOs with Flow-based reactive queries
+- Room database (schema v6) with 8 entities: NoteEntity, SkillEntity, MemoryEntity, ActionLogEntity, ModelMetadataEntity, PendingTombstoneEntity, PendingWriteEntity, ConversationTurnEntity
+- 8 DAOs with Flow-based reactive queries
+- SQLCipher-encrypted at rest under a Keystore-wrapped passphrase; treated as a cache of the USB vault (`VaultCacheLifecycle`: unsynced rows are never evicted)
 - Thread-safe singleton via DatabaseProvider
 
 ### 4. modelmanager
 - Detects model folders under app-private storage
-- Verifies SHA-256 checksums
+- Verifies SHA-256 checksums and sizes against `models_manifest.json` (every bundled entry, including both Gemma 4 `.litertlm` brains, is pinned)
 - Reports model status (missing/present/loaded/error) and storage usage
 
 ### 5. localbrain
 - **RuleBasedParser**: 20+ command patterns including scroll, swipe, go back/home, read screen, find+click, fill, compound commands
 - **PromptBuilder**: Generates structured prompts with tool list and memory context
-- **LocalBrain**: ONNX session creation with NNAPI hardware acceleration, rule-based fallback, mock inference (real inference requires model files + tokenizer)
+- **GemmaPlanner**: loads a Gemma 4 `.litertlm` brain via LiteRT-LM (E2B Lite is the default and the profile the app loads today; E4B Medium is registered), backend order GPU → NPU → CPU, manual tool calling (`automaticToolCalling = false`)
+- **LocalBrain**: thin wrapper around GemmaPlanner (inference, `planNext`, `judgeSafety`, chat); the old ONNX shell has been removed, and RuleBasedParser remains the offline fallback when no model is loaded
 
 ### 6. voice
 - **VoiceService**: Foreground service with continuous audio pipeline: AudioRecorder → KeywordSpotter → VAD → STT → command → TTS
 - **SherpaSttEngine**: Real Sherpa-ONNX OfflineRecognizer, PCM-to-float conversion
-- **SherpaTtsEngine**: Real Sherpa-ONNX OfflineTts (Piper), feeds audio to TtsPlayer
+- **SherpaTtsEngine**: Real Sherpa-ONNX OfflineTts (VITS: Coqui LJSpeech for English, MMS per-language models for Indic), feeds audio to TtsPlayer
 - **KeywordSpotterEngine**: Wake word detection via Sherpa-ONNX KeywordSpotter
 - **AndroidSttEngine**: Fallback using Android SpeechRecognizer (requires internet)
 - **AudioRecorder**: 16kHz PCM capture with RMS amplitude reporting for waveform visualization
@@ -130,6 +139,7 @@ UnoOne is a local-first Android AI agent. Every core capability runs on the devi
 - **CalendarControl**: Read events via ContentProvider, insert via intent
 - **OcrControl**: Google ML Kit on-device text recognition
 - **PackageResolver**: Friendly name → package name mapping
+- **BlindAidManager**: offline object detection independent of Gemma — bundled EfficientDet-Lite2 int8 detector via MediaPipe (`assets/models/efficientdet_lite2_int8.tflite`; see [`BLIND_AID_MODEL.md`](BLIND_AID_MODEL.md)), tones/haptics/spoken cues
 
 ### 10. memory
 - **MemoryModule**: Store preferences, corrections, patterns
@@ -164,6 +174,19 @@ UnoOne is a local-first Android AI agent. Every core capability runs on the devi
   - `findAndClick(text, maxScrolls)` — scrolls to find text, then taps
   - `getCurrentContext()` — returns "package/activity" of foreground app
 
+### 14. languagepacks
+- **LanguagePackManager**: typed language-pack catalogue (`LanguagePackCatalogLoader`, `LanguagePackManifest`), dependency-aware install/uninstall (shared ASR retained while dependents exist), pack health
+
+### 15. securebrowser
+- **SecureWebViewController** + **BrowserSession**: in-app WebView for guarded web tasks
+- **BrowserDomainPolicy** / **ApprovedOriginPolicy** / **BrowserSafetyPolicy**: origin allowlisting and action safety
+- **PageAgentProtocol**: PageAgent bridge driven by the same on-device Gemma brain (exclusive model lease)
+
+### 16. vault
+- **MobileVaultRepository**: encrypted Pocket AI USB vault — unlock/read/write/tombstone, cryptographically compatible with the Rust `vault-core` (cross-platform vectors)
+- **SafVaultIO**: Storage Access Framework I/O against the user-granted drive tree; **PocketVaultAccess**: validates the selected Pocket AI root and its schema-v2 `manifest.json`
+- **VaultCrypto**, **VaultRecordReader/Writer/Factory**, **VaultSyncPlanner**: record crypto, serialization and sync planning
+
 ## Data Flow (Agent Loop)
 
 ```
@@ -197,7 +220,7 @@ UnoOne is a local-first Android AI agent. Every core capability runs on the devi
 | Speech-to-Text       | Sherpa-ONNX (English transducer; Indic Omnilingual CTC) | Locale-pinned Android SpeechRecognizer when explicitly enabled |
 | Text-to-Speech       | Sherpa-ONNX VITS (English Coqui; Indic MMS) | Silent (no output) |
 | Command Parsing       | RuleBasedParser (20+ patterns)          | Same (primary)     |
-| LLM Inference        | LiteRT-LM with Gemma 3n E4B            | CPU inference / Rule-based parser |
+| LLM Inference        | LiteRT-LM with Gemma 4 E2B (Lite, default) / E4B (Medium) | GPU → NPU → CPU backend fallback / Rule-based parser |
 | Screen Reading       | Accessibility tree text capture          | ML Kit OCR         |
 | Phone Actions        | Android Intents + ContentProvider        | N/A                |
 | Gesture Control      | AccessibilityService + GestureDescription | N/A                |
@@ -217,7 +240,7 @@ UnoOne is a local-first Android AI agent. Every core capability runs on the devi
 
 The app automatically adapts to each Android manufacturer:
 
-- **NNAPI hardware acceleration**: Enabled when available (Snapdragon, Exynos, Dimensity, Tensor), with CPU fallback for devices without an NPU
+- **LiteRT-LM backend fallback**: `GemmaPlanner` tries GPU, then NPU, then CPU and records the backend it actually loaded on (on the primary Xiaomi 14 the GPU delegate fails and the brain runs on CPU); no NNAPI path is used
 - **Autostart/battery settings**: Automatically opens the correct manufacturer settings screen:
   - Xiaomi/Redmi → MIUI Security Center autostart
   - Huawei/Honor → System Manager power optimization

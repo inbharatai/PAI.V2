@@ -5,8 +5,9 @@
 // canonical store (no second memory store — directive §13): the same
 // records are readable by any vault-aware client on any host, and the
 // agent's `search_notes` plane can find them once they carry a chat-turn
-// kind tag. Content is XChaCha20-Poly1305 encrypted by vault-core before it
-// ever touches the drive.
+// kind tag. Content is encrypted by vault-core before it ever touches the
+// drive (AES-256-GCM for new records; legacy XChaCha20-Poly1305 records stay
+// readable).
 
 use serde::{Deserialize, Serialize};
 use unoone_vault_core::{Record, RecordType, Vault};

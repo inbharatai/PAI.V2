@@ -2,7 +2,7 @@
 
 **Date live-caught / accepted:** 2026-09-16, final re-acceptance 2026-09-17 (physical drive `D:\UNOONE`, staged from main `40e9470`)
 **Severity:** High — the flagship streaming feature shipped dead in the default configuration and was caught only by the live user-lane test on the physical drive.
-**Roadmap:** `docs/INNOVATION_ROADMAP_2026-09-16.md` (Gaps 1–5 shipped; Gap 6 skipped by vendored-harness policy)
+**Roadmap:** `docs/INNOVATION_ROADMAP_2026-09-16.md` (removed from the repo 2026-10-07; see git history) (Gaps 1–5 shipped; Gap 6 skipped by vendored-harness policy)
 
 ## 1. What shipped, PR by PR
 

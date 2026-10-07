@@ -1,5 +1,9 @@
 # Speech Test Evidence — per toolchain
 
+> **Updated 2026-10-07:** corrected the Android scaffold build-script path to
+> `vendor/Inbharat-audiocpp/scripts/build_android_scaffold.sh` (there is no repo-root
+> `scripts/build_android_scaffold.sh`). No evidence result or tier was changed.
+
 Companion to `docs/SPEECH_ARCHITECTURE.md`. Every row below records the
 **evidence tier** for a speech-related claim, per the standing rule: *do not
 claim support for a platform unless it was actually executed on that
@@ -57,7 +61,7 @@ asset in the APK.
 | Microphone FGS fail-closed (targetSDK 35 contract) | A9 fix: `VoiceService.start` refuses without RECORD_AUDIO; `startForeground` failure is caught, logged, and `stopSelf()` — the mic-revoked cold-start crash loop is gone; verified by the green re-runs above (the pre-fix batch crashed the instrumentation process) | EMULATOR |
 | Local-brain qualification (Gemma eval/planner) | Honest `assumeTrue` skips — no `.litertlm` model on the emulator; `ModelPathDiagnosticTest` ran and dumped resolution | EMULATOR (documented skips) |
 | Host JVM unit tests for all touched modules | `:app/:modelmanager/:voice/:languagepacks/:safetyguard/:safety:testDebugUnitTest` — BUILD SUCCESSFUL, 2026-09-07 | HOST (JVM) |
-| `libibaudio.so` + `libibaudio_jni.so` + all RC test executables cross-compile for arm64-v8a (NDK r25.1.8937393, android-28) | `scripts/build_android_scaffold.sh --tests`, 60/60 targets, 2026-08-31; recorded in `vendor/Inbharat-audiocpp/ANDROID.md` | BUILD-ONLY |
+| `libibaudio.so` + `libibaudio_jni.so` + all RC test executables cross-compile for arm64-v8a (NDK r25.1.8937393, android-28) | `vendor/Inbharat-audiocpp/scripts/build_android_scaffold.sh --tests`, 60/60 targets, 2026-08-31; recorded in `vendor/Inbharat-audiocpp/ANDROID.md` | BUILD-ONLY |
 | Same tree compiles with ASan+UBSan | `--tests --sanitizers` lane, 2026-08-31 | BUILD-ONLY |
 | Kotlin language-contract mirror behaves identically to the Rust table | `:voice:testDebugUnitTest` on host, 52 tests / 0 failures (incl. `VoiceLanguageCanonicalizeTest` 12/12), 2026-08-31 | HOST (JVM unit tests) |
 | Kotlin alias table == `languages.v1.json` | `scripts/check_speech_language_sync.py` (fails CI on drift; verified pass + fail paths) | CI-enforced |

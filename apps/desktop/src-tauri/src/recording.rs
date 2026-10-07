@@ -678,7 +678,8 @@ pub fn stop_recording(
 
     // Summarisation is declared by policy but not yet implemented anywhere in
     // this product. Rather than silently retain nothing while reporting
-    // success, the gap is surfaced. See 61_RECORDING_PRIVACY_ACCEPTANCE.md.
+    // success, the gap is surfaced. See
+    // docs/verification/2026-07-30/61_RECORDING_PRIVACY.md.
     if policy.summary {
         outcome
             .warnings

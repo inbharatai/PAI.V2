@@ -1,21 +1,40 @@
-# UnoOne Architecture
+# UnoOne Android Agent Architecture
 
-This is the consolidated architecture index. For the deep, module-by-module walkthrough see
-[`local-architecture.md`](local-architecture.md); for the upgrade history see
-[`../PLAN-Gemma4-Migration.md`](../PLAN-Gemma4-Migration.md) (historical). Current (and only)
-runtime brain: **Gemma 4 E2B via LiteRT-LM**, device-verified on the primary Xiaomi 14 (Android 15 /
-API 35) on 2026-07-14 — loads on the CPU backend (GPU delegate fails on SM8650, safe CPU fallback),
-18/18 canonical tool-match at that date. Legacy Gemma 3n and `gemma-local` paths are purged and kept out by
-`scripts/ci/check_repo_invariants.py`. Every model-proposed tool call is checked against a
-**CanonicalToolRegistry** of 42 tools (unknown tools rejected, required args validated, byte-synced
-with `packages/tool-contracts` by `scripts/check_tool_contract_sync.py` in CI) before
-safety/execution.
+> **Updated 2026-10-07:** retitled as the Android agent architecture (this file covers only
+> `android-app/UnoOneAgent`; the desktop app is described in the repository README). Corrected:
+> two registered brain tiers (E2B Lite / E4B Medium) instead of "only E2B" (the app's load paths
+> still load E2B); ReAct step budget comes from `ModelProfile.maxAgentSteps` (not `MAX_STEPS=3`); the deleted manifest-signing classes are no
+> longer described as present; 16 Gradle modules (adds `:vault`) and the 8-entity Room schema; both
+> Gemma `.litertlm` hashes are pinned. Links to removed legacy plan docs were repointed or dropped.
+
+This is the architecture index for the **Android agent** (`android-app/UnoOneAgent`). The desktop
+side (Windows Tauri app, harness bridge, vendored harness/audio planes, Dock/Starter) is described
+in the [repository README](../README.md). For the deep, module-by-module Android walkthrough see
+[`local-architecture.md`](local-architecture.md).
+
+Planning brains: **two Gemma 4 tiers via LiteRT-LM** are registered — **E2B (Lite, default)** and
+**E4B (Medium)** (`core/.../model/BrainModel.kt`, `ModelProfile.kt`; both pinned in
+`models_manifest.json`). A tier is chosen before a task starts and never switches mid-task. At HEAD
+the app's load paths (`UnoOneApplication`, Model Status, `SecureBrowserModelLease`) load E2B;
+`ModelTierSelector` (E4B for compound intents when E4B is loaded and ≥ 8,192 MB RAM is available) is
+JVM-tested in `:core` but not yet called from `:app`. E2B was loaded on the primary Xiaomi 14
+(Android 15 / API 35) on 2026-07-14 — CPU backend (GPU delegate fails on SM8650, safe CPU fallback),
+18/18 canonical tool-match at that date; E4B has not yet been tested on a device, and both specs keep
+`isDeviceVerified = false` until the full device matrix is committed. Legacy Gemma 3n and
+`gemma-local` paths are purged and kept out by `scripts/ci/check_repo_invariants.py`. Every
+model-proposed tool call is checked against a **CanonicalToolRegistry** of 42 tools (unknown tools
+rejected, required args validated, byte-synced with `packages/tool-contracts` by
+`scripts/check_tool_contract_sync.py` in CI) before safety/execution.
 
 **Agentic loop + judge + eval (implemented; control JVM-tested; inference device-time).** After an
-LLM-planned observation-producing call, a bounded **ReAct loop** (`MAX_STEPS=3`, every step through
-the safety pipeline) feeds the tool result back to the model via `planNext`. A second on-device
-**safety judge** runs on a dedicated judge conversation and may only *escalate* the keyword-classified
-risk (`SafetyJudgePolicy`, never de-escalates). A **calibration eval harness** (`EvalPromptSet` +
+LLM-planned observation-producing call, a bounded **ReAct loop** (every step through the safety
+pipeline) feeds the tool result back to the model via `planNext`. The step budget is per tier —
+`ModelProfile.maxAgentSteps` = 2 for E2B, 4 for E4B, passed as `ReActLoopController.decide(maxSteps)`;
+the former `MAX_STEPS = 3` constant is gone. The orchestrator's current call
+(`AgentOrchestrator.kt` → `ReActLoopController.decide(stepsExecuted, lastCall, proposal)`) passes no
+limit, so `DEFAULT_MAX_STEPS = 2` (the E2B value) applies. A second on-device **safety judge** runs
+on a dedicated judge conversation and may only *escalate* the keyword-classified risk
+(`SafetyJudgePolicy`, never de-escalates). A **calibration eval harness** (`EvalPromptSet` +
 `EvalScorer` + instrumented `BrainEvalHarnessTest`) turns "is Gemma good enough?" into a printed
 accuracy number. The control/scoring logic (`ReActLoopController`, `SafetyJudgePolicy`, `EvalScorer`)
 is JVM-tested; the LiteRT-LM inference (`planNext`, `judgeSafety`) and the eval runner are
@@ -34,7 +53,7 @@ no real payment / SMS / credential / install action. STANDARD is the default and
 posture.
 
 **Innovations #4–#8 (implemented, control JVM-tested, inference device-time-only / partly inactive).**
-- **Multimodal vision (#4):** a new `describe_scene` tool (26th canonical, STRONG_CONFIRM +
+- **Multimodal vision (#4):** a new `describe_scene` tool (canonical, STRONG_CONFIRM +
   MediaProjection) builds a screen scene from OCR + foreground context via JVM-tested
   `SceneDescriptionBuilder`. The LiteRT-LM `Content.ImageBytes` vision path is wired against the real
   AAR but gated `VISION_MODEL_ENABLED = false` (shipped Gemma models are text-only); it lights up only
@@ -50,18 +69,18 @@ posture.
 - **Diagnostics self-heal (#7):** a rolling `ToolHealthTracker` flags flaky tools; the brain
   auto-reloads when found down (it self-closes on a 30s timeout). `BrainHealthPolicy` + the tracker are
   JVM-tested; the reload + timeline surfacing are device-time-only.
-- **Signed manifest integrity (#8):** `ModelManifest` carries an Ed25519 `manifestSignature`;
-  `ManifestSignatureVerifier` canonicalizes + verifies (platform EdDSA, API 33+; minSdk 28 falls back
-  to accept + log). JVM-tested. `ManifestSigningKey.PUBLIC_KEY_BASE64` is intentionally blank → wired
-  but INACTIVE; no fabricated keys. No Bouncy Castle added (avoids ~6MB APK cost for an inactive
-  feature).
+- **Signed manifest integrity (#8) — removed:** the inactive, blank-keyed bundled-manifest signing
+  classes were deleted; `scripts/ci/check_repo_invariants.py` now prohibits `ManifestSigningKey`,
+  `ManifestSignatureVerifier`, `ManifestSigner` and a `"manifestSignature"` field from returning.
+  Bundled-model integrity rests on the pinned `sha256` + `sizeBytes` in `models_manifest.json`
+  (see *Integrity* below); release-catalogue signing is distribution tooling (`scripts/catalog/`).
 
-## 15-module structure
+## 16-module structure
 
 ```
 :app                Compose UI, ViewModels, FloatingService, permissions, AgentOrchestrator (8-step pipeline), SecurityLevel gate
-:core               Result, ToolCall, TimelineStep, RiskLevel, Logger, safety primitives, CanonicalToolRegistry
-:storage            Room DB (5 entities, 5 DAOs), migrations
+:core               Result, ToolCall, TimelineStep, RiskLevel, Logger, safety primitives, CanonicalToolRegistry, BrainModel/ModelProfile
+:storage            Room DB (8 entities, 8 DAOs, SQLCipher-encrypted cache), migrations
 :modelmanager       manifest load, install + integrity (sha256/size), health, detect
 :languagepacks      LanguagePackManager, typed catalogue, dependency-aware install/uninstall, pack health
 :localbrain         RuleBasedParser, PromptBuilder, GemmaPlanner (LiteRT-LM), UnoOneToolSet, RAGManager, judgeSafety
@@ -74,6 +93,7 @@ posture.
 :observability      Diagnostics (latency/success), crash logs
 :accessibilitycontrol  click/type/fill/scroll/swipe/back/home/read_screen/find+click
 :securebrowser      BrowserDomainPolicy, SecureWebViewController, PageAgent protocol, BrowserSafetyPolicy, audit
+:vault              MobileVaultRepository (encrypted Pocket AI USB vault over SAF: unlock/read/write/tombstone, vault-core-compatible crypto), VaultSyncPlanner
 ```
 
 ## Request lifecycle
@@ -104,15 +124,18 @@ deferred work, not a bug: a full Hilt migration is tracked but not yet done, so 
   the app validates and executes every call.
 - **Offline-first:** voice/notes/control/planning are local; the only network path is opt-in
   `web_search` (off by default). See [`SAFETY.md`](SAFETY.md).
-- **Integrity:** model files are sha256/size-verified where the manifest carries a hash; Gemma is
-  manual-import/unverified until a hash is added. See [`MODELS.md`](MODELS.md).
+- **Integrity:** every file in the bundled `models_manifest.json` carries `sha256` + `sizeBytes`,
+  including both Gemma 4 brains (`gemma-4-E2B-it.litertlm`, 2,588,147,712 B; `gemma-4-E4B-it.litertlm`,
+  3,659,530,240 B), so `ModelManager.modelHealth` can report **Verified**; an entry without integrity
+  metadata reports "Present — integrity metadata incomplete; release blocked". The E2B pin is also
+  asserted by `scripts/ci/check_repo_invariants.py`. See [`MODELS.md`](MODELS.md).
 - **Play readiness:** permissions, foreground services, and accessibility justification in
   [`play-review/`](play-review/).
 
 ## Further reading
 
 - [`local-architecture.md`](local-architecture.md) — detailed module walkthroughs
-- [`voice-module-implementation.md`](voice-module-implementation.md) — Sherpa STT/TTS/KWS
-- [`phonecontrol-implementation.md`](phonecontrol-implementation.md) — phone/OCR/calendar
-- [`localbrain-implementation.md`](localbrain-implementation.md) — parser + Gemma planner
-- [`tool-schema-registry.md`](tool-schema-registry.md) — tool declarations
+- [`SPEECH_ARCHITECTURE.md`](SPEECH_ARCHITECTURE.md) and
+  [`SPEECH_MODEL_QUALIFICATION.md`](SPEECH_MODEL_QUALIFICATION.md) — speech (Sherpa STT/TTS/KWS on Android)
+- [`../android-app/UnoOneAgent/phonecontrol/README.md`](../android-app/UnoOneAgent/phonecontrol/README.md) — phone/OCR/calendar
+- [`../packages/tool-contracts/tools.v1.json`](../packages/tool-contracts/tools.v1.json) — canonical tool declarations (CI-synced)

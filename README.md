@@ -12,10 +12,10 @@ copy.
 
 | | UnoOne Mobile | UnoOne Power |
 |---|---|---|
-| **Platform** | Android 9+ | Windows / macOS desktop |
-| **Model** | Gemma 4 E2B/E4B (LiteRT) | Gemma 4 12B/E4B/E2B Q4 GGUF, RAM-tiered (llama.cpp) |
+| **Platform** | Android 9+ | Windows desktop (the Rust workspace also builds and unit-tests on Linux and macOS in CI; there is no macOS app yet) |
+| **Model** | Gemma 4 E2B (LiteRT-LM); an E4B profile is defined but not yet loaded by the app | Gemma 4 12B/E4B/E2B Q4 GGUF, RAM-tiered (llama.cpp) |
 | **UI** | Jetpack Compose | Tauri 2 + React 19 |
-| **Storage** | Room cache → USB vault | RAM → USB vault |
+| **Storage** | SQLCipher Room cache → USB vault | RAM → USB vault |
 | **Voice** | Sherpa-ONNX STT/TTS | InBharat Audio (Qwen3-ASR / omnivoice, acceptance-gated) with legacy Whisper/Piper as the explicit policy fallback |
 | **Eyes-free** | TalkBack, Blind Aid, Camera OCR | Screen reader, high-contrast, OCR, camera blind-aid describe + narration |
 
@@ -25,7 +25,7 @@ the declared architecture, and every required asset hash before use.
 
 ```
 UnoOne Mobile (Android)          UnoOne Power (Desktop)
-     Gemma 4 E2B/E4B              Gemma 4 12B Q4 GGUF
+     Gemma 4 E2B                  Gemma 4 12B / E4B / E2B GGUF
           ↕                                ↕
           └──── Shared encrypted USB vault ────┘
                  (Argon2id + AES-256-GCM default; XChaCha20-Poly1305 legacy readable)
@@ -35,10 +35,10 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 
 ### Android assistant
 
-- Native Kotlin and Jetpack Compose app for Android 9 and later (API 28+), organized into 15 Gradle modules.
-- One local Gemma 4 E2B planning engine through LiteRT-LM, with E4B Medium mode available on devices with ≥ 10 GB RAM. Deterministic rules handle common commands before model inference.
-- A canonical 42-tool registry (29 legacy + 13 atomic accessibility, messaging, and calendar tools) rejects unknown tools, validates required arguments, and checks argument types.
-- Dynamic tool exposure: the orchestrator selects 2–3 candidate tools for E2B (Lite) tasks and 3–6 for E4B (Medium), preventing hallucinated tool calls and reducing context-window waste. The model never sees all 42 tools at once.
+- Native Kotlin and Jetpack Compose app for Android 9 and later (API 28+), organized into 16 Gradle modules.
+- One local Gemma 4 E2B planning engine through LiteRT-LM, hash-pinned in the model manifest. Deterministic rules handle common commands before model inference. An E4B "Medium" profile is defined, hash-pinned and unit-tested, but the production load path currently loads E2B only — tier selection is not yet wired into the app.
+- A canonical 42-tool registry (29 legacy + 13 atomic accessibility, messaging, and calendar tools; 5 further tools are blocked) rejects unknown tools, validates required arguments, and checks argument types. Risk classes are byte-synced in CI with `packages/tool-contracts/tools.v1.json`.
+- Dynamic tool exposure: the orchestrator offers the model 2–3 candidate tools per Lite (E2B) task (3–6 are defined for E4B), preventing hallucinated tool calls and reducing context-window waste. The model never sees all 42 tools at once.
 - DeterministicIntentRouter handles wake commands, language switches, blind-mode toggles, simple app launches, accessibility shortcuts, and fast replies without model involvement.
 - LanguageNormalizer detects 7 languages (en, hi, bn, ta, te, kn, ml) from speech patterns, normalizes filler words, and enforces the hard output-language rule (speak Hindi → reply in Hindi). Low-confidence transcripts (< 0.5) trigger clarification instead of execution.
 - ToolProposalValidator validates model proposals against the candidate set, checks required arguments and types, and always allows `speak_response` as a fallback escape hatch.
@@ -50,7 +50,7 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 - Background activation uses a low-latency offline keyword spotter plus an independent bounded offline-STT fallback for one-breath English and Hindi commands. The short **"Uno"** keyword and longer activation variants are supported, and a monotonic cooldown prevents the two detectors from firing twice for one speech burst. Wake acknowledgement finishes before command capture begins, and foreground recording and TTS exclusively own the microphone to prevent self-transcription.
 - Phone actions for opening apps, Calendar, Chrome, WhatsApp, the dialer, URLs, and system screens.
 - Calendar events, WhatsApp messages, and emails are prepared as reviewable drafts. UnoOne does not press the external app's final Send or Save control.
-- Local notes, memory, Skills, activity logs, browser audit records, and preferences.
+- Local notes, memory, Skills, activity logs, browser audit records, and preferences; with a Pocket AI attached and unlocked, the drive vault is the canonical store for notes, memories and conversation turns.
 - A floating assistant and background voice service.
 - A collapsible **Agent activity** panel that shows what UnoOne understood, which checks ran, what is executing, and whether it succeeded.
 - A persistent **Disable UnoOne** master control on the Agent and Settings screens. Disabled mode stops and blocks microphone capture, STT, TTS, inference, Blind Aid, screen reading, accessibility actions, browser work, floating services, pending recovery, and network-backed page activity until the user explicitly enables the app.
@@ -64,36 +64,29 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 - UnoOne Dock runs per-user without administrator rights, watches Windows device
   insertion/removal events, validates the pen drive, and launches only its
   manifest-declared UnoOne Power executable.
+- Power runs from a SHA-256-addressed host copy
+  (`%LOCALAPPDATA%\UnoOne\PowerCache\<digest>`), so Windows never keeps
+  executable pages mapped from the removable drive.
 - Removal stops model inference, discards active recording buffers, and
   emergency-locks the vault.
 - **BootGate (2026-10-02):** a fast identity + runtimes gate (~8–14 s)
   releases model boot from the digest-verified host cache while the full
-  556-asset package sweep keeps running in the background — the model is
-  usable ~15 s from drive-detect instead of waiting out the full sweep, and
-  drive-path models still wait for it. The background sweep also stages
-  the ASR/TTS models to the host cache when it finishes. The 13-minute
-  cold-boot regression (2026-10-02) was measured to Windows Defender's
-  first-access scanning of same-day-staged 11 GB, not code; warm boot went
-  77.4 s → 40–56 s with the model server live at ~15 s. A boot-chain race
-  that killed model startup when the user unlocked during validation
-  (silently, no error, no retry) was caught live and fixed the same day.
+  package sweep keeps running in the background, so the model is usable about
+  15 s after the drive is detected instead of after the full sweep;
+  drive-path models still wait for it. The background sweep also stages the
+  ASR/TTS models to the host cache. A 13-minute cold boot measured on
+  2026-10-02 was traced to Windows Defender's first-access scanning of
+  same-day-staged 11 GB, not code; warm boot went 77.4 s → 40–56 s with the
+  model server live at ~15 s.
 - **Explicit model controls supersede automatic boot (2026-10-03):** manual
   Stop/Load in Model Manager takes precedence over BootGate auto-boot; a
-  manual load resolves the selected cache artifact and hash-verifies it and
-  the declared vision projector (mmproj) before boot, then checks the
-  running model's health/identity and discards health results from stopped
-  sessions. Admission is a conservative memory policy
-  (`desktop_model_policy`) that budgets against the system's **TOTAL RAM —
-  the maximum the machine holds** (user directive 2026-10-03, restoring the
-  flagship lane that ran accurately before the admission existed):
-  momentary free-RAM pressure never vetoes boot (the OS reclaims standby
-  pages), while every artifact and runtime reserve still counts (weights
-  ×1.1 + projector + KV + 1 GiB ≤ total), unmeasured GPU memory is never
-  credited, a missing tier is never silently downloaded, and invalid
-  measurements fail closed. Stopping the model cancels pending loads (a
-  cancelled hash never reads model bytes) and preserves restart admission;
-  an inference child being started is killed even if its loading future is
-  dropped mid-shutdown.
+  manual load hash-verifies the selected cache artifact and its vision
+  projector (mmproj) before boot, then checks the running model's
+  health/identity. Admission (`desktop_model_policy`) budgets against the
+  system's **total RAM**: momentary free-RAM pressure never vetoes boot, but
+  weights ×1.1 + projector + KV + 1 GiB must fit, unmeasured GPU memory is
+  never credited, a missing tier is never silently downloaded, and invalid
+  measurements fail closed. Stopping the model cancels pending loads.
 - Real Tauri API calls (no mock data), real SHA-256 verification, honest error states.
 - Windows bundle CI builds `UnoOnePower.exe`, `UnoOneDock.exe`, and
   `Start UnoOne.exe` together and publishes their SHA-256 sums as one artifact.
@@ -102,118 +95,128 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 
 - Chat goes through the **harness bridge** (`harness_bridge.rs` → vendored
   `inbharat-harness`): a routing planner (L0 deterministic fast path /
-  L1 model / L3 full agent loop with a 48-step budget), model-visible
-  capability contract, audited tool calls, and per-step transcripts in the UI.
+  L1 model / L3 full agent loop), a model-visible capability contract, audited
+  tool calls, and per-step transcripts in the UI. The full-access L3 loop has
+  a 10,000-step safety budget; the old 900 s / 48-step wall was removed after
+  it killed live runs.
+- **Chat context accuracy (2026-10-07):** restored vault history stays visible
+  on screen, but the model receives only context selected for the current
+  task. A standalone greeting sends no history and skips long-term memory
+  search; an explicit named continuation selects only the matching task; an
+  unrelated new request starts a new task boundary. History is sent as whole
+  user/assistant pairs within a byte budget; a request larger than the
+  harness's 65,536-byte memory-query limit disables long-term memory search
+  and is still sent in full.
 - **Progress-aware local inference (updated 2026-10-05):** plain and
   tool-bearing main-agent turns stream over SSE from the local llama-server
   (`chat-token` Tauri events). Tool-call fragments are assembled before the
   completed call reaches the agent loop, and child agents use the same SSE
   transport without duplicating their tokens in the parent UI. Each received
   chunk refreshes the 180 s idle deadline, while a separate 12-minute hard
-  ceiling still stops a genuinely stuck generation. The authoritative result
-  replaces streamed text when the turn lands.
-- **Reasoning-aware inference layer (2026-09-16):** one shared request type
-  carries `disable_reasoning` — the vision lanes (describe/OCR) pin think-off
-  (`enable_thinking: false`, `reasoning_budget: 0`), measured live on the
-  staged drive at scene describe **42–60 s → 8.2 s** and OCR **12.7 s →
-  3.7 s** with quality anchors held. Every request sends `cache_prompt: true`
-  and the response surfaces cached-prefix tokens and real tokens/s.
+  ceiling still stops a genuinely stuck generation.
+- **Reasoning-aware inference layer (2026-09-16):** the vision lanes
+  (describe/OCR) pin think-off (`enable_thinking: false`,
+  `reasoning_budget: 0`), measured live on the staged drive at scene describe
+  **42–60 s → 8.2 s** and OCR **12.7 s → 3.7 s** with quality anchors held.
+  Every request sends `cache_prompt: true`.
 - **Model-backed memory rerank (2026-09-16):** vault memory search hits
   (≥3 lexical hits) are reordered by one bounded think-off completion on the
-  same verified local model (top 8 candidates, 30 s hard deadline,
-  fail-open to the lexical order on any error — retrieval can never regress).
-- **Persistent conversation memory (2026-10-02):** every completed chat
-  turn (the user's words + the assistant's reply) is written to the
-  unlocked vault as an XChaCha20-Poly1305-encrypted `MESSAGE` record, and
-  a new session recalls the most recent 30 turns, oldest first, as
-  ordinary history — the context budget and request pipeline treat
-  restored turns like any other, and a banner states how much was
-  restored. The drive vault is the single memory plane: any client that
-  unlocks it reads the same history. Stopped runs are never saved,
-  attachment payloads stay per-turn, tombstones hold across sessions, and
-  a locked vault degrades to session-only chat (never plaintext). Long
-  replies are also spoken in sentence-bounded ~280-char chunks spliced
-  into one WAV, so CPU-bound TTS can no longer hit the 180 s process
-  deadline (the shipped audio.cpp build is CPU-only — RTF ~7 — which the
-  2026-10-02 measurement exposed as the remaining speech latency).
-- **Tool surface (FullAccess permission, default ON):** `fs.read/write/list`
-  through the multi-root granted-folder fence (the workspace root plus
-  user-approved folders, each grant validated — absolute, existing, never a
-  drive root, never inside the encrypted package — and audited as a vault
-  `AuditRecord`; revocable from Settings; and a tool touching an ungranted
-  folder opens an **in-chat approval card** so the user can grant that folder
-  mid-run without leaving the chat — a decline or timeout hands the model the
-  honest off-limits reason, and a declined folder is never re-asked in that
-  session), `fs.mkdir` (defect-#29 lane: a "create a folder with files" task
-  was impossible before it), `fs.copy` (the binary-safe copy — byte-exact for
-  images and other binary files across granted folders, because `fs.read` +
-  `fs.write` is UTF-8-only and silently corrupts a PNG/JPG "copy"; the
-  design-website lane this unlocked is taught in the model briefing: author
-  graphics as inline SVG, copy the user's image files with `fs.copy`, watch
-  the result with `web.preview`), `doc.create` writing real
-  PDF/DOCX/MD/TXT documents through the same fence (the pure-Rust writers
-  are round-trip tested against the built-in parsers, so a writer bug cannot
-  pass its own reader), `process.run` with allowlisted direct-argv
-  execution and 10 s foreground deadlines (background deploys supported),
-  `workspace.search` (content grep) and `workspace.patch` (anchored edits),
+  same verified local model (top 8 candidates, 30 s hard deadline, fail-open
+  to the lexical order — retrieval can never regress).
+- **Persistent conversation memory (2026-10-02):** every completed chat turn
+  is written to the unlocked vault as an encrypted `MESSAGE` record
+  (AES-256-GCM, like every new vault record), and a new session restores the
+  most recent 30 turns for display with an honest banner. The drive vault is
+  the single memory plane. Stopped runs are never saved, tombstones hold
+  across sessions, and a locked vault degrades to session-only chat (never
+  plaintext). Long replies are spoken in sentence-bounded ~280-char chunks so
+  CPU-bound TTS stays inside the 180 s process deadline.
+- **Tool surface (FullAccess permission, default ON):** `fs.read/write/list`,
+  `fs.mkdir` and `fs.copy` (byte-exact for binary files) through the
+  multi-root granted-folder fence (workspace root plus user-approved folders;
+  each grant validated — absolute, existing, never a drive root, never inside
+  the encrypted package — audited as a vault `AuditRecord` and revocable; a
+  tool touching an ungranted folder opens an in-chat approval card);
+  `doc.create` writing real PDF/DOCX/MD/TXT through the same fence;
+  `process.run` with allowlisted direct-argv execution and a 180 s deadline
+  (background deploys supported); `workspace.search` and `workspace.patch`;
   `browser.act` typed browser actions over the audited WebView bridge
-  (sign-in buttons that open a new tab/popup work: an idempotent same-window
-  shim routes `window.open` and `target="_blank"` clicks into the current
-  window — wry/WebView2 otherwise swallows them, live-caught on Gmail's
-  Sign-in button 2026-10-03),
-  `web.preview` (a live preview window of a site the agent is building,
-  reloaded as the agent keeps editing — no web server anywhere), and
-  `agent.spawn` sub-agents (Codex/GLM-style multi-agent lane).
+  (including an idempotent same-window popup shim, live-verified on Gmail's
+  Sign-in button 2026-10-03); `web.preview` (a live preview window of a site
+  the agent is building — no web server); and `agent.spawn` sub-agents.
 - **Session host-command consent + owned processes (2026-10-03):**
-  `process.run` runs only while the user has enabled host commands in
-  Settings for that session — an audited, revocable consent
-  (`host_commands_enabled`/`host_commands_revoked` vault `AuditRecord`s).
-  Every process the agent spawns is owned: lock, permission revocation,
-  drive removal, or app exit terminates them all (Windows Job Objects kill
-  whole process trees; a 32-process session cap bounds runaway deploys), and
-  process leases are generation-invalidated, so a broker captured before a
-  revoke can never spawn after it. Locking the vault is now a full sweep —
-  it stops inference immediately, cancels every in-flight run (a
-  generation-id'd run registry closes the supersede/finish race), denies
-  all pending in-chat grant cards, kills owned processes, and closes the
-  preview and browser windows. Folder grants authorize file tools only,
-  never commands — the model briefing states that boundary honestly, and
-  a denial tells the model to ask the user to enable permission and
-  restart the task.
-- **Prose-dump corrective retry:** when a 12B-class model answers a task
-  with a pasted fenced code block instead of tool calls (the live defect
-  the user caught 2026-10-03), the runtime issues exactly ONE bounded
-  corrective nudge telling it to re-attempt with real tool calls; a model
-  that already acted, or a chat-only run, is never corrected — opt-in via
-  `RunOptions.corrective_retries`, enabled for full-access and sub-agent
-  runs.
+  `process.run` runs only while the user has enabled host commands for that
+  session (audited, revocable). Every process the agent spawns is owned: lock,
+  permission revocation, drive removal, or app exit terminates them all
+  (Windows Job Objects; 32-process session cap), and process leases are
+  generation-invalidated. Folder grants authorize file tools only, never
+  commands.
+- **Prose-dump corrective retry:** when a 12B-class model answers a task with
+  a pasted code block instead of tool calls, the runtime issues exactly one
+  bounded corrective nudge; a model that already acted is never corrected.
 - **Vision attachments:** chat can attach images through the audited
-  attachment pipeline (mmproj vision), with CSP-permitted previews.
-- **Browser lane:** the agent opens and drives a real frontend-created
-  WebView window (`github.com`, `google.com` verified live), with
-  session-aware status, focus ACL, and truthful no-browser refusals.
-  Web sessions persist honestly: every browser-lane window shares the
-  host's WebView2 user-data profile, so one manual login survives app
-  restarts on that machine — the status is surfaced in the Browser
-  Workspace and recorded once in the vault as an encrypted
-  `BROWSER_RESEARCH` note carrying the status and its honest boundary
-  (host-local, not vault-encrypted; `ClearSession` clears page storage
-  only). No cookie values or credentials are ever stored. The agent is
-  briefed to reach the user's logged-in accounts (Gmail, Notion,
-  webmail) through that persistent session — **no API keys or OAuth apps
-  anywhere** — and to never ask for or type the user's credentials: a
-  missing login is surfaced to the user to complete themselves in the
-  Browser window, then the agent continues.
-- **Live website preview (2026-10-02):** `web.preview` mirrors the site
-  the agent is building into a bounded `%TEMP%\unoone-preview` tree (the
-  only path the asset protocol gains scope for) and opens it in its own
-  capability-less window; a ~1.5 s heartbeat re-stages the mirror and
-  reloads the window whenever the site's file signature changes — the user
-  watches the site build live, with no web server, no port, and no
-  file-watcher dependency.
+  attachment pipeline (mmproj vision).
+- **Browser lane:** the agent opens and drives a real WebView window, with
+  session-aware status and truthful no-browser refusals. Browser windows share
+  the host's WebView2 profile, so one manual login survives restarts on that
+  machine (host-local, not vault-encrypted); no cookie values or credentials
+  are stored, and the agent never asks for or types the user's credentials.
+- **Live website preview (2026-10-02):** `web.preview` mirrors the site into a
+  bounded `%TEMP%\unoone-preview` tree and reloads its own capability-less
+  window when the site's files change.
 - Honest-failure design throughout: sub-agent timeouts, tool failures, and
   budget exhaustion surface in the UI instead of silent fallbacks. Evidence:
   `docs/verification/2026-09-14/` and `2026-09-15/` (docs 105–116).
+
+### Knowledge and coding workspace (landed 2026-10-07, PR #62)
+
+New desktop capabilities in `packages/pai-harness-adapter`,
+`packages/capability-contracts` and the desktop app. They are implemented and
+tested (see [Latest verified results](#latest-verified-results)) but have not
+yet been staged onto the physical drive or exercised on Windows hardware.
+
+- **Encrypted knowledge records** in the existing vault — no second store:
+  Evidence, Candidate, VerifiedPattern, ApprovedProcedure and Invalidation
+  records. Evidence is immutable, revisions are audited, revocation propagates
+  to dependants, and no record by itself grants execution.
+- **Encrypted search:** an HMAC-sealed postings index; a search decrypts only
+  candidate records. "Current" recall requires an exact source, version,
+  commit, file digest and platform match; stale, revoked or contradicted
+  material appears only in explicit historical mode. Search is lexical, not
+  semantic.
+- **Verified learning (Linux only):** a candidate fix is promoted only after
+  really running its tests in a Linux sandbox (dropped capabilities,
+  bubblewrap namespaces, read-only filesystem except a 16 MiB `/tmp`, no
+  network, prlimit, seccomp): the baseline must fail, the fix must pass
+  repeatedly, and test files must be byte-identical. Receipts are signed;
+  approval for reuse comes only from an explicit UI event; revocation is
+  enforced at reuse. On Windows and macOS this refuses before spawning
+  anything.
+- **Coding Task workspace:** a durable encrypted task ledger records each step
+  before its side effects, so crash recovery never replays a write. Edits
+  happen in an isolated working set; build/test gates run in the sandbox with
+  real exit codes (protected test files, hidden-test text and oracle tampering
+  are guarded); per-file diffs carry review decisions bound to the exact
+  content hash; **apply** writes only to a separate task worktree
+  (`%LOCALAPPDATA%\UnoOne\coding-tasks`); a bounded repair loop stops with
+  evidence; dynamic sites preview through an authenticated 127.0.0.1 bridge.
+  On Windows, sandboxed checks, preview and apply are unavailable by design;
+  viewing, diffs, review and patch export work.
+- **Local distiller + Knowledge screens:** pasted text (any platform) or files
+  from granted folders (Linux only for now — fd-safe file capture is
+  unavailable elsewhere) become evidence plus cited candidates (deterministic extraction:
+  headings, docstrings, first lines — not semantic understanding), with
+  held-out material excluded, explicit budgets, no network and no automatic
+  promotion. The Knowledge view offers Explorer, Detail (reject/revoke behind
+  confirmations), Distiller and consented Export of verified/approved items
+  only; there is no training export. Possible contradictions are reported as
+  a heuristic, never persisted.
+- **Learning panel** on the Coding Task screen: relevant verified patterns for
+  the exact file, save a reviewed task as a candidate, preview the
+  verification recipe, verify, approve, revoke (verify and approve need the
+  Linux sandbox).
+- **Memory Explorer search** works again (debounced, stale responses
+  discarded).
 
 ### Android Pocket AI attachment
 
@@ -227,65 +230,69 @@ UnoOne Mobile (Android)          UnoOne Power (Desktop)
 
 | Component | Status |
 |-----------|--------|
-| Physical Pocket AI | **INTEGRITY-VERIFIED PROTOTYPE — hardware-failed original stick fully RELOADED 2026-10-04 from main `e3b64f4`** (Windows Event 51/153 media errors, repeated same-LBA `0x8858` retries, format did not cure — at the owner's instruction the drive was formatted and reloaded COMPLETE from git + hash-verified keepers: `SOURCE` = byte-exact `git archive 52a2ec0` (the docs-only successor of the code-green `e3b64f4`) (vendor harness + audiocpp + vault-core + Android included), three desktop GGUF tiers + per-tier mmproj, both mobile `.litertlm` models, Android APK byte-exact `086A4E08…`, 539-file runtimes, speech plane, and a FRESH vault `fa8e78fa-…` (past chat/memory deliberately not carried, owner decision); exes Power `6E10A314…`, Dock `DA585A61…`, Starter `7A6FEB91…` (Dock/Starter reproducible across builds; known defect: the app crashes when the mid-sweep device-removal IO error fires — stack overflow on a spawned thread, not reproducible on a healthy filesystem, hardware-conditional); the manifest was regenerated OFF-DRIVE against byte-identical keepers because the stick cannot survive a full on-drive hashing pass — then `Start UnoOne.exe --verify-only` on the reloaded drive: `valid=true`, `0` failures; owner-live-verified: unlock + working app session; historical acceptance sessions (pre-reload, all through the real UI, three sessions): **(cycle-1, staged from `abdd510`)** vault unlock + BootGate model load + persistent chat-memory recall (`3 turn(s)` restored); a folder grant added in Settings (audited, revocable); ONE full-access model turn running `doc.create` (real 708-byte `%PDF-1.4` written inside the granted folder), `fs.write`, and `web.preview` end-to-end; the preview window served the mirrored site over `asset://` and its inline script executed (no CSP on asset responses); a WebView2 cookie written in the app's browser window survived a full app kill + relaunch + re-unlock; the vault web-session note exists encrypted and decrypts to `kind: "browser_session_note"` (one deduped `BROWSER_RESEARCH` record — no cookies or credentials stored); **(cycle-2, staged from `f2c607d`)** the Gmail sign-in click that previously did nothing now navigates the same window to the real `accounts.google.com` sign-in page (popup shim live, `window.open` probe non-null); ONE full-access model turn touching the then-ungranted `Desktop\Stanford` opened the **in-chat approval card**, clicking Grant let `fs.list` complete with the real file names, the grant persisted host-locally, and the encrypted vault `AuditRecord` (`action: folder_grant`) was verified by decrypt probe — the exact live defect ("i give you permission" → model still fenced out) closed end-to-end; **(cycle-3, staged from `f0dcfaf` via `efa3368`/`d4790f0`)** the flagship 12B boots again on its verified target machine — two live-caught boot blockers fixed in the chain: the admission policy now budgets against the system's TOTAL RAM (`efa3368`), and the manifest-digest match that refused the digest-verified host-cache copy is case-insensitive (`d4790f0`); ONE full-access model turn ran the complete design lane in the tool trail — `fs.mkdir` → `fs.write` (3079-byte designed landing page: inline SVG logo, gradient hero, card layout) → `fs.copy` (1928 bytes, byte-exact sha256 `E32D…949CA` — the UTF-8 round-trip corruption this lane closes is proven absent) → `web.preview` (2 file(s), 5007 bytes mirrored, window live on `asset://`, in-chat Preview/Stop-preview affordance); a completion edit turn swapped the inline SVG for `<img src="assets/logo.png">` via `workspace.patch` + `fs.write` + `web.preview`; and the live-caught preview defect — relative references 403 because the page URL carries the whole absolute path as one percent-encoded segment — is fixed by the injected `<base href>` (`f0dcfaf`) and verified live: the mirrored PNG now RENDERS (`naturalWidth: 96`) through the asset protocol. Manifest also records the Android APK (`mobile.apk`, kind `MOBILE_APP`) for tamper-evidence. Historical acceptance 2026-09-14/15: `docs/verification/2026-09-14/` + `docs/verification/2026-09-15/` (docs 105–116) |
-| Desktop frontend embedding | **VERIFIED** — root cause of the historic "localhost refused to connect" drive is fixed (`tauri/custom-protocol` default feature; without it `generate_context!` embeds zero assets). Byte-level gate passes in CI and on the staged drive binary |
-| Mobile app (Android) | V2 agent pipeline + Pocket AI USB auto-open; M1-M3 truthful fixes (USB detection reasons, Room TTL/clear-on-detach cache, unused permission removed). Compiles, lints, tests, and `assembleDebug` passes; **cross-platform vault contract proven bidirectionally in CI** (Kotlin↔Rust Argon2id + AES-GCM record layer AND XChaCha20 master-key wrap — `packages/vault-core/test-vectors/`, `VaultCryptoCrossPlatformTest`). Physical phone test pending |
-| Desktop frontend (React) | BUILDS — Vite build passes, oxlint clean, real Tauri API calls, no mock data |
-| Desktop backend (Rust) | BUILDS AND TESTS — fmt/check/test/clippy clean on **both windows-latest and macos-latest**; 70/70+ vault-core (Wave-1 regressions + cross-platform vectors), 20/20 recording-policy, 16/16 text-util, 16/16 usb-manifest, 9/9 document-migration, 13/13 browser-policy, 2/2 chat-memory round-trip (vault `MESSAGE` record persistence: ordering + limit tail, tombstones and foreign records skipped), 12/12 granted-folder fence (multi-root longest-prefix routing, `C:\root` vs `C:\rootx` boundary, grant validation, and the in-chat approval hook lane — a relative-path denial never asks the human), 6/6 in-chat folder-grant approval (60 s deny-by-default human card, persisted-store re-check so mid-run grants resolve, declined folders never re-asked, Grant/Deny/timeout all return truthful reasons to the model), 4/4 prose-dump corrective retry (scripted dump then acts; opt-out stands; a model that already acted is never corrected; bounded to one nudge), 5/5 doc-writer round-trips (pure-Rust PDF/DOCX/MD/TXT writers re-parsed by the built-in readers), 5/5 live-preview (bounded mirror walk, reload-only-on-change, honest end when the site folder vanishes), 47/47 browser workspace (vault web-session note round-trip, dedupe, tombstones, honest persistence facts, and the popup shim: guards its own install, routes `window.open`, rewrites blank targets at click capture). The deferred dead-code sweep landed: `wait_for_exit()`, `get_backend()`, the never-read config/model_info fields and `is_confirmation_required()` are gone with clippy `-D warnings` still clean |
-| Desktop USB/runtime resilience | **VERIFIED 2026-10-05** — Power is copied into a SHA-256-addressed `%LOCALAPPDATA%\UnoOne\PowerCache\<digest>` directory and launched from that verified host copy, so Windows does not keep executable pages mapped from an unstable removable drive. Automatic repair retries are bounded at 45/90/180/360/720/900 seconds, recovery checkpoints use `.partial`, and manifest generation excludes incomplete `.partial` artifacts. This protects the app and copied package; it does not claim to repair failing USB hardware. |
+| Physical Pocket AI | **INTEGRITY-VERIFIED PROTOTYPE, RELOADED 2026-10-04** from `main` `e3b64f4` after the original stick reported Windows media errors (Event 51/153) that formatting did not cure. Reloaded complete from git and hash-verified keepers: `SOURCE` (byte-exact `git archive 52a2ec0`), three desktop GGUF tiers with per-tier mmproj, both mobile `.litertlm` models, the Android APK, runtimes, the speech plane, and a **fresh vault** (past chat/memory deliberately not carried — owner decision). The manifest was regenerated off-drive against byte-identical keepers; `Start UnoOne.exe --verify-only` on the reloaded drive: `valid=true`, 0 failures; owner-verified unlock and a working session. Known defect: the app can crash (stack overflow on a spawned thread) when a mid-sweep device-removal IO error fires — hardware-conditional, not reproducible on a healthy filesystem. **The drive does not yet carry the 2026-10-07 build** — restage with [`scripts/Stage-PocketAiDrive.ps1`](#update-a-pocket-ai-drive). Earlier live acceptance on the pre-reload drive (three cycles, 2026-09/10) covered unlock, BootGate model load, chat-memory recall, audited folder grants and the in-chat grant card, `doc.create`/`fs.write`/`fs.copy`/`web.preview`, browser-session persistence across restarts, and the Gmail popup shim; dated evidence: `docs/verification/2026-09-14/` + `2026-09-15/` |
+| Desktop frontend embedding | **VERIFIED** — the historic "localhost refused to connect" drive is fixed (`tauri/custom-protocol` default feature; without it `generate_context!` embeds zero assets). A byte-level gate runs in the Windows bundle CI and passed on the staged drive binary |
+| Mobile app (Android) | V2 agent pipeline + Pocket AI USB auto-open. Compiles, lints, tests, and `assembleDebug` passes in Android CI; **cross-platform vault contract proven bidirectionally in CI** (Kotlin↔Rust Argon2id + AES-GCM record layer and XChaCha20 master-key wrap — `packages/vault-core/test-vectors/`, `VaultCryptoCrossPlatformTest`). Physical phone round trip with the drive pending |
+| Desktop frontend (React) | BUILDS — Vite build and oxlint in CI; real Tauri API calls, no mock data. Six local Node test suites (context selector, TS/Rust greeting parity, real-core boundary, mounted Chat, Coding Task and Knowledge views) pass locally but are **not yet wired into CI** |
+| Desktop backend (Rust) | BUILDS AND TESTS — `cargo fmt --check`, `cargo check`, `cargo test --workspace` and `cargo clippy --workspace -D warnings` green on **windows-latest, ubuntu-latest and macos-latest** (Desktop CI on `05baa79`, 2026-10-07). Suites cover vault-core (Wave-1 regressions + cross-platform vectors), recording policy, text-util, usb-manifest, document migration, browser policy and workspace, chat memory, the granted-folder fence and in-chat grant approval, the corrective retry, document writers, live preview, the desktop glue, and the product adapter (180 library tests including the 2026-10-07 work). The adapter's 50 sandbox tests need Linux isolation; CI runners without bubblewrap skip them with a visible `::warning::` annotation, and they run for real on Linux hosts with bubblewrap |
+| Desktop USB/runtime resilience | **VERIFIED 2026-10-05** — Power is copied into a SHA-256-addressed `%LOCALAPPDATA%\UnoOne\PowerCache\<digest>` directory and launched from that verified host copy. Automatic repair retries are bounded at 45/90/180/360/720/900 seconds, recovery checkpoints use `.partial`, and manifest generation excludes incomplete `.partial` artifacts. This protects the app and copied package; it does not claim to repair failing USB hardware |
 | Windows Dock / Starter | **INTEGRITY-VERIFIED ON DRIVE** — manifest-declared, hash-verified, native `--verify-only` exits 0; transactional staging with automatic rollback proven live |
-| Vault encryption (`packages/vault-core`) | IMPLEMENTED AND CORRECTNESS-HARDENED — Argon2id (256 MiB / t=3 / p=4) + AES-256-GCM for new records (legacy XChaCha20-Poly1305 stays readable, identified by nonce length) + HKDF-SHA-256 + BIP-39 recovery + write-ahead journal; transactional first-use setup refuses re-initialisation and preserves packaged `vault.id` bytes. Per-vault random salts on both the password and recovery paths. The KDF parameters are pinned as a cross-platform contract with the Kotlin `encrypted-vault` package (`SPEC_ARGON2_*` plus a `const` assertion that makes drift a compile error in release builds), because the test profile deliberately uses reduced parameters and would not catch a change that broke Android↔Windows unlock. **Wave 1** additionally fixed four release blockers: header slot selection now picks the newest committed generation (a password change written to the inactive slot used to be silently discarded on restart), record metadata is authenticated and re-verified on every read (privacy level, tombstone, type, revision and timestamps were previously editable on disk while content still decrypted), record writes are wrapped in real journal transactions with fsync-and-verify before promotion, and record IDs must be canonical UUID v4 before touching a path |
+| Vault encryption (`packages/vault-core`) | IMPLEMENTED AND CORRECTNESS-HARDENED — Argon2id (256 MiB / t=3 / p=4) + AES-256-GCM for new records (legacy XChaCha20-Poly1305 stays readable, identified by nonce length) + HKDF-SHA-256 + BIP-39 recovery + write-ahead journal; transactional first-use setup refuses re-initialisation and preserves packaged `vault.id` bytes. Per-vault random salts on both the password and recovery paths. The KDF parameters are pinned as a cross-platform contract with the Kotlin `encrypted-vault` package. **Wave 1** fixed four release blockers: newest-committed-generation header slot selection, authenticated record metadata re-verified on every read, real journal transactions with fsync-and-verify before promotion, and canonical UUID v4 record IDs |
 | Model inference | Bundled llama.cpp only; direct runtime test verified (real answer, 127.0.0.1-only, clean stop) — see `docs/verification/2026-07-30/59_DIRECT_GEMMA.md` |
-| Offline voice | VERIFIED pipeline — bundled Piper synth → bundled Whisper transcribe round trip is verbatim; see `docs/verification/2026-07-30/62_OFFLINE_VOICE.md` |
-| InBharat Audio speech plane | ACCEPTANCE-GATED + DEPLOYED 2026-08-26 — `vendor/Inbharat-audiocpp/` (audio.cpp @ `26dcb5c4`); Qwen3-ASR-0.6B Q8_0 + omnivoice Q8_0 GGUF deployed at `SPEECH/models/`; deployed `audiocpp_cli` runs real ASR (exit 0) + TTS (exit 0, 24 kHz); 30/30 hash-bound acceptance gate green (re-hash of 2 CLIs + 2 models). **Speech-architecture hardening (2026-09):** the production Tauri voice path now goes through a `SpeechRouter` (`apps/desktop/src-tauri/src/speech.rs`) with the explicit `InbharatAudioThenLegacy` policy — production code never talks to a backend module directly. The InBharat route hash-verifies its CLIs/models before first execution and reports buffered-final (not stateful-streaming) semantics; the legacy Whisper/Piper route is wrapped behind the same trait, gains binary/model hash verification, deadline timeouts, and `error:` separation from transcript text. Language tags are canonicalized through the shared `packages/speech-contracts` table (`languages.v1.json`), byte-sync-checked against the Android `VoiceLanguage` mirror by `scripts/check_speech_language_sync.py` in CI; Assamese (`as-IN`) routes only to the IndicConformer family and fails closed when its assets are absent — it is never served by Qwen3. **Live speech matrix on the staged drive 2026-09-15: 19/19 pass** — OmniVoice TTS speaks 15 languages, Qwen3-ASR understands en/hi/hinglish (hinglish transcribes back as correct Hindi in Devanagari), unstaged languages are refused with the truthful provider-table message; full speech-to-speech loop passed with exactly ONE model call (`docs/verification/2026-09-15/116_SPEECH_LANGUAGE_MATRIX.md`) |
-| Recording | IMPLEMENTED WITH ENFORCED PRIVACY — `unoone-recording-policy` crate makes retention decisions exhaustive (20/20 tests); TRANSCRIPT_ONLY/SUMMARY_ONLY retain no audio; temp WAV deleted + verify-checked; zero-samples reports an error. **SUMMARY_ONLY is disabled in the UI** (no summariser exists) until one is implemented |
-| Browser workspace | IMPLEMENTED AS TYPED, VERIFIED ACTIONS — no arbitrary script execution; scheme allowlist; JSON-literal escaping; submit/upload/download require explicit confirmation; real PNG screenshots with SHA-256; 47 deterministic tests (including the 2026-10-03 popup shim: sign-in buttons that open new tabs/popups navigate the same window — live-verified on Gmail on the staged drive). Web-session persistence is surfaced honestly (host WebView2 profile shared across windows and restarts, recorded as a status-only vault note — the dead `BrowserConfig`/`confirmation_tokens` fields are gone). Live-page acceptance journeys are human-gated |
-| Text handling (Indic scripts) | HARDENED — `packages/text-util` provides grapheme-cluster-safe truncation. Eight sites previously sliced `&str` at raw byte offsets, which **panics** mid-character; Devanagari and Bengali code points are 3 bytes, so this crashed on ordinary Hindi/Bengali/Assamese documents. Byte budgets for the model context window remain byte budgets (snapped to cluster boundaries) and truncation notices now report real character counts instead of byte counts |
-| Plaintext elimination (Wave 3) | SHIPPED — migration core (PR #11) AND read-path (PR #15): migrated records are listed with legacy titles, TF-IDF-searched when unlocked, and read via agent fallback. `migrate_plaintext_documents_to_vault` runs against the real drive in a human session (backup first); the drive has not yet been migrated |
-| Document parsing | IMPLEMENTED — PDF (lopdf), DOCX/XLSX/PPTX (zip+quick-xml), TXT/MD/CSV/HTML; TF-IDF keyword search (explicitly NOT described as "semantic") |
-| Browser redirect policy | IMPLEMENTED — `unoone-browser-policy` verdicts (same-origin/registrable → reached, HTTPS→HTTP → failure, cross-origin → surfaced `verified=false`, never a silent success); 13 crate tests; live WebView acceptance human-gated |
-| Android vault repository | SHIPPED CORE (PR #16) — unlock/read/write/tombstone against the Rust vault, proven bidirectionally by cross-platform vectors AND a Rust-generated synthetic-vault fixture; SAF READ|WRITE grants persisted with truthful fallback; SafVaultIO device-gated. Next: integrate into app flows + phone round trip (see docs/verification/2026-08-01/75_REMAINING_WORK_ORDERED.md) |
+| Offline voice | VERIFIED pipeline — bundled Piper synth → bundled Whisper transcribe round trip is verbatim; see `docs/verification/2026-07-30/62_OFFLINE_VOICE.md`. The Windows bundle CI also runs real Whisper/Piper inference on pinned assets |
+| InBharat Audio speech plane | ACCEPTANCE-GATED + DEPLOYED 2026-08-26 — `vendor/Inbharat-audiocpp/` (audio.cpp @ `26dcb5c4`); Qwen3-ASR-0.6B Q8_0 + omnivoice Q8_0 GGUF at `SPEECH/models/`; 30/30 hash-bound acceptance gate green. The production voice path goes through a `SpeechRouter` (`speech.rs`) with the explicit `InbharatAudioThenLegacy` policy; both routes hash-verify their CLIs/models and report buffered-final semantics. Language tags are canonicalized through `packages/speech-contracts` and byte-sync-checked against the Android mirror in CI; Assamese routes only to IndicConformer and fails closed when absent. **Live speech matrix on the staged drive 2026-09-15: 19/19 pass** (`docs/verification/2026-09-15/116_SPEECH_LANGUAGE_MATRIX.md`) |
+| Recording | IMPLEMENTED WITH ENFORCED PRIVACY — `unoone-recording-policy` makes retention decisions exhaustive; TRANSCRIPT_ONLY/SUMMARY_ONLY retain no audio; temp WAV deleted and verify-checked; zero samples reports an error. **SUMMARY_ONLY is disabled in the UI** until a summariser exists |
+| Browser workspace | IMPLEMENTED AS TYPED, VERIFIED ACTIONS — no arbitrary script execution; scheme allowlist; JSON-literal escaping; submit/upload/download require explicit confirmation; real PNG screenshots with SHA-256; the popup shim is live-verified on Gmail. Live-page acceptance journeys are human-gated |
+| Text handling (Indic scripts) | HARDENED — `packages/text-util` provides grapheme-cluster-safe truncation (eight byte-offset slicing sites that panicked on Devanagari/Bengali text were fixed) |
+| Plaintext elimination (Wave 3) | SHIPPED — migration core (PR #11) and read path (PR #15). The 2026-10-04 reload started from a fresh vault; `migrate_plaintext_documents_to_vault` applies to older drives that still hold legacy plaintext documents (run in a human session, backup first) |
+| Document parsing | IMPLEMENTED — PDF (lopdf), DOCX/XLSX/PPTX (zip+quick-xml), TXT/MD/CSV/HTML; TF-IDF keyword search (explicitly not "semantic") |
+| Browser redirect policy | IMPLEMENTED — `unoone-browser-policy` verdicts (same-origin/registrable → reached, HTTPS→HTTP → failure, cross-origin → surfaced `verified=false`, never a silent success); live WebView acceptance human-gated |
+| Android vault repository | SHIPPED — unlock/read/write/tombstone against the Rust vault, proven bidirectionally by cross-platform vectors and a Rust-generated synthetic-vault fixture; integrated into the app flows (PRs #20, #21: the drive vault is the canonical notes/memories store). Remaining: the physical phone ↔ drive ↔ desktop round trip |
 | Accessibility (OCR, Blind View) | IMPLEMENTED — OCR/description via Gemma mmproj; confidence honestly `Option<f32>` (unmeasured, never fabricated) |
-| Security (vault writes) | IMPLEMENTED — vault_write_record Tauri command writes encrypted records; recording and document content encrypted end-to-end |
-| macOS | **NOT BUILT, NOT TESTED** |
+| Security (vault writes) | IMPLEMENTED — `vault_write_record` writes encrypted records; recording and document content encrypted end-to-end |
+| Chat context accuracy | IMPLEMENTED AND TESTED (2026-10-07) — selector, greeting parity, real-core and mounted Chat tests pass locally; desktop Rust in CI. Not yet live-verified on the staged drive |
+| Knowledge, verified learning, coding workspace | IMPLEMENTED AND TESTED (2026-10-07) — each part independently reviewed with all findings fixed; adapter suites pass with the real Linux sandbox; CI green on three OSes. Sandboxed execution is Linux-only; on Windows it is unavailable by design. Not yet staged on the drive or run on Windows hardware |
+| macOS | Rust workspace compiles and unit-tests on `macos-latest` in CI; **no macOS app bundle; not tested on Mac hardware** |
 
-See `docs/verification/2026-09-15/` + `docs/verification/2026-09-16/` for the latest timestamped verification
-packages (docs 105–118). `docs/verification/2026-07-30/` (53 recovery … 73 executive report,
-incl. `72_RELEASE_MATRIX.csv`) is retained as a dated historical snapshot.
-Older evidence documents are retained as dated historical snapshots and must
-be read with their dates; several of their claims were re-verified or
-corrected on 2026-07-30.
+Timestamped verification packages in the repo run through
+`docs/verification/2026-09-16/` (docs 105–118). Later results — the
+2026-10-02…05 desktop work and the 2026-10-07 knowledge/coding change set — are
+recorded in this README, the commit messages, and their CI runs; they have no
+separate evidence documents in the repo. `docs/verification/2026-07-30/`
+(incl. `72_RELEASE_MATRIX.csv`) is a dated historical snapshot; older evidence
+must be read with its dates.
 
 ### CI gate state
 
-`main` is kept green across all gates; the standing set (each lane's own run is the
-evidence, not this paragraph):
+`main` is kept green across all gates; each workflow's own run is the
+evidence, not this paragraph:
 
 - **Desktop CI** — mobile protection, frontend build (Vite), speech
   language-table sync (`scripts/check_speech_language_sync.py`), tool-contract
-  sync (`scripts/check_tool_contract_sync.py`), InBharat Audio Linux
-  ctest + ABI invariant job, Rust fmt/check/test/clippy on
-  **windows-latest, ubuntu-latest, and macos-latest**, secret scan, artifact
-  scan.
-- **Mobile Protection** (own workflow, runs on every push) — the committed
-  tree-hash pointer (`scripts/MOBILE_PROTECTED_TREE`) must equal
+  sync (`scripts/check_tool_contract_sync.py`), InBharat Audio Linux ctest +
+  ABI invariant job, Rust `fmt`/`check`/`test`/`clippy` on **windows-latest,
+  ubuntu-latest and macos-latest**, secret scan, artifact scan. Linux sandbox
+  tests are skipped with a visible warning when the runner lacks bubblewrap.
+- **Mobile Protection** (own workflow, every push) — the committed tree-hash
+  pointer (`scripts/MOBILE_PROTECTED_TREE`) must equal
   `git rev-parse HEAD:android-app/UnoOneAgent`.
-- **Android CI** — invariants, e2e Playwright suite, lint, unit tests, debug
-  APK assembly, on the `android-app/` and contract paths.
-- **Pocket AI Windows Bundle** — builds Power/Dock/Starter together, gates
-  frontend embedding and recording retention, publishes SHA-256 sums.
+- **Android CI** — repository invariants, speech/tool contract sync, Page
+  Agent typecheck/tests/bundle and Playwright e2e, lint, unit tests, debug APK
+  assembly, on the `android-app/` and contract paths.
+- **Distribution CI** — distribution API typecheck and policy tests,
+  Cloudflare Worker bundle, installer PWA typecheck/tests/build, and catalogue
+  signing round-trip plus invalid-payload and tamper-rejection proofs.
+- **Pocket AI Windows Bundle** — strict manifest and recording-retention
+  tests, builds Power/Dock/Starter together in release mode, gates frontend
+  embedding, uploads the portable bundle with SHA-256 sums (14-day artifact),
+  and smoke-tests real Whisper/Piper inference on pinned voice assets.
 
-The two historically red gates were fixed by design, not by weakening:
-
-- **Mobile protection** moved from a workflow-hardcoded commit pin to a
-  committed tree-hash pointer (`scripts/MOBILE_PROTECTED_TREE`) —
-  re-baselining is now an ordinary reviewable commit via
-  `scripts/regen-mobile-golden-hashes.sh` (hashes computed from git blobs so
-  CRLF/CRLF-free checkouts agree).
-- **Android lint** baseline was regenerated after review of every accepted
-  entry; `warningsAsErrors` stays `true`.
+Not yet in CI: the desktop frontend Node test suites (`npm run test:*` in
+`apps/desktop/src`).
 
 ## Architecture
+
+### Android agent pipeline
 
 ```text
 voice / text / floating assistant / accessibility input
@@ -304,10 +311,10 @@ voice / text / floating assistant / accessibility input
                     NO_DETERMINISTIC_MATCH
                              │
                              ▼
-                     ModelTierSelector
+                     ModelTierSelector *
                     ┌────────┴────────┐
                     │                 │
-              E2B (Lite)        E4B (Medium)
+              E2B (Lite)        E4B (Medium) *
               2-3 tools          3-6 tools
               2 steps            4 steps
                     │                 │
@@ -349,16 +356,42 @@ voice / text / floating assistant / accessibility input
                   TTS out
 ```
 
+\* `ModelTierSelector` and the E4B profile are implemented and unit-tested,
+but the production load path currently loads E2B only.
+
+More detail: [Android architecture](docs/ARCHITECTURE.md).
+
+### Desktop (UnoOne Power)
+
+```text
+Start UnoOne.exe / UnoOne Dock ── strict manifest + hash validation
+                │
+                ▼
+UnoOne Power (Tauri 2) ── runs from the digest-verified PowerCache copy
+   ├── React UI: Chat · Coding Task · Knowledge · Memory · Vault · Model · Browser · …
+   ├── harness_bridge ──► vendor/inbharat-harness (L0/L1/L3 routing, tools, audit)
+   │      └── tools: granted-folder fence · host-command consent · browser · preview
+   ├── llama.cpp server (127.0.0.1) ◄── manifest-verified GGUF tier + mmproj
+   ├── SpeechRouter ──► InBharat Audio, then legacy Whisper/Piper
+   └── pai-harness-adapter
+          ├── knowledge records · sealed search · distiller · verification
+          └── coding tasks: ledger · working set · diffs · worktree · preview bridge
+                 └── generated code ──► Linux sandbox only (refused elsewhere)
+                │
+                ▼
+      Encrypted vault on the drive (vault-core: Argon2id + AES-256-GCM)
+```
+
 ### Local model contract
 
-UnoOne has two planning-brain profiles.
+UnoOne Mobile has two planning-brain profiles; the app currently loads Lite.
 
 | Field | Lite (E2B) | Medium (E4B) |
 |---|---|---|
 | Model id | `gemma-4-e2b` | `gemma-4-e4b` |
 | File | `gemma-4-E2B-it.litertlm` | `gemma-4-E4B-it.litertlm` |
 | Runtime | LiteRT-LM | LiteRT-LM |
-| Exact size | `2,588,147,712` bytes | `~3,700,000,000` bytes |
+| Exact size | `2,588,147,712` bytes | `3,659,530,240` bytes |
 | SHA-256 | `181938105e0eefd105961417e8da75903eacda102c4fce9ce90f50b97139a63c` | `0b2a8980ce155fd97673d8e820b4d29d9c7d99b8fa6806f425d969b145bd52e0` |
 | Maximum context | 32,768 tokens | 32,768 tokens |
 | Configured context | 2,048 tokens (Lite) | 4,096 tokens (Medium) |
@@ -369,104 +402,139 @@ UnoOne has two planning-brain profiles.
 | Max browser steps | 0 | 8 |
 | Action temperature | 0.1 | 0.1 |
 | Chat temperature | 0.3 | 0.7 |
-| Tested backend on Xiaomi 14 | CPU fallback | Not yet tested on device |
+| Tested backend on Xiaomi 14 | CPU fallback | Not loaded by the app yet; not tested on device |
 
-The model is selected **before** a task starts and **never switches mid-task**. If E4B fails, the task stops, state is preserved, and the orchestrator offers Lite or retry. `ModelTierSelector` uses command complexity and device RAM to decide: simple deterministic commands always use Lite, compound commands (messaging, calendar, notes, web) use Medium when E4B is available and RAM ≥ 10,240 MB, otherwise fall back to Lite.
+The model is selected **before** a task starts and **never switches mid-task**.
+`ModelTierSelector` is designed to use command complexity and device RAM
+(simple deterministic commands → Lite; compound messaging/calendar/notes/web
+commands → Medium when E4B is installed and RAM allows), but it is not yet
+called by the production load path.
 
 ### Encryption
 
-- **KDF**: Argon2id (256 MiB memory, 3 iterations, parallelism 4) — ✅ implemented in `packages/vault-core`
-- **Cipher**: XChaCha20-Poly1305 (desktop) / AES-256-GCM (Android hardware-accelerated)
-- **Key wrapping**: Password → Argon2id → KEK → wraps random vault master key (allows password changes without re-encryption)
+- **KDF**: Argon2id (256 MiB memory, 3 iterations, parallelism 4) — `packages/vault-core`
+- **Cipher**: AES-256-GCM for every new record on desktop and Android; legacy XChaCha20-Poly1305 records stay readable (identified by nonce length)
+- **Key wrapping**: Password → Argon2id → KEK → wraps a random vault master key (password changes need no re-encryption)
 - **Key isolation**: Master key → HKDF-SHA-256 → per-domain keys (records, journal, indexes, etc.)
 - **Header**: Double-buffered (A/B slots), HMAC-SHA-256 authenticated, constant-time comparison
-- **Recovery**: 24-word BIP-39 mnemonic (NOT UUID fragments) with independent key wrapping
+- **Recovery**: 24-word BIP-39 mnemonic with independent key wrapping
 - **Journaling**: Write-ahead log (PENDING → COMMITTED / ROLLED_BACK) for exFAT crash safety
 - **Deletion**: Tombstone records propagate across platforms
 - **Password-only login**: No username, no email, no cloud account
 - **Memory safety**: Master key zeroed on lock and drop; no passwords in files/logs
-- **Vault writes**: `vault_write_record` Tauri command encrypts content via AES-256-GCM (default) or reads legacy XChaCha20-Poly1305 records; stores in `VAULT/records/`; recording and document content flows through this pipeline
+- **Vault writes**: `vault_write_record` encrypts content with AES-256-GCM and stores it in `VAULT/records/`; recording, document, chat, knowledge and coding-task records flow through vault-core
 
 > Release rule: do not store sensitive data until the current commit passes CI
 > and the physical Pocket AI passes strict on-drive verification.
 
-### Safety Pipeline
+### Safety
 
 ```
-User input → Model → Parser → ToolAction → SafetyGuard → Execution
+User input → Model → Parser → ToolAction → policy gates → Execution
 ```
 
-- **Raw model output never executes tools directly**
-- Three security levels: STANDARD (balanced), RELAXED (reduced), OFF (testing only)
-- Blocked actions: shell_execute, file_delete_system, network_raw_socket, registry_modify
-- Harm detection: system manipulation, data exfiltration, unauthorized access patterns
+- **Raw model output never executes tools directly.**
+- Desktop SafetyGuard levels STANDARD (balanced), RELAXED (reduced), OFF
+  (testing only); blocked actions: `shell_execute`, `file_delete_system`,
+  `network_raw_socket`, `registry_modify`.
+- Desktop file tools are bounded by the granted-folder fence and
+  `process.run` by session host-command consent; agent processes are owned
+  and terminated on lock, removal or exit. In the default full-access lane,
+  confirmations are auto-approved, so desktop risk classes are labels rather
+  than per-call dialogs.
+- Generated code from coding tasks and verification runs only inside the
+  Linux sandbox; Windows and macOS refuse before spawning.
+- Android risk classes (DIRECT / CONFIRM / STRONG_CONFIRM / blocked) come from
+  the CI-synced tool contract. Full tables: [docs/SAFETY.md](docs/SAFETY.md).
 
 ## Quick Start
 
 ### Android (Mobile)
 
 ```bash
-# Clone and build
 git clone https://github.com/inbharatai/PAI.V2.git
-cd PAI.V2
+cd PAI.V2/android-app/UnoOneAgent
 ./gradlew assembleDebug
-# Install on device
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ### Desktop (Power)
 
 ```bash
-# Prerequisites: Rust, Node 24+, USB drive formatted exFAT with UNOONE structure
+# Prerequisites: Rust (stable), Node 24 LTS; on Windows, MSVC Build Tools.
 
-# Build frontend
+# 1. Build the frontend (generate_context! embeds it, so it must exist before any cargo command)
 cd apps/desktop/src
-npm install
+npm ci
 npm run build
 
-# Build all three portable Windows applications
+# 2. Build all three portable Windows applications
 cd ../../..
 cargo build --release \
   -p unoone-power \
   -p unoone-dock-windows \
   -p unoone-starter-windows
 
-# Or run in dev mode
-cd apps/desktop/src
-npm run tauri dev
+# Or run Power from source with the embedded frontend
+cargo run -p unoone-power
 ```
 
-On a prepared Pocket AI, Windows users start at `Start UnoOne.exe`. The
-launcher offers to install Dock for automatic opening on later insertions.
+`apps/desktop/src/package.json` has no `tauri` script; hot-reload development
+needs the Tauri CLI installed separately. On a prepared Pocket AI, Windows
+users start at `Start UnoOne.exe`, which offers to install Dock for automatic
+opening on later insertions.
+
+### Update a Pocket AI drive
+
+The drive is an output, not a git input: when desktop code lands, only the
+three executables change. `scripts/Stage-PocketAiDrive.ps1` stages them from a
+green **Pocket AI Windows Bundle** CI artifact: it verifies the bundle's
+SHA-256 sums, backs up the current executables to
+`RECOVERY\package-backups\<timestamp>`, copies the new ones, gates frontend
+embedding, regenerates `manifest.json`, and runs `Start UnoOne.exe --verify-only`.
+Models, runtimes, `VAULT` and `CONFIG` are untouched.
+
+```powershell
+# From a checkout at the bundle's commit, with apps/desktop/src/dist built:
+powershell -ExecutionPolicy Bypass -File scripts\Stage-PocketAiDrive.ps1 `
+    -VaultRoot "E:\" `
+    -BundleDir "$env:USERPROFILE\Downloads\pocket-ai-windows-x86_64-<sha>"
+```
+
+Quit UnoOne first and back up `VAULT` before running a new build against it.
 
 ### USB Drive Setup
 
-The USB drive must be formatted exFAT (FAT32 cannot hold the 7.14 GiB 12B model). Insert it and the desktop app detects it automatically via manifest validation.
+The USB drive must be formatted exFAT (FAT32 cannot hold the 7.14 GiB 12B
+model). The desktop app detects it automatically through manifest validation.
+Layout (generated and checked by `scripts/New-UnoOneManifestV2.ps1`):
 
-Expected structure:
 ```
 UNOONE/
 ├── Start UnoOne.exe            # on-drive fallback launcher
-├── manifest.json              # Vault metadata (versioned, relative paths)
-├── VERSION                    # e.g. "0.5.0-alpha"
+├── manifest.json               # strict schema v2: every asset's path, size, SHA-256
+├── VERSION
 ├── APPS/
 │   ├── WINDOWS/
 │   │   ├── UnoOnePower.exe
 │   │   └── UnoOneDock.exe
-│   └── MACOS/
+│   └── ANDROID/
+│       └── UnoOne.apk          # recorded for tamper-evidence (kind MOBILE_APP)
 ├── RUNTIMES/
-│   ├── WINDOWS/
-│   │   ├── CUDA/              # llama.cpp CUDA 12.4 (NVIDIA GPU)
-│   │   ├── CPU/               # llama.cpp CPU (AVX2+ fallback)
-│   │   └── VULKAN/            # llama.cpp Vulkan (AMD/Intel GPU)
-│   └── MACOS/
-│       └── METAL/             # llama.cpp Metal (Apple Silicon)
+│   └── WINDOWS/
+│       ├── CPU/                # llama.cpp CPU
+│       ├── CUDA/               # llama.cpp CUDA (NVIDIA)
+│       ├── VULKAN/             # llama.cpp Vulkan (AMD/Intel)
+│       ├── VOICE/              # legacy Whisper / Piper runtimes
+│       └── AUDIO/              # InBharat Audio (audio.cpp) runtime
 ├── MODELS/
-│   ├── MOBILE/                # Android E2B/E4B model packages
+│   ├── MOBILE/                 # Android E2B/E4B .litertlm models
 │   └── DESKTOP/
-│       └── Gemma-12B/
-│           ├── gemma-4-12B-it-Q4_K_M.gguf  (7.14 GiB)
-│           └── mmproj-gemma-4-12B-it-bf16.gguf (167 MiB)
+│       ├── Gemma-12B/          # gemma-4-12B-it-Q4_K_M.gguf + mmproj
+│       └── …                   # optional E4B / E2B tiers, each with its own mmproj
+├── SPEECH/
+│   ├── config/                 # inbharat-audio.v1.json
+│   └── models/                 # Qwen3-ASR / omnivoice GGUF
 ├── VAULT/
 │   ├── identity/vault.id
 │   ├── header/
@@ -479,11 +547,13 @@ UNOONE/
 ├── CONFIG/
 ├── RECOVERY/
 ├── UPDATES/
-└── LOGS/
+├── LOGS/
+└── SOURCE/                     # optional: git archive of the staged commit
 ```
 
 UnoOne Dock and the desktop app discover the pen drive by:
-1. Scanning all removable drives (WMI on Windows, `/Volumes/` on macOS)
+1. Scanning removable drives via WMI (if WMI returns nothing, the desktop app
+   probes drive letters `D:`–`P:` for an `UNOONE` folder — candidates only)
 2. Validating schema-v2 `manifest.json`, `VERSION`, `vault.id`, architecture,
    sizes, and SHA-256 for every required application/runtime/model
 3. Rejecting absolute/traversal paths, symlinks, junctions, reparse points,
@@ -492,37 +562,40 @@ UnoOne Dock and the desktop app discover the pen drive by:
 ## Project Structure
 
 ```
-PAI/
-├── android-app/UnoOneAgent/    # V2 agent + Pocket AI USB support (v2 golden baseline)
-├── packages/
-│   ├── core-contracts/           # Kotlin multiplatform contracts
-│   ├── encrypted-vault/          # Kotlin Argon2id + XChaCha20-Poly1305 vault engine (Android)
-│   └── vault-core/               # Rust vault library (desktop + shared test vectors)
-├── platform-adapters/
-│   └── android/                  # USB vault connector, recording engine
+PAI.V2/
+├── android-app/UnoOneAgent/      # Android app, 16 Gradle modules (mobile-protected tree)
 ├── apps/
-│   ├── desktop/                  # Tauri 2 + React 19 desktop app
-│       ├── src/                  # React frontend (13 components)
-│       └── src-tauri/            # Rust backend (16 modules: main, startup, llama, speech, voice, bharat_audio, capability, harness_bridge, agent, safety, recording, browser, documents, document_migration, accessibility, security)
+│   ├── desktop/
+│   │   ├── src/                  # React 19 frontend: 15 components, src/lib, tests/
+│   │   └── src-tauri/            # Rust backend (UnoOne Power, 27 modules)
 │   ├── dock/windows/             # per-user Windows insertion monitor
 │   └── starter/windows/          # on-drive fallback launcher
-├── packages/usb-manifest/        # shared strict schema-v2 validator
-├── scripts/
-│   ├── regen-mobile-golden-hashes.sh  # re-baseline the Android protected tree
-│   ├── MOBILE_PROTECTED_TREE          # expected tree hash (CI compares HEAD:android-app/UnoOneAgent)
-│   └── MOBILE_GOLDEN_HASHES.txt        # per-file blob hashes of the protected tree
-├── docs/
-│   ├── EVIDENCE_AUDIT.md         # Honest status of every feature
-│   └── MOBILE_GOLDEN_BASELINE.md  # Frozen mobile baseline documentation
-├── .github/workflows/
-│   ├── android-ci.yml
-│   ├── desktop-ci.yml            # Rust CI: fmt, check, test, clippy (Win+Linux+macOS)
-│   └── distribution-ci.yml
-├── vendor/                       # Vendored InBharat universal planes (self-contained)
-│   ├── inbharat-harness/         # Universal Rust control/text plane (nested workspace)
-│   │   └── crates/core/          # inbharat-harness-core: routing, providers, tools, execution
-│   └── Inbharat-audiocpp/        # Universal C++ speech plane (CMake; STT/TTS/KWS engine)
-└── STATUS.md
+├── packages/
+│   ├── pai-harness-adapter/      # product adapters: memory/model, knowledge, coding tasks, Linux sandbox
+│   ├── capability-contracts/     # capability + knowledge record contracts
+│   ├── vault-core/               # Rust vault library (+ cross-platform test vectors)
+│   ├── encrypted-vault/          # Kotlin vault engine (Android)
+│   ├── core-contracts/           # Kotlin contracts
+│   ├── usb-manifest/             # strict schema-v2 validator
+│   ├── tool-contracts/           # tools.v1.json, the CI-synced tool/risk contract
+│   ├── speech-contracts/         # languages.v1.json + SpeechBackend contract
+│   ├── runtime-select/           # runtime selection
+│   ├── recording-policy/         # recording retention decisions
+│   ├── recording-engine/         # Kotlin recording engine
+│   ├── browser-policy/           # browser redirect verdicts
+│   ├── document-migration/       # plaintext → vault migration
+│   └── text-util/                # grapheme-safe truncation
+├── platform-adapters/android/    # USB vault connector
+├── distribution/                 # distribution API + catalogue
+├── installer-pwa/                # installer PWA (downloads locked without a production key)
+├── web-runtime/                  # Page Agent web runtime (bundled into Android)
+├── SPEECH/config/                # InBharat Audio configuration
+├── vendor/
+│   ├── inbharat-harness/         # universal Rust control plane (nested workspace)
+│   └── Inbharat-audiocpp/        # universal C++ speech plane (CMake)
+├── scripts/                      # manifest/staging tools, contract sync checks, mobile baseline
+├── docs/                         # architecture, safety, models, speech, verification evidence
+└── .github/workflows/            # desktop-ci, mobile-protection, android-ci, distribution-ci, pocket-ai-windows
 ```
 
 ### Vendored universal planes
@@ -535,63 +608,73 @@ universal code stays in the vendored planes and is reused across InBharat
 products.
 
 - **`vendor/inbharat-harness/`** — the universal Rust control/text plane. Its
-  own nested Cargo workspace (`vendor/inbharat-harness/Cargo.toml`) provides
-  `inbharat-harness-core` (routing, session, the provider model
-  `ModelProvider` / `MemoryProvider` / `ToolProvider` / `PermissionProvider` /
-  `SafetyProvider` / `ConfirmationProvider` / `VerificationProvider` /
-  `SandboxProvider`, and deterministic L1 tool execution). The desktop backend
-  and `pai-harness-adapter` depend on it via a path dependency:
-  `vendor/inbharat-harness/crates/core`. The outer workspace `exclude`s this
+  own nested Cargo workspace provides `inbharat-harness-core` (routing,
+  session, the provider model `ModelProvider` / `MemoryProvider` /
+  `ToolProvider` / `PermissionProvider` / `SafetyProvider` /
+  `ConfirmationProvider` / `VerificationProvider` / `SandboxProvider`, and
+  deterministic L1 tool execution). The desktop backend and
+  `pai-harness-adapter` depend on it via a path dependency
+  (`vendor/inbharat-harness/crates/core`). The outer workspace `exclude`s this
   directory so the vendored crate resolves `*.workspace = true` inheritance
-  against its *own* inner workspace root, not the outer one. The Harness core
-  deliberately imports **no** Tauri / UNOONE / Pocket AI / vault code — only
-  the adapter adds product concerns.
+  against its own inner workspace root. The Harness core imports **no**
+  Tauri / UNOONE / Pocket AI / vault code — only the adapter adds product
+  concerns.
 - **`vendor/Inbharat-audiocpp/`** — the universal C++ speech plane (CMake
-  build): streaming/edge STT, TTS, and keyword-spotting. It ships as a
+  build): streaming/edge STT, TTS, and keyword spotting. It ships as a
   standalone runtime binary on Pocket AI and imports **no** UNOONE UI or
   product logic.
 
-To rebuild the universal planes from their canonical sources instead of the
-vendored copies, replace `vendor/inbharat-harness` and `vendor/Inbharat-audiocpp`
-with the current trees from the InBharat Harness and InBharat Audio repositories;
-the two path dependencies above resolve unchanged.
+To rebuild the universal planes from their canonical sources, replace
+`vendor/inbharat-harness` and `vendor/Inbharat-audiocpp` with the current trees
+from the InBharat Harness and InBharat Audio repositories; the path
+dependencies resolve unchanged.
 
 ### Desktop Rust Backend (`apps/desktop/src-tauri/src/`)
 
-| Module | Purpose | Status |
-|--------|---------|--------|
-| `main.rs` / `startup.rs` | Pocket AI detection, strict validation, startup state machine, removal cleanup, hardware profiling, vault-core integration | IMPLEMENTED |
-| `llama.rs` | Manifest-only model/runtime discovery, CUDA/Metal/Vulkan/CPU selection, verified server identity, mmproj vision | IMPLEMENTED |
-| `speech.rs` | SpeechRouter: explicit `InbharatAudioThenLegacy` policy, hash-verified backend selection, buffered-final semantics | IMPLEMENTED |
-| `voice.rs` | Voice capability probes (STT/TTS status, language availability) over the router | IMPLEMENTED |
-| `bharat_audio.rs` | InBharat Audio adapter: audio.cpp ASR (Qwen3-ASR) + TTS (omnivoice), hash-bound acceptance gate, deployed-runtime SHA-256 verification, canonical→CLI language mapping | IMPLEMENTED (live speech matrix 19/19 on the staged drive) |
-| `capability.rs` | Host hardware/capability profile shown in the UI (CPU/RAM/GPU, vision probe) | IMPLEMENTED |
-| `harness_bridge.rs` | The production chat path: routes L0/L1/L3 through the vendored `inbharat-harness` with the model-visible capability contract | IMPLEMENTED (live-verified) |
-| `agent.rs` | Full-access agent lane: fs/process/workspace tools, budgets, audit, `agent.spawn` sub-agents | IMPLEMENTED (live-verified) |
-| `safety.rs` | SafetyGuard (STANDARD/RELAXED/OFF), blocked actions, harm detection | IMPLEMENTED |
-| `recording.rs` | Desktop recording: cpal microphone capture, hound WAV encoding, vault-core AES-256-GCM encryption, 4 privacy levels | IMPLEMENTED |
-| `browser.rs` | Browser workspace: Tauri WebView bridge (no Playwright), DOM query/click/type/extract/fill/scroll/screenshot | IMPLEMENTED |
-| `documents.rs` | Document processing: PDF (lopdf), DOCX/XLSX/PPTX (zip+quick-xml), TXT/MD/CSV/HTML, TF-IDF search | IMPLEMENTED |
-| `document_migration.rs` | Plaintext→vault migration core (Wave 3) and read path | IMPLEMENTED |
-| `accessibility.rs` | Blind View, OCR and image description via Gemma mmproj, snapshot pipeline, screen capture | IMPLEMENTED |
-| `security.rs` | Manifest-integrity validation, SHA-256, vault-core encryption wiring, crash recovery, emergency lock | IMPLEMENTED |
+| Module | Purpose |
+|--------|---------|
+| `main.rs` / `startup.rs` | Pocket AI detection, strict validation, startup state machine, removal cleanup, hardware profiling, vault-core integration, command registration |
+| `boot_trace.rs` | Boot waterfall trace (`%TEMP%\unoone-logs\boot-trace.log`) |
+| `llama.rs` / `gguf_meta.rs` | Manifest-only model/runtime discovery, CUDA/Vulkan/CPU selection, verified server identity, mmproj vision; GGUF metadata and host-adaptive context budgets |
+| `desktop_model_policy.rs` | Model admission against total RAM (12B/E4B/E2B tiers) |
+| `speech.rs` / `voice.rs` / `bharat_audio.rs` | SpeechRouter (`InbharatAudioThenLegacy`), voice capability probes, the InBharat Audio adapter with hash-bound acceptance |
+| `capability.rs` | Host hardware/capability profile shown in the UI |
+| `harness_bridge.rs` (+ `chat_context.rs`) | The production chat path through the vendored harness; std-only chat-context assembly (greeting guard, whole history pairs, byte budgets) |
+| `agent.rs` | Full-access agent lane: tools, budgets, audit, `agent.spawn` sub-agents |
+| `granted_fs.rs` | Multi-root granted-folder fence for file tools |
+| `desktop_process.rs` | Session host-command consent and owned-process lifecycle |
+| `doc_writer.rs` | Pure-Rust PDF/DOCX/MD/TXT writers for `doc.create` |
+| `preview.rs` | `web.preview` live website preview |
+| `chat_memory.rs` | Persistent conversation memory (vault `MESSAGE` records) |
+| `env_learning.rs` | Bounded environment-learning records from completed agent runs |
+| `tool_contract_pin.rs` | Pins every registered desktop tool to `packages/tool-contracts/tools.v1.json` |
+| `coding_task_commands.rs` | Coding Task Tauri commands (main-window-only for state changes) |
+| `knowledge_commands.rs` | Knowledge and task-learning Tauri commands |
+| `safety.rs` | SafetyGuard (STANDARD/RELAXED/OFF), blocked actions, harm detection |
+| `recording.rs` | Recording: cpal capture, WAV encoding, vault encryption, 4 privacy levels |
+| `browser.rs` | Browser workspace: typed WebView bridge actions |
+| `documents.rs` / `document_migration.rs` | Document parsing and TF-IDF search; plaintext→vault migration and read path |
+| `accessibility.rs` | Blind View, OCR and image description via Gemma mmproj, screen capture |
+| `security.rs` | Manifest-integrity validation, SHA-256, encryption wiring, crash recovery, emergency lock |
 
 ### Desktop React Frontend (`apps/desktop/src/src/`)
 
 | Component | Purpose | Status |
 |-----------|---------|--------|
-| `UnlockScreen` | Password-only vault unlock, USB detection, new vault setup | IMPLEMENTED (live-unlocked on the staged drive each acceptance run) |
-| `Sidebar` | View navigation (Chat, Recordings, Memory, Vault, Model, Browser, Documents, Accessibility, Capabilities, Hardware, Settings) | IMPLEMENTED (live-driven) |
-| `ChatView` | Gemma 4 conversation via the harness bridge (agent lane, attachments, voice picker 16 languages); persistent conversation memory (vault `MESSAGE` records — save after each completed turn, 30 most recent restored at session start with an honest banner) | IMPLEMENTED (live-verified: chat, STS loop, vision attachments, chunked TTS; chat-memory recall mark live in the boot trace) |
-| `RecordingView` | Recording with type/privacy, pause/resume/bookmarks, vault encryption | IMPLEMENTED (backend wired, needs UI testing) |
-| `MemoryExplorer` | 7 memory types, search, cross-platform sync | BUILDS_NOT_RUNTIME_TESTED |
-| `VaultView` | Vault status, emergency lock | BUILDS_NOT_RUNTIME_TESTED |
-| `ModelManager` | Model server start/stop, cache status, context profile | IMPLEMENTED (live-driven each acceptance run) |
-| `BrowserWorkspace` | URL bar, WebView viewport, DOM bridge actions | IMPLEMENTED (live-verified with real pages on the agent lane) |
-| `DocumentsView` | Document import, search (PDF/DOCX/XLSX/PPTX/TXT/MD/CSV/HTML) | IMPLEMENTED (needs UI testing) |
-| `AccessibilityView` | Blind View, OCR, camera blind-aid describe + live narration, high contrast | IMPLEMENTED (OCR live-verified; describe lane defect #44 fix in PR #49, re-verification pending) |
+| `UnlockScreen` | Password-only vault unlock, USB detection, new vault setup | IMPLEMENTED (live-unlocked on the staged drive) |
+| `Sidebar` | Navigation: Chat, Recordings, Memory, Vault, Model, Browser, Documents, Accessibility, Capabilities, Hardware, Settings, Coding Task, Knowledge | IMPLEMENTED |
+| `ChatView` | Conversation via the harness bridge (agent lane, attachments, 16-language voice picker); restored history shown with per-task model context | IMPLEMENTED (live-verified before the 2026-10-07 context changes; mounted tests pass) |
+| `CodingTaskView` | Coding tasks: plan, gates, per-file review, apply, preview, Learning panel | IMPLEMENTED (mounted tests; not yet run in the real app) |
+| `KnowledgeView` | Knowledge Explorer, Detail, Distiller, Export | IMPLEMENTED (mounted tests; not yet run in the real app) |
+| `RecordingView` | Recording with type/privacy, pause/resume/bookmarks, vault encryption | IMPLEMENTED (needs UI testing) |
+| `MemoryExplorer` | Memory types and search | IMPLEMENTED (search fixed 2026-10-07; mounted tests) |
+| `VaultView` | Vault status, emergency lock | BUILDS, NOT RUNTIME-TESTED |
+| `ModelManager` | Model server start/stop, cache status, context profile | IMPLEMENTED (live-driven) |
+| `BrowserWorkspace` | URL bar, WebView viewport, DOM bridge actions | IMPLEMENTED (live-verified) |
+| `DocumentsView` | Document import and search | IMPLEMENTED (needs UI testing) |
+| `AccessibilityView` | Blind View, OCR, camera blind-aid describe + narration, high contrast | IMPLEMENTED (OCR live-verified; the describe-lane defect #44 fix re-verified on the re-staged drive) |
 | `CapabilityProfile` / `HardwareProfile` | Host capability/hardware report | IMPLEMENTED |
-| `SettingsView` | FullAccess agent toggle, accessibility settings | IMPLEMENTED |
+| `SettingsView` | FullAccess agent toggle, host commands, folder grants, accessibility | IMPLEMENTED |
 
 ## Model Verification
 
@@ -605,219 +688,202 @@ the two path dependencies above resolve unchanged.
 | Quantisation | Q4_K_M |
 | Source | Google Gemma 4 12B IT, GGUF Q4_K_M by llama.cpp community |
 | Licence | [Gemma Terms of Use](https://ai.google.dev/gemma/terms) |
-| Inference verified | Live on the staged drive (2026-09-15): chat, STS one-call loop, OCR (verbatim text read back), vision describe (post-defect-#44 fix), multi-agent tool runs. Re-verified from the recovered Desktop package (2026-10-05): manifest-valid launch, GPU model load, SSE tool call, and clean local health check. |
-| Native context (read from the artifact) | **131,072 tokens** — `gemma4.context_length` in the GGUF header, parsed by `apps/desktop/src-tauri/src/gguf_meta.rs` (verified live against the staged drive model 2026-10-02) |
-| Session context | **Host-adaptive and model-adaptive** — `start_server` clamps the requested context to (1) the artifact's trained context and (2) the host RAM tier (≥24 GiB → 32,768; ≥12 GiB → 16,384; else 4,096), with every clamp reason written to `unoone-logs/llama-server.log` and shown in the Model panel's "Adaptive context budget" row. The Model panel offers the artifact's native context as a dropdown option whenever it exceeds the tier ladder. Unreadable artifact metadata is surfaced as "unverified", never guessed |
-| KV-cache cost | Derived from the artifact's shape metadata (48 layers, 16 KV heads, 512 head_dim → ~0.8 MiB/token at q8_0): 32,768 tokens ≈ 25.5 GiB, which is why the 64 GiB dev host tops out at 32K rather than 131K — the estimate is displayed, not hidden |
-| Long conversations | **Trimmed to the granted window, visibly** — `llama.rs::trim_history_to_budget` drops the *oldest* turns first (never the system prompt, tools, or the current user turn) so prompt + response reserve fit the session window; the agent path reports `context_note` on the reply and the Harness path caps its history by the same granted window (newest turns kept, oldest dropped), surfacing the note in the chat step trail. A single turn larger than the window is still sent — the server's error is the honest outcome, silently dropping the task is not |
+| Inference verified | Live on the staged drive (2026-09-15): chat, one-call speech-to-speech loop, OCR, vision describe, multi-agent tool runs. Re-verified from the recovered desktop package (2026-10-05): manifest-valid launch, GPU model load, SSE tool call, clean local health check |
+| Native context (read from the artifact) | **131,072 tokens** — `gemma4.context_length`, parsed by `gguf_meta.rs` |
+| Session context | **Host-adaptive** — `start_server` clamps the requested context to the artifact's trained context and the host RAM tier (≥24 GiB → 32,768; ≥12 GiB → 16,384; else 4,096), logging every clamp reason and showing it in the Model panel. Unreadable metadata is surfaced as "unverified", never guessed |
+| KV-cache cost | Derived from the artifact's shape (48 layers, 16 KV heads, 512 head_dim → ~0.8 MiB/token at q8_0): 32,768 tokens ≈ 25.5 GiB, displayed in the UI |
+| Long conversations | **Trimmed to the granted window, visibly** — oldest turns are dropped first (never the system prompt, tools, or the current user turn) and the reply carries a context note |
 | Source = Destination SHA-256 | ✅ Exact match |
 
 ### Desktop model ladder (12B / E4B / E2B)
 
-The package manifest may declare three desktop GGUF tiers — the flagship
-12B (`gemma-4-12B-it-Q4_K_M.gguf`, 7.14 GiB), Medium E4B
-(`4,977,171,584` B), and Lite E2B (`3,106,738,272` B), each with its
-own same-tier mmproj projector (`desktop_model_policy::tier` never
-attaches a 12B projector to an E4B artifact). Model Manager lists
-whatever tiers the manifest declares and the host admits:
-
-- **Admission (`apps/desktop/src-tauri/src/desktop_model_policy.rs`)**:
-  a tier boots only if the host's **TOTAL RAM** clears both the tier
-  floor (**E2B 4 GiB, E4B 8 GiB, 12B 16 GiB**) and the footprint budget
-  (weights ×1.1 + projector + KV estimate + 1 GiB ≤ total). Invalid
-  measurements fail closed; a missing tier is never silently downloaded.
+The package manifest may declare three desktop GGUF tiers — the flagship 12B
+(`gemma-4-12B-it-Q4_K_M.gguf`, 7.14 GiB), Medium E4B (`4,977,171,584` B), and
+Lite E2B (`3,106,738,272` B), each with its own same-tier mmproj projector.
+Model Manager lists whatever tiers the manifest declares and the host admits:
+a tier boots only if the host's **total RAM** clears both the tier floor
+(**E2B 4 GiB, E4B 8 GiB, 12B 16 GiB**) and the footprint budget
+(`apps/desktop/src-tauri/src/desktop_model_policy.rs`).
 
 ### Desktop dependencies and build boundary
 
-The portable app uses the system WebView and Rust libraries for its application
-logic. Model inference remains a manifest-verified llama.cpp runtime shipped on
-Pocket AI. This repository does not claim that arbitrary local Application
-Control policies will allow unsigned build scripts or binaries: Windows bundle
-CI is the reproducible build path, and release signing plus a real prepared-host
-insertion test remain mandatory production gates.
+The portable app uses the system WebView and Rust libraries for its
+application logic. Model inference remains a manifest-verified llama.cpp
+runtime shipped on Pocket AI. This repository does not claim that arbitrary
+local Application Control policies will allow unsigned build scripts or
+binaries: Windows bundle CI is the reproducible build path, and release
+signing plus a real prepared-host insertion test remain production gates.
 
-**Windows application identity** (2026-10-02): all three shipped executables
-embed the UnoOne brand icon (rendered from the same `favicon.svg` brand mark
-the in-app UI uses — no redesign) as a multi-resolution resource. `UnoOnePower.exe`
-embeds it through Tauri's resource pipeline from `apps/desktop/src-tauri/icons/icon.ico`
-(16/24/32/48/64/128/256 px), which is what the taskbar, Alt+Tab and the title bar
-show, because the Tauri window is owned by that same executable — no launcher,
-helper or WebView host owns it, so no AppUserModelID override is needed.
-`Start UnoOne.exe` and `UnoOneDock.exe` embed the same icon via a `winresource`
-build script. The taskbar/window face was previously the Tauri placeholder stub
-(a 126-byte 32×32 .ico), which Windows rendered as the generic white icon.
-Build note: `tauri_build` re-embeds the icon only when `tauri.conf.json` changes
-— after replacing icon files in an existing target dir, touch the config or
-build clean; CI's fresh checkout is unaffected.
+All three shipped executables embed the UnoOne brand icon (multi-resolution
+`apps/desktop/src-tauri/icons/icon.ico`; Dock and Starter via `winresource`).
+`tauri_build` re-embeds the icon only when `tauri.conf.json` changes — after
+replacing icon files in an existing target dir, touch the config or build
+clean.
 
 ## Tests
 
 ```bash
-# Core contracts (9 tests)
-cd packages/core-contracts && ./gradlew test
+# Rust workspace — what Desktop CI runs on Windows, Ubuntu and macOS
+# (build apps/desktop/src first: npm ci && npm run build)
+cargo fmt --check
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
 
-# Vault core — Rust (CI only, WDAC blocks local builds)
-cd packages/vault-core && cargo test
+# Product adapter incl. knowledge + coding workspace. On Linux with bubblewrap the
+# 50 sandbox tests run for real; UNOONE_REQUIRE_ISOLATION=1 forbids skipping them.
+UNOONE_REQUIRE_ISOLATION=1 cargo test -p pai-harness-adapter --lib
 
-# Encrypted vault — Kotlin (17 tests)
-cd packages/encrypted-vault && ./gradlew test
+# Desktop frontend
+cd apps/desktop/src
+npm ci && npm run build && npm run lint
+npm run test:context && npm run test:context:parity && npm run test:context:core
+# Mounted UI suites need a separate jsdom@26.1.0 tool root (see tests/*-README.md):
+npm run test:context:mounted && npm run test:coding-task && npm run test:knowledge
 
-# Android app (~550 JVM tests + 42 instrumented)
-cd android-app/UnoOneAgent && ./gradlew test
-
-# Desktop CI (GitHub Actions)
-# .github/workflows/desktop-ci.yml
-# - Mobile protection check (committed tree-hash pointer)
-# - Frontend build (Vite)
-# - Rust check/test/clippy on Windows + macOS
-# - Secret scan
-# - Artifact scan (no model binaries in git)
+# Kotlin packages and Android app
+cd packages/core-contracts && ./gradlew test     # 10 tests
+cd packages/encrypted-vault && ./gradlew test    # 19 tests
+cd android-app/UnoOneAgent && ./gradlew test     # ≈920 JVM unit tests; 60 instrumented tests in androidTest
 ```
+
+Test counts for the Kotlin packages and Android app are `@Test` counts from
+the source (2026-10-07).
 
 ## Latest verified results
 
+### Knowledge and coding workspace (2026-10-07, `31c7d1d` + `05baa79`)
+
+| Gate | Result |
+|---|---|
+| Desktop CI on `05baa79` | Rust `fmt`/`check`/`test`/`clippy` green on windows-latest, ubuntu-latest, macos-latest; frontend build, audio ctest, contract syncs, secret and artifact scans green |
+| Pocket AI Windows Bundle on `05baa79` | Release build of Power/Dock/Starter on real Windows (MSVC), frontend-embedding gate and voice smoke test green |
+| Product adapter, real Linux sandbox (Linux x86_64, bubblewrap 0.10) | 179 passed, 1 ignored helper; 50 sandbox tests ran for real (strict mode, parallel) |
+| Windows-style CRLF checkout (simulated) | Adapter 179 passed, contracts 13, desktop glue 10 + 15 |
+| Frontend (Node 24) | Build and lint pass; context 53, parity 458, real-core 44, mounted Chat 23, Coding Task 25, Knowledge 24 |
+| Clippy `-D warnings` | Adapter and contracts clean for the Linux, Windows and macOS targets |
+| Not verified | Running the new screens on Windows hardware, real Tauri IPC/WebView2, the local model with these changes, and the 40-task held-out acceptance suite |
+
 ### Desktop resilience and autonomous-agent verification (2026-10-05)
 
-The recovery and runtime changes were exercised on the target Windows laptop,
-not inferred from build output:
+Exercised on the target Windows laptop, not inferred from build output:
 
 | Gate | Result |
 |---|---|
 | GPU identity | NVIDIA GeForce RTX 5050 Laptop GPU, **8,151 MiB** total VRAM reported by `nvidia-smi`; the earlier 4 GB WMI value was not used |
 | Inference topology | llama-server starts with `--parallel 1`, a 16,384-token session context, full available GPU offload, and q8_0 KV cache |
-| Throughput | 128-token live completion measured **9.75 tokens/s**, up from approximately **6.1 tokens/s** with four competing slots on this machine |
+| Throughput | 128-token live completion measured **9.75 tokens/s**, up from approximately **6.1 tokens/s** with four competing slots |
 | Autonomous tool turn | Live request completed in **6.23 s** with `finish_reason: tool_calls`, selected `fs.list`, and returned valid structured arguments |
-| Long-running generations | SSE activity refreshes a 180 s idle timeout; a distinct 12-minute hard ceiling remains, so active work is not killed merely because total generation time crosses the old fixed deadline |
-| USB-safe launch | Starter/Dock launch the digest-verified host-cached Power executable and pass the original package root explicitly; no executable is run directly from the unstable USB path |
-| Recovered local package | Desktop copy passes `Start UnoOne.exe --verify-only` with `valid=true` and zero failures; incomplete recovery checkpoints are intentionally excluded from the manifest |
-| Regression gates | Desktop suite **275/275**, harness-bridge subset **43/43**, adapter suite **27/27**, strict Rust clippy (`-D warnings`), and release build all pass |
+| Long-running generations | SSE activity refreshes a 180 s idle timeout; a distinct 12-minute hard ceiling remains |
+| USB-safe launch | Starter/Dock launch the digest-verified host-cached Power executable and pass the original package root explicitly |
+| Recovered local package | Desktop copy passes `Start UnoOne.exe --verify-only` with `valid=true` and zero failures |
+| Regression gates (pre-2026-10-07 code) | Desktop suite 275/275, harness-bridge subset 43/43, adapter suite 27/27, strict clippy, and release build passed |
 
 The USB device itself still produced Windows Event 51/153 and UASPStor 129
-transport resets under load. These code changes make UnoOne safer and more
-recoverable around that failure; they do not relabel a hardware/transport fault
-as a Docker or application defect.
+transport resets under load. These changes make UnoOne safer and more
+recoverable around that failure; they do not relabel a hardware fault as an
+application defect.
 
-### Speech + Android hardening cycle (branch `speech/universal-audio-hardening`, 2026-09-07)
+### Speech + Android hardening cycle (2026-09-07)
 
 Host (Windows 11, MSVC, Rust 1.93) and emulator (AVD "Medium Phone", API
-36.1, x86_64) evidence from the speech-architecture hardening cycle:
+36.1, x86_64) evidence:
 
 | Gate | Result |
 |---|---|
-| Android host JVM unit tests (touched modules: app, modelmanager, voice, languagepacks, safetyguard, safety) | BUILD SUCCESSFUL, 2026-09-07 |
-| Language-pack install, all 7 baseline packs (en/hi/bn/ta/te/kn/ml), size + SHA-256 verified on-device | `LanguagePackInstallTest` green, run twice (gradle + direct instrumentation); fixed first: 5 Indic TTS pins re-pinned after an upstream re-upload (+76 bytes each, new hashes verified by a real 114 MB download), gemma-4-E4B rounded size corrected |
-| Assamese refusal (planned pack, no qualified models) | Asserted in the same test: install returns Failure, state stays not-installed |
+| Android host JVM unit tests (touched modules: app, modelmanager, voice, languagepacks, safetyguard, safety) | BUILD SUCCESSFUL |
+| Language-pack install, all 7 baseline packs (en/hi/bn/ta/te/kn/ml), size + SHA-256 verified on-device | `LanguagePackInstallTest` green (5 Indic TTS pins re-pinned after an upstream re-upload; E4B size corrected) |
+| Assamese refusal (planned pack, no qualified models) | Install returns Failure, state stays not-installed |
 | Real ONNX TTS synthesis (en + hi) + STT engine loads | `SpeechEngineFunctionalTest` — `ttsFailures=0 sttFailures=0` |
-| Indic TTS→ASR round trip | `IndicSpeechRoundTripTest` green (hi, 41 chars) |
+| Indic TTS→ASR round trip | `IndicSpeechRoundTripTest` green (hi) |
 | Uninstall/retain shared ASR + repair | `LanguagePackRepairRetainTest` green |
-| No-cloud speech fallback refusal | `SpeechNoCloudFallbackTest` 4/4 green after the microphone-FGS fail-closed fix (targetSDK 35: revoked RECORD_AUDIO no longer crashes the process at cold start) |
-| Headless on-device agent logic batch | 41/41 green after two fixes (instrumented SafetyGuard copy re-pinned to the production risk table; page-agent asset vendored) |
-| Secure browser: byte-authentic page-agent asset (196,197 bytes), guarded form fill, local-page read, DOCX/PDF round trips | 8/8 across `SecureBrowserPolicyHeadlessTest` (4), `PageAgentFormDeviceTest` (1), `ReadPageDeviceTest` (1), `DocumentFillEngineDeviceTest` (2) |
-| Local-brain (Gemma) device qualification | Honestly skipped via `assumeTrue` — no `.litertlm` model on the emulator |
-| Mobile Protection CI on the branch | Green (each commit) |
+| No-cloud speech fallback refusal | `SpeechNoCloudFallbackTest` 4/4 green |
+| Headless on-device agent logic batch | 41/41 green |
+| Secure browser asset, guarded form fill, local-page read, DOCX/PDF round trips | 8/8 green |
+| Local-brain (Gemma) device qualification | Skipped via `assumeTrue` — no `.litertlm` model on the emulator |
 
-Older evidence tiers (Windows MSVC ctest/ABI/readiness, the 2026-09-03
-pendrive re-stage, and per-toolchain boundaries) are recorded in
-[`docs/SPEECH_TEST_EVIDENCE.md`](docs/SPEECH_TEST_EVIDENCE.md). Physical
-Pocket AI evidence from July 29, 2026 follows; both are true, with their
-dates.
+Older speech evidence tiers are in
+[`docs/SPEECH_TEST_EVIDENCE.md`](docs/SPEECH_TEST_EVIDENCE.md).
 
-Physical Pocket AI release verification on July 29, 2026:
+### Physical Pocket AI release verification (2026-07-29)
 
 | Gate | Result |
 |---|---|
 | Physical package | `D:\UNOONE`, exFAT, label `UNOONE`, version `0.5.0-alpha` |
 | Strict on-drive verifier | Pass — 545/545 declared assets, exit `0` |
 | Native Starter verifier | Pass — `Start UnoOne.exe --verify-only`, exit `0` |
-| Canonical manifest | Schema `2`, 214,366 bytes, SHA-256 `FCBB143C61E0D1D46A4BA35AD6CB554B2CCAF876AC6622A3EA313AE8A24A8B00` |
 | Windows applications | Power, Dock, and Starter built together and SHA-256 verified |
-| Desktop payload | 158 runtime assets, 2 Gemma/mmproj models, 381 voice assets |
-| Mobile payload | 2 manifest-declared LiteRT models; 344 protected repository blobs match `mobile-golden-baseline-v2` |
-| Offline voice | Real Whisper transcription and Piper WAV generation pass on `main` in run `30439439032` |
-| Desktop CI | Windows and macOS fmt/check/test/clippy pass on `main` in run `30439439144` |
-| Recovery | Every replaced path was staged transactionally; the pre-remediation manifest remains under `RECOVERY/package-backups/20260729-091422` |
+| Recovery | Every replaced path was staged transactionally |
 
 The manifest provides complete path, size, and SHA-256 integrity checking; it
-is not cryptographically signed. The current Windows executables are also
-unsigned, so release signing and a prepared-host insertion/UX test remain
-production gates. See
-[`docs/52_POCKET_AI_PHYSICAL_RELEASE_2026-07-29.md`](docs/52_POCKET_AI_PHYSICAL_RELEASE_2026-07-29.md)
-for the full evidence record.
+is not cryptographically signed, and the Windows executables are unsigned. See
+[`docs/52_POCKET_AI_PHYSICAL_RELEASE_2026-07-29.md`](docs/52_POCKET_AI_PHYSICAL_RELEASE_2026-07-29.md).
+(The drive was later reloaded on 2026-10-04 — see Current Status.)
 
-Automated gates rerun on July 22, 2026 (after V2 agent architecture overhaul):
+### Android physical evidence (Xiaomi 14 `7f8cafef`, Android 15, July 2026)
 
 | Gate | Result |
 |---|---|
-| Android lint | Pass; no new issues against the existing baseline |
-| Android JVM unit tests | Pass; ~550 tests, 0 failures, 0 errors |
-| Debug, release, and Android-test assembly/compilation | Pass |
-| Repository invariant check | Pass |
-| Page Agent TypeScript and unit tests | Pass; 8 unit tests |
-| Page Agent Playwright | Pass; 5 browser scenarios |
-
-Physical evidence on the Xiaomi 14 (`7f8cafef`), Android 15:
-
-| Gate | Result |
-|---|---|
-| Historical connected-device instrumentation, July 17 | `OK (55 tests)` in 206.218 seconds |
-| Historical no-network subset, July 17 | `OK (20 tests)` in 77.202 seconds with Wi-Fi and mobile data disabled |
-| Latest instrumentation attempt | Test APK compiled; Xiaomi rejected installation with `INSTALL_FAILED_USER_RESTRICTED` |
-| PDF and DOCX Android round trips | `OK (2 tests)` in the July 17 suite; exact values persisted and original bytes unchanged |
+| Connected-device instrumentation, July 17 | `OK (55 tests)` in 206.218 seconds |
+| No-network subset, July 17 | `OK (20 tests)` with Wi-Fi and mobile data disabled |
+| PDF and DOCX Android round trips | `OK (2 tests)`; exact values persisted and original bytes unchanged |
 | Phone actions | WhatsApp Business, Gmail, and Calendar opened with foreground-package verification; drafts remain reviewable |
-| Read Screen | Read actual Accessibility Settings content through the accessibility/OCR path and spoke the result |
-| Page Agent physical WebView | Read rendered page text and executed guarded text-entry actions; complex public-site completion is not yet qualified |
-| Hindi speech and Blind Aid | Hindi STT/TTS engines initialized; person/mobile-phone and other COCO labels were detected and spoken through native Hindi narration, with no stale narration after stop |
-| Master disable | Blocked commands and speech, survived process restart, and did not replay the old request after re-enable |
-| Crash/ANR/OOM scan | No UnoOne crash, ANR, OOM, missing crypto class, or UnoOne low-memory kill in the final inspected run |
+| Read Screen | Read actual Accessibility Settings content and spoke the result |
+| Page Agent physical WebView | Read rendered page text and executed guarded text entry; complex public-site completion not yet qualified |
+| Hindi speech and Blind Aid | Hindi STT/TTS initialized; COCO labels detected and spoken in Hindi, with no stale narration after stop |
+| Master disable | Blocked commands and speech, survived process restart, did not replay the old request |
+| Crash/ANR/OOM scan | No UnoOne crash, ANR, OOM, or low-memory kill in the final inspected run |
 
-Current-revision checks on July 21 additionally verified a combined Hindi-language + Blind Aid command, real-time detection of `person`, `cell phone`, `bottle`, `book`, and other supported COCO classes, Hindi offline TTS generation, clean camera shutdown with no later detection callbacks, Accessibility-based Read Screen with spoken output, foreground opening of WhatsApp Business/Gmail/Calendar, review-only WhatsApp and Gmail drafts, a Calendar review form containing the exact title/date/5–6 PM time without pressing Save, Secure Browser handoff and local Page Agent model loading, and master-disable persistence across force-stop/restart. Installing the final APK reset Accessibility on HyperOS; it was explicitly re-enabled before the final cross-app verification.
-
-Detailed evidence and honest boundaries are recorded in [Connected-device validation](docs/DEVICE_VALIDATION_2026-07-17.md) and [Device verification](DEVICE_VERIFICATION.md).
+Details: [Connected-device validation](docs/DEVICE_VALIDATION_2026-07-17.md)
+and [Device verification](DEVICE_VERIFICATION.md). The Xiaomi 14 is the only
+Android device with recorded evidence.
 
 ## Mobile Protection
 
 The Android app is protected by a committed tree-hash pointer plus exact-file
 hash verification. `scripts/MOBILE_PROTECTED_TREE` holds the expected tree hash
-of `android-app/UnoOneAgent` (currently `bd97bee7…`, re-baselined with each
-reviewed Android change), and CI fails any push where
-`git rev-parse HEAD:android-app/UnoOneAgent` differs from the pointer.
+of `android-app/UnoOneAgent` (currently `bd97bee7…`), and CI fails any push
+where `git rev-parse HEAD:android-app/UnoOneAgent` differs from the pointer.
 `scripts/MOBILE_GOLDEN_HASHES.txt` carries the per-file blob hashes so the
 protected tree can be audited file-by-file. Re-baselining is an ordinary
-reviewable commit via `scripts/regen-mobile-golden-hashes.sh` — run it AFTER
-committing the Android changes (the script pins the committed tree, not the
-working tree), then commit the two baseline files together.
+reviewable commit via `scripts/regen-mobile-golden-hashes.sh` — run it after
+committing the Android changes (the script pins the committed tree), then
+commit the two baseline files together.
 
 ```bash
 # Local check (same comparison CI makes)
 test "$(cat scripts/MOBILE_PROTECTED_TREE)" = "$(git rev-parse HEAD:android-app/UnoOneAgent)" && echo PASS
-
-# CI check
-# .github/workflows/mobile-protection.yml (and the mobile-protection job in desktop-ci.yml)
 ```
 
-See `docs/MOBILE_GOLDEN_BASELINE.md` for the full protection policy.
+See [docs/MOBILE_GOLDEN_BASELINE.md](docs/MOBILE_GOLDEN_BASELINE.md) for the
+full protection policy.
 
 ## Not production-ready yet
 
 The following gates remain open:
 
 - a second Android device and broader OEM/API matrix;
+- E4B (Medium) wired into the Android load path, then loaded and tested on device;
 - repeatable recorded-speech accuracy tests for every enabled language and multiple accents/noise levels;
 - a controlled Blind Aid corpus covering lighting, distance, people, vehicles, phones, and product classes;
-- fine-grained product recognition beyond the bundled COCO detector;
+- fine-grained product recognition beyond the bundled detector;
 - a sustained thermal, memory, battery, and 50-task planning/Page Agent benchmark;
 - human verification of audible speech quality and TalkBack announcements;
-- final visual reruns of Android document/file pickers while the physical device is unlocked;
-- approved-site-by-site Page Agent qualification and prompt-injection testing;
-- release dependency/licence review, SBOM, protected signing key, and signed release APK;
-- production object storage, catalogue signing key, signed catalogues, deployment, update, and rollback testing;
-- E4B (Medium) model loading and inference on device;
 - live voice, camera, and TalkBack UX validation;
-- desktop runtime testing still open: recording with a real microphone, and blind-aid camera/OCR validation on a sustained corpus (single-pass live acceptance passed 2026-09-16 — browser with real pages, OCR with real images, speech matrix 19/19; the describe lane's defect-#44 fix is re-verified on the re-staged drive);
-- macOS build and testing;
+- final visual reruns of Android document/file pickers on an unlocked device;
+- approved-site-by-site Page Agent qualification and prompt-injection testing;
+- the physical phone ↔ drive ↔ desktop vault round trip and the Android boot auto-launch device gates;
+- release dependency/licence review, SBOM, protected signing key, and signed release APK — including an open licence item: the Android Indic TTS voices use Meta MMS VITS models that the repo's own vendor notes list as CC-BY-NC-4.0 (non-commercial) ([model licences](docs/model-licenses.md));
+- Authenticode signing of the three Windows executables and cryptographic manifest signing;
+- the known app crash on a mid-sweep device-removal IO error (hardware-conditional);
+- production object storage, catalogue signing key, signed catalogues, deployment, update, and rollback testing;
+- desktop runtime testing still open: recording with a real microphone and blind-aid camera/OCR on a sustained corpus;
+- the 2026-10-07 knowledge and coding workspace: staging on the drive, running the new screens on Windows hardware, the local model with these changes, the held-out acceptance suite, and wiring the frontend test suites into CI; sandboxed execution remains Linux-only;
+- a macOS app bundle and Mac hardware testing;
 - WDAC policy environment testing: verify llama-server, recording, and browser work under real WDAC constraints.
 
-The installer PWA is implemented but intentionally keeps downloads locked when a production catalogue public key is not configured. No production deployment or production-approved release is claimed.
+The installer PWA is implemented but intentionally keeps downloads locked when
+a production catalogue public key is not configured. No production deployment
+or production-approved release is claimed.
 
 ## Prohibitions
 
@@ -829,26 +895,26 @@ The installer PWA is implemented but intentionally keeps downloads locked when a
 - ❌ Host disk is not canonical — USB is the single source of truth
 - ❌ No mock data, no placeholder success states, no fake functionality
 - ❌ No Android changes without a reviewed golden-baseline re-baseline (`scripts/MOBILE_PROTECTED_TREE` + hashes, same push)
-- ❌ No hardcoded drive letters — discover USB via removable-drive scan + manifest validation
+- ❌ No drive letter, volume label, or VID/PID as identity — only manifest validation identifies Pocket AI
 - ❌ No claiming features work without test evidence (command, exit code, OS, hardware, date, commit)
-- ❌ No external runtimes — no Playwright, no Tesseract, no separate Gemma download
+- ❌ No required external runtimes — Playwright, Tesseract, or a separate Gemma download are neither shipped nor needed (the agent may install tools into a user workspace only through consented `process.run`)
 - ❌ No weakening Windows Application Control to make an unsigned build appear successful
 
 ## Documentation
 
 - [Android build and validation](android-app/UnoOneAgent/README.md)
 - [Phone-control implementation](android-app/UnoOneAgent/phonecontrol/README.md)
+- [Android architecture](docs/ARCHITECTURE.md) and [module walkthrough](docs/local-architecture.md)
+- [Safety](docs/SAFETY.md) — Android risk tables and desktop safety
+- [Models](docs/MODELS.md), [model acquisition and distribution](docs/MODEL_ACQUISITION_AND_DISTRIBUTION.md), [model licences](docs/model-licenses.md), [Blind Aid detector](docs/BLIND_AID_MODEL.md)
+- [Speech architecture](docs/SPEECH_ARCHITECTURE.md), [speech model qualification](docs/SPEECH_MODEL_QUALIFICATION.md), [speech test evidence](docs/SPEECH_TEST_EVIDENCE.md), [InBharat Audio integration](docs/INBHARAT_AUDIO_INTEGRATION.md)
 - [Offline Document Skills](docs/OFFLINE_DOCUMENT_SKILLS.md)
-- [Connected-device validation](docs/DEVICE_VALIDATION_2026-07-17.md)
-- [Device verification matrix](DEVICE_VERIFICATION.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Safety](docs/SAFETY.md)
-- [Model acquisition and distribution](docs/MODEL_ACQUISITION_AND_DISTRIBUTION.md)
-- [Speech model qualification](docs/SPEECH_MODEL_QUALIFICATION.md)
-- [Speech architecture](docs/SPEECH_ARCHITECTURE.md) — one cross-platform speech contract, backend routing, and the truthful readiness/readiness-drift rules
-- [Speech test evidence](docs/SPEECH_TEST_EVIDENCE.md) — per-toolchain evidence tiers (HOST / EMULATOR / CI / BUILD-ONLY / PHYSICAL) for every speech claim
-- [Privacy policy](docs/play-review/privacy-policy.md)
-- [Data safety](docs/play-review/data-safety.md)
+- [Installer and distribution](docs/INSTALLER_AND_DISTRIBUTION.md)
+- [Mobile golden baseline](docs/MOBILE_GOLDEN_BASELINE.md)
+- [Connected-device validation](docs/DEVICE_VALIDATION_2026-07-17.md) and [device verification matrix](DEVICE_VERIFICATION.md)
+- [Physical release record (2026-07-29)](docs/52_POCKET_AI_PHYSICAL_RELEASE_2026-07-29.md)
+- [Universal capability plan and phase log](docs/UNIVERSAL_CAPABILITY_PLAN_2026-10-01.md)
+- [Privacy policy](docs/play-review/privacy-policy.md) and [data safety](docs/play-review/data-safety.md)
 
 ## Patent Notice
 
