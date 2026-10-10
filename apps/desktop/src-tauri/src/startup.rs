@@ -12,6 +12,8 @@ use unoone_usb_manifest::{ValidatedPackage, ValidationFailure};
 pub enum StartupPhase {
     Starting,
     WaitingForPai,
+    LocalSetup,
+    LocalRecovery,
     ValidatingPai,
     PaiInvalid,
     PaiConnected,
@@ -46,6 +48,7 @@ pub struct StartupStatus {
 pub struct StartupCoordinator {
     phase: Mutex<StartupPhase>,
     supplied_root: Mutex<Option<PathBuf>>,
+    local_mode: bool,
     connected_root: Mutex<Option<PathBuf>>,
     vault_id: Mutex<Option<String>>,
     validation_failures: Mutex<Vec<ValidationFailure>>,
@@ -70,6 +73,7 @@ impl StartupCoordinator {
     pub fn with_supplied_root(supplied_root: Option<PathBuf>) -> Self {
         Self {
             phase: Mutex::new(StartupPhase::Starting),
+            local_mode: supplied_root.is_none(),
             supplied_root: Mutex::new(supplied_root),
             connected_root: Mutex::new(None),
             vault_id: Mutex::new(None),
@@ -81,6 +85,11 @@ impl StartupCoordinator {
     }
 
     pub fn accept_process_args(&self, args: &[String]) {
+        // Storage choice is fixed for this process. A second invocation must not
+        // switch the live vault or start legacy validation behind a local session.
+        if self.local_mode || self.connected_root().is_some() {
+            return;
+        }
         if let Some(root) = parse_vault_root(args) {
             if let Ok(mut supplied) = self.supplied_root.lock() {
                 *supplied = Some(root);
@@ -90,7 +99,38 @@ impl StartupCoordinator {
     }
 
     pub fn take_supplied_root(&self) -> Option<PathBuf> {
-        self.supplied_root.lock().ok()?.take()
+        self.supplied_root.lock().ok()?.clone()
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.local_mode
+    }
+
+    pub fn connect_local(&self, root: &Path, vault_id: &str, phase: StartupPhase) {
+        if !self.local_mode {
+            return;
+        }
+        if let Ok(mut connected) = self.connected_root.lock() {
+            *connected = Some(root.to_path_buf());
+        }
+        if let Ok(mut id) = self.vault_id.lock() {
+            *id = Some(vault_id.to_owned());
+        }
+        // Local identity is NOT a BootGate or runtime/model qualification.
+        if let Ok(mut gate) = self.boot_gate_complete.lock() {
+            *gate = false;
+        }
+        if let Ok(mut gate) = self.asset_sweep_complete.lock() {
+            *gate = false;
+        }
+        self.set_phase(phase);
+    }
+
+    pub fn require_selected_root(&self, requested: &Path) -> Result<(), String> {
+        if self.connected_root().as_deref() != Some(requested) {
+            return Err("Vault path is not the selected installation root".into());
+        }
+        Ok(())
     }
 
     pub fn set_phase(&self, phase: StartupPhase) {
@@ -382,6 +422,11 @@ pub fn start_mount_monitor(app: AppHandle) {
         loop {
             thread::sleep(Duration::from_secs(2));
             let state = app.state::<StartupCoordinator>();
+            // Local installations do not have removable-media liveness. OS/session
+            // lock and app shutdown retain their shared stop/zero-key path.
+            if state.is_local() {
+                continue;
+            }
 
             // Transient-drop self-heal FIRST: this dying stick re-presents
             // its volume within seconds after an IO drop, so a sweep-latched
@@ -553,6 +598,7 @@ mod set_phase_if_booting_tests {
         StartupCoordinator {
             phase: Mutex::new(phase),
             supplied_root: Mutex::new(None),
+            local_mode: false,
             connected_root: Mutex::new(None),
             vault_id: Mutex::new(None),
             validation_failures: Mutex::new(Vec::new()),
@@ -609,6 +655,34 @@ mod set_phase_if_booting_tests {
 #[cfg(test)]
 mod boot_gate_tests {
     use super::*;
+
+    #[test]
+    fn ordinary_launch_is_local_without_forging_model_authority() {
+        let c = StartupCoordinator::with_supplied_root(None);
+        assert!(c.is_local());
+        let root = Path::new("/user/app-data/local-install");
+        c.connect_local(root, "own-vault-id", StartupPhase::LocalSetup);
+        assert_eq!(phase_of(&c), StartupPhase::LocalSetup);
+        assert!(!c.is_boot_gate_complete());
+        assert!(!c.is_asset_validation_complete());
+        assert!(c.require_selected_root(root).is_ok());
+        assert!(c.require_selected_root(Path::new("/other")).is_err());
+        c.accept_process_args(&["app".into(), "--vault-root=/legacy".into()]);
+        assert!(c.is_local());
+        assert_eq!(c.connected_root().as_deref(), Some(root));
+        assert!(c.take_supplied_root().is_none());
+    }
+
+    #[test]
+    fn explicit_legacy_mode_keeps_root_for_retry_without_local_fallback() {
+        let root = PathBuf::from("/legacy/UNOONE");
+        let c = StartupCoordinator::with_supplied_root(Some(root.clone()));
+        assert!(!c.is_local());
+        assert_eq!(c.take_supplied_root(), Some(root.clone()));
+        assert_eq!(c.take_supplied_root(), Some(root));
+        c.connect_local(Path::new("/unselected"), "other", StartupPhase::LocalSetup);
+        assert!(c.connected_root().is_none());
+    }
 
     #[test]
     fn gates_start_closed() {
@@ -673,6 +747,7 @@ mod self_heal_tests {
         StartupCoordinator {
             phase: Mutex::new(phase),
             supplied_root: Mutex::new(None),
+            local_mode: false,
             connected_root: Mutex::new(None),
             vault_id: Mutex::new(None),
             validation_failures: Mutex::new(Vec::new()),

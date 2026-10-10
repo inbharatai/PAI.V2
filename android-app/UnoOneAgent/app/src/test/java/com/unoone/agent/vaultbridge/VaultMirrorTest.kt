@@ -44,12 +44,19 @@ class VaultMirrorTest {
         val writtenFields = mutableListOf<Map<String, Any?>>()
         val tombstoned = mutableListOf<String>()
         override fun writeRecord(fields: Map<String, Any?>, content: ByteArray): String {
+            val id = fields["record_id"] as String
+            if (fields["tombstone"] == true) {
+                // v7 deletions are idempotent empty tombstone writes (no read-then-rewrite).
+                if (failTombstones) throw java.io.IOException("injected vault failure")
+                assertEquals(0, content.size)
+                tombstoned.add(id)
+                return id
+            }
             if (failNextWrite) {
                 failNextWrite = false
                 throw java.io.IOException("injected vault failure")
             }
-            val id = fields["record_id"] as String
-            written.add(id to content)
+            written.add(id to content.copyOf()) // the mirror zeroes its buffer after a durable write
             writtenFields.add(fields)
             return id
         }
@@ -138,7 +145,7 @@ class VaultMirrorTest {
 
     @Test
     fun `purely local row delete does nothing in the vault`() = runBlocking {
-        // Never synced (no vaultRecordId) → deletion has nothing to tombstone.
+        // No row and no outbox identity → the compatibility wake-up has nothing to tombstone.
         mirror().onRowDeleted(null, VaultSyncPlanner.Kind.NOTE)
         assertTrue(writer.tombstoned.isEmpty())
         assertTrue(db.pendingTombstoneDao().getAll().isEmpty())
@@ -197,26 +204,33 @@ class VaultMirrorTest {
         mirror().onMemoryUpserted(id)
         val vid = db.memoryDao().getByIdOnce(id)!!.vaultRecordId!!
 
-        // deleteMemory fires the vault-notification callback with the FULL
-        // entity (vaultRecordId included) BEFORE the local row is gone —
-        // exactly as MemoryModule.deleteMemory + the orchestrator wiring do.
+        // deleteMemory deletes the row (SQLite captures the link as a durable tombstone inside
+        // that transaction) and THEN wakes the mirror — exactly as MemoryModule + the orchestrator do.
         val entity = db.memoryDao().getByIdOnce(id)!!
-        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.MEMORY)
         db.memoryDao().delete(entity)
+        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.MEMORY)
 
         assertEquals("the vault record must be tombstoned, not orphaned", listOf(vid), writer.tombstoned)
         assertNull("the local cache row is gone", db.memoryDao().getByKey("wake_word"))
     }
 
     @Test
-    fun `memory deletion of an unsynced row has nothing to tombstone`() = runBlocking {
+    fun `memory deletion of an unsynced row tombstones only its minted identity and never a body`() = runBlocking {
+        writer.online = false
         val id = db.memoryDao().insert(MemoryEntity(key = "local_pref", value = "v", type = "preference"))
         val entity = db.memoryDao().getByIdOnce(id)!!
+        val minted = db.pendingWriteDao().get("MEMORY", id)!!.recordId
 
-        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.MEMORY)
         db.memoryDao().delete(entity)
+        writer.online = true
+        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.MEMORY)
 
-        assertTrue("purely local deletion must not touch the vault", writer.tombstoned.isEmpty())
+        // SQLite cannot know whether a write-before-stamp already reached the vault under the
+        // minted id, so the deletion is an idempotent empty tombstone of that id — the body never
+        // follows the row into the vault and the pending write is gone.
+        assertTrue("the deleted value must never be written", writer.written.isEmpty())
+        assertEquals(listOf(minted), writer.tombstoned)
+        assertTrue(db.pendingWriteDao().getAll().isEmpty())
         assertTrue(db.pendingTombstoneDao().getAll().isEmpty())
     }
 
@@ -296,22 +310,27 @@ class VaultMirrorTest {
         mirror().onSkillUpserted(id)
         val vid = db.skillDao().getById(id)!!.vaultRecordId!!
 
-        // deleteSkill fires onSkillDeleted with the FULL entity BEFORE the
-        // local row is gone — exactly as SkillsModule + the orchestrator do.
+        // deleteSkill deletes the row (the link is captured durably inside that transaction)
+        // and THEN fires onSkillDeleted — exactly as SkillsModule + the orchestrator do.
         val entity = db.skillDao().getById(id)!!
-        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.SKILL)
         db.skillDao().delete(entity)
+        mirror().onRowDeleted(entity.vaultRecordId, VaultSyncPlanner.Kind.SKILL)
         assertEquals("the vault record must be tombstoned, not orphaned", listOf(vid), writer.tombstoned)
 
-        // A purely local skill deletion must not touch the vault.
+        // A never-written skill deletion never writes its body; only its minted id is tombstoned.
         writer.tombstoned.clear()
+        writer.online = false
         val localId = db.skillDao().insert(
             SkillEntity(name = "never synced", triggerPhrases = "x", stepsJson = "[]"),
         )
         val local = db.skillDao().getById(localId)!!
-        mirror().onRowDeleted(local.vaultRecordId, VaultSyncPlanner.Kind.SKILL)
+        val minted = db.pendingWriteDao().get("SKILL", localId)!!.recordId
         db.skillDao().delete(local)
-        assertTrue(writer.tombstoned.isEmpty())
+        writer.online = true
+        mirror().onRowDeleted(local.vaultRecordId, VaultSyncPlanner.Kind.SKILL)
+        assertEquals(1, writer.written.size)
+        assertEquals(listOf(minted), writer.tombstoned)
+        assertTrue(db.pendingWriteDao().getAll().isEmpty())
         assertTrue(db.pendingTombstoneDao().getAll().isEmpty())
     }
 

@@ -30,12 +30,15 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 class AgentTranscriptRecordingTest {
 
+    private lateinit var fixture: com.unoone.agent.task.NativeTaskFixture
     private lateinit var db: UnoOneDatabase
     private lateinit var orchestrator: AgentOrchestrator
 
     @Before
     fun setUp() {
-        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        fixture = com.unoone.agent.task.NativeTaskFixture()
+        val context = fixture.context
+        com.unoone.agent.core.runtime.AgentRuntimeGate.setEnabled(true)
         db = Room.inMemoryDatabaseBuilder(context, UnoOneDatabase::class.java)
             .allowMainThreadQueries()
             .build()
@@ -47,10 +50,11 @@ class AgentTranscriptRecordingTest {
             skillDao = db.skillDao(),
             conversationDao = db.conversationTurnDao(),
         )
+        runBlocking { orchestrator.ensureTaskScopesReady() }
     }
 
     @After
-    fun tearDown() = db.close()
+    fun tearDown() { fixture.close(); db.close() }
 
     @Test
     fun `every command records the user's sanitized command as the session's first turn`() = runBlocking {

@@ -45,12 +45,19 @@ sha2 = "0.10"
 screenshots = "0.8"
 png = "0.17"
 unoone-vault-core = { path = "../../../packages/vault-core" }
+unoone-personal-agent-runtime = { path = "../../../packages/personal-agent-runtime" }
+unoone-personal-provider-adapters = { path = "../../../packages/personal-provider-adapters" }
+unoone-privacy-guardian = { path = "../../../packages/privacy-guardian" }
+unoone-local-peer-sync = { path = "../../../packages/local-peer-sync" }
 reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3"
 hmac = "0.12"
 hex = "0.4"
 rand = "0.8"
 base64 = "0.22"
+# Exact already-locked crypto; no new release keys or model eligibility implied.
+ring = "=0.17.14"
+unoone-model-admission = { path = "../../../packages/model-admission" }
 base64-url = "3"
 cpal = "0.15"
 hound = "3.5"

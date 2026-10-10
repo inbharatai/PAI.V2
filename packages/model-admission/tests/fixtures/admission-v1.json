@@ -1,0 +1,577 @@
+{
+  "fixture_notice": "SYNTHETIC TEST DATA ONLY. No signing keys, real model or device qualification. KV allocation is the reported AnythingLLM scenario, not a reproduced benchmark.",
+  "now_ms": 100000,
+  "candidate": {
+    "schema_version": 1,
+    "id": "synthetic-general",
+    "version": "1",
+    "role": "GENERAL",
+    "artifacts": [
+      {
+        "id": "weights",
+        "kind": "WEIGHTS",
+        "format": "synthetic",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "download_bytes": 3106738272,
+        "installed_bytes": 3106738272,
+        "source_revision": "synthetic-fixture-v1",
+        "catalog_path": "brain/synthetic/weights"
+      },
+      {
+        "id": "projector",
+        "kind": "PROJECTOR",
+        "format": "synthetic",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "download_bytes": 167772160,
+        "installed_bytes": 167772160,
+        "source_revision": "synthetic-fixture-v1",
+        "catalog_path": "brain/synthetic/projector"
+      },
+      {
+        "id": "speech",
+        "kind": "SPEECH",
+        "format": "synthetic",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "download_bytes": 100000000,
+        "installed_bytes": 100000000,
+        "source_revision": "synthetic-fixture-v1",
+        "catalog_path": "brain/synthetic/speech"
+      }
+    ],
+    "runtime": {
+      "runtime": "synthetic-runtime",
+      "version": "1",
+      "backend": "cpu",
+      "os": "synthetic-os",
+      "os_version": "1",
+      "abi": "synthetic-abi",
+      "cpu_features": [
+        "fixture-feature"
+      ],
+      "driver_version": "none",
+      "required_os_api_level": null
+    },
+    "licences": [
+      {
+        "id": "synthetic-test-only",
+        "revision": "fixture-v1",
+        "notice_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "distribution": "APPROVED"
+      }
+    ],
+    "capabilities": [
+      "CHAT",
+      "VISION",
+      "TOOLS",
+      "VOICE"
+    ],
+    "languages": [
+      "en",
+      "hi"
+    ],
+    "modalities": [
+      "text",
+      "image",
+      "audio"
+    ],
+    "memory": {
+      "context_tokens": 8192,
+      "kv_format": "fixture-kv",
+      "provenance": {
+        "provenance": "ESTIMATED",
+        "value": "synthetic-peak-fixture-not-device-evidence"
+      },
+      "weights_ram_bytes": 3106738272,
+      "projector_ram_bytes": 167772160,
+      "vision_ram_bytes": 134217728,
+      "kv_ram_bytes": 1879048192,
+      "speech_ram_bytes": 268435456,
+      "runtime_ram_bytes": 536870912,
+      "per_agent_ram_bytes": 67108864,
+      "peak_vram_bytes": 0,
+      "heap_bytes": 134217728,
+      "os_reserve_bytes": 1073741824,
+      "available_reserve_bytes": 536870912,
+      "comfortable_headroom_bytes": 536870912,
+      "disk_headroom_bytes": 1073741824
+    },
+    "max_parallel_agents": 2,
+    "qualification_record_ids": [
+      "synthetic-physical"
+    ],
+    "expires_at_ms": 1000000
+  },
+  "probe": {
+    "schema_version": 1,
+    "probe_id": "synthetic-probe",
+    "captured_at_ms": 100000,
+    "device_class": {
+      "provenance": "DETECTED",
+      "value": "synthetic-device"
+    },
+    "os": {
+      "provenance": "DETECTED",
+      "value": "synthetic-os"
+    },
+    "os_version": {
+      "provenance": "DETECTED",
+      "value": "1"
+    },
+    "abi": {
+      "provenance": "DETECTED",
+      "value": "synthetic-abi"
+    },
+    "cpu_features": {
+      "provenance": "DETECTED",
+      "value": [
+        "fixture-feature"
+      ]
+    },
+    "total_ram_bytes": {
+      "provenance": "DETECTED",
+      "value": 17179869184
+    },
+    "available_ram_bytes": {
+      "provenance": "DETECTED",
+      "value": 12884901888
+    },
+    "available_vram_bytes": {
+      "provenance": "UNKNOWN"
+    },
+    "unified_memory": {
+      "provenance": "DETECTED",
+      "value": false
+    },
+    "low_memory_threshold_bytes": {
+      "provenance": "DETECTED",
+      "value": 268435456
+    },
+    "native_budget_bytes": {
+      "provenance": "DETECTED",
+      "value": 12884901888
+    },
+    "heap_budget_bytes": {
+      "provenance": "DETECTED",
+      "value": 1073741824
+    },
+    "usable_storage_bytes": {
+      "provenance": "DETECTED",
+      "value": 34359738368
+    },
+    "disk_bytes_per_second": {
+      "provenance": "UNKNOWN"
+    },
+    "battery_percent": {
+      "provenance": "DETECTED",
+      "value": 90
+    },
+    "thermal": {
+      "provenance": "TESTED",
+      "value": "NOMINAL"
+    },
+    "backends": [
+      {
+        "runtime": "synthetic-runtime",
+        "runtime_version": "1",
+        "backend": "cpu",
+        "driver_version": "none",
+        "health": {
+          "provenance": "TESTED",
+          "value": "LOAD_VALIDATED"
+        }
+      }
+    ],
+    "os_api_level": {
+      "provenance": "UNKNOWN"
+    },
+    "gpu_name": {
+      "provenance": "UNKNOWN"
+    },
+    "total_vram_bytes": {
+      "provenance": "UNKNOWN"
+    }
+  },
+  "request": {
+    "schema_version": 1,
+    "capabilities": [
+      "CHAT",
+      "TOOLS"
+    ],
+    "languages": [
+      "en"
+    ],
+    "context_tokens": 8192,
+    "kv_format": "fixture-kv",
+    "parallel_agents": 1
+  },
+  "qualification": {
+    "schema_version": 1,
+    "id": "synthetic-physical",
+    "kind": "PHYSICAL_DEVICE",
+    "scope": {
+      "candidate": {
+        "schema_version": 1,
+        "id": "synthetic-general",
+        "version": "1",
+        "role": "GENERAL",
+        "artifacts": [
+          {
+            "id": "weights",
+            "kind": "WEIGHTS",
+            "format": "synthetic",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "download_bytes": 3106738272,
+            "installed_bytes": 3106738272,
+            "source_revision": "synthetic-fixture-v1",
+            "catalog_path": "brain/synthetic/weights"
+          },
+          {
+            "id": "projector",
+            "kind": "PROJECTOR",
+            "format": "synthetic",
+            "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "download_bytes": 167772160,
+            "installed_bytes": 167772160,
+            "source_revision": "synthetic-fixture-v1",
+            "catalog_path": "brain/synthetic/projector"
+          },
+          {
+            "id": "speech",
+            "kind": "SPEECH",
+            "format": "synthetic",
+            "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "download_bytes": 100000000,
+            "installed_bytes": 100000000,
+            "source_revision": "synthetic-fixture-v1",
+            "catalog_path": "brain/synthetic/speech"
+          }
+        ],
+        "runtime": {
+          "runtime": "synthetic-runtime",
+          "version": "1",
+          "backend": "cpu",
+          "os": "synthetic-os",
+          "os_version": "1",
+          "abi": "synthetic-abi",
+          "cpu_features": [
+            "fixture-feature"
+          ],
+          "driver_version": "none",
+          "required_os_api_level": null
+        },
+        "licences": [
+          {
+            "id": "synthetic-test-only",
+            "revision": "fixture-v1",
+            "notice_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "distribution": "APPROVED"
+          }
+        ],
+        "capabilities": [
+          "CHAT",
+          "VISION",
+          "TOOLS",
+          "VOICE"
+        ],
+        "languages": [
+          "en",
+          "hi"
+        ],
+        "modalities": [
+          "text",
+          "image",
+          "audio"
+        ],
+        "memory": {
+          "context_tokens": 8192,
+          "kv_format": "fixture-kv",
+          "provenance": {
+            "provenance": "ESTIMATED",
+            "value": "synthetic-peak-fixture-not-device-evidence"
+          },
+          "weights_ram_bytes": 3106738272,
+          "projector_ram_bytes": 167772160,
+          "vision_ram_bytes": 134217728,
+          "kv_ram_bytes": 1879048192,
+          "speech_ram_bytes": 268435456,
+          "runtime_ram_bytes": 536870912,
+          "per_agent_ram_bytes": 67108864,
+          "peak_vram_bytes": 0,
+          "heap_bytes": 134217728,
+          "os_reserve_bytes": 1073741824,
+          "available_reserve_bytes": 536870912,
+          "comfortable_headroom_bytes": 536870912,
+          "disk_headroom_bytes": 1073741824
+        },
+        "max_parallel_agents": 2,
+        "qualification_record_ids": [
+          "synthetic-physical"
+        ],
+        "expires_at_ms": 1000000
+      },
+      "device_class": "synthetic-device",
+      "parallel_agents": 1
+    },
+    "tested_capabilities": [
+      "CHAT",
+      "VISION",
+      "TOOLS",
+      "VOICE"
+    ],
+    "tested_languages": [
+      "en",
+      "hi"
+    ],
+    "evidence_ids": [
+      "synthetic-fixture-not-real-evidence"
+    ],
+    "responsiveness": {
+      "cold_load_ms": 200,
+      "first_token_p95_ms": 50,
+      "generated_tokens": 10,
+      "generation_ms": 200,
+      "thermal": "NOMINAL",
+      "evidence_id": "synthetic-metrics-not-real-device"
+    },
+    "issued_at_ms": 1,
+    "expires_at_ms": 1000000,
+    "checks": [
+      {
+        "kind": "INTEGRITY",
+        "outcome": "PASS",
+        "evidence_id": "synthetic-fixture-not-real-evidence"
+      },
+      {
+        "kind": "LOAD",
+        "outcome": "PASS",
+        "evidence_id": "synthetic-fixture-not-real-evidence"
+      },
+      {
+        "kind": "MEMORY_PEAK",
+        "outcome": "PASS",
+        "evidence_id": "synthetic-fixture-not-real-evidence"
+      },
+      {
+        "kind": "TOOL_FORMAT",
+        "outcome": "PASS",
+        "evidence_id": "synthetic-fixture-not-real-evidence"
+      },
+      {
+        "kind": "CAPABILITY_TASKS",
+        "outcome": "PASS",
+        "evidence_id": "synthetic-fixture-not-real-evidence"
+      },
+      {
+        "kind": "THERMAL_SOAK",
+        "outcome": "PASS",
+        "evidence_id": "synthetic-fixture-not-real-evidence"
+      }
+    ]
+  },
+  "policy": {
+    "schema_version": 1,
+    "id": "synthetic-local-grant",
+    "revision": 1,
+    "not_before_ms": 1,
+    "expires_at_ms": 1000000,
+    "allowed_networks": [
+      "WIFI",
+      "ETHERNET"
+    ],
+    "allow_metered": false,
+    "max_model_store_bytes": 42949672960,
+    "max_download_bytes": 10737418240,
+    "accepted_licences": [
+      {
+        "id": "synthetic-test-only",
+        "revision": "fixture-v1",
+        "notice_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "distribution": "APPROVED"
+      }
+    ],
+    "model_rules": [
+      {
+        "model_id": "synthetic-general",
+        "versions": {
+          "rule": "ANY_SIGNED_COMPATIBLE"
+        },
+        "runtime": "synthetic-runtime",
+        "allowed_capabilities": [
+          "CHAT",
+          "VISION",
+          "TOOLS",
+          "VOICE"
+        ],
+        "max_download_bytes": 10737418240
+      }
+    ],
+    "allow_initial_general": true,
+    "allow_needed_specialist": true,
+    "allow_updates": true,
+    "allow_recovery": true
+  },
+  "responsiveness": {
+    "cold_load_ms": 200,
+    "first_token_p95_ms": 50,
+    "generated_tokens": 10,
+    "generation_ms": 200,
+    "thermal": "NOMINAL",
+    "evidence_id": "synthetic-metrics-not-real-device"
+  },
+  "cases": [
+    {
+      "name": "qualified",
+      "changes": {},
+      "status": "RECOMMENDED",
+      "eligible": true,
+      "reason": "ADMITTED"
+    },
+    {
+      "name": "anythingllm-reported-1879048192-KV-plus-projector",
+      "changes": {
+        "probe.available_ram_bytes": {
+          "provenance": "DETECTED",
+          "value": 4294967296
+        }
+      },
+      "status": "SUPPORTED_WITH_LIMITS",
+      "eligible": false,
+      "reason": "MEMORY_PRESSURE"
+    },
+    {
+      "name": "unknown-probe",
+      "changes": {
+        "probe.available_ram_bytes": {
+          "provenance": "UNKNOWN"
+        }
+      },
+      "status": "NOT_YET_QUALIFIED",
+      "eligible": false,
+      "reason": "UNKNOWN_PROBE"
+    },
+    {
+      "name": "estimated-free-memory-not-measured",
+      "changes": {
+        "probe.available_ram_bytes": {
+          "provenance": "ESTIMATED",
+          "value": 12884901888
+        }
+      },
+      "status": "NOT_YET_QUALIFIED",
+      "eligible": false,
+      "reason": "UNKNOWN_PROBE"
+    },
+    {
+      "name": "model-misfit",
+      "changes": {
+        "probe.total_ram_bytes": {
+          "provenance": "DETECTED",
+          "value": 4294967296
+        },
+        "probe.available_ram_bytes": {
+          "provenance": "DETECTED",
+          "value": 4294967296
+        }
+      },
+      "status": "UNSUPPORTED",
+      "eligible": false,
+      "reason": "PERMANENT_MEMORY_MISFIT"
+    },
+    {
+      "name": "storage-pressure",
+      "changes": {
+        "probe.usable_storage_bytes": {
+          "provenance": "DETECTED",
+          "value": 1
+        }
+      },
+      "status": "SUPPORTED_WITH_LIMITS",
+      "eligible": false,
+      "reason": "INSUFFICIENT_STORAGE"
+    },
+    {
+      "name": "storage-overflow",
+      "changes": {
+        "candidate.artifacts.0.installed_bytes": 18446744073709551615
+      },
+      "status": "UNSUPPORTED",
+      "eligible": false,
+      "reason": "ARITHMETIC_OVERFLOW"
+    },
+    {
+      "name": "kv-overflow",
+      "changes": {
+        "candidate.memory.kv_ram_bytes": 18446744073709551615
+      },
+      "status": "UNSUPPORTED",
+      "eligible": false,
+      "reason": "ARITHMETIC_OVERFLOW"
+    },
+    {
+      "name": "context-mismatch",
+      "changes": {
+        "request.context_tokens": 16384
+      },
+      "status": "UNSUPPORTED",
+      "eligible": false,
+      "reason": "CONTEXT_MISMATCH"
+    },
+    {
+      "name": "thermal-throttled",
+      "changes": {
+        "probe.thermal": {
+          "provenance": "TESTED",
+          "value": "THROTTLED"
+        }
+      },
+      "status": "SUPPORTED_WITH_LIMITS",
+      "eligible": false,
+      "reason": "THERMAL_PRESSURE"
+    },
+    {
+      "name": "backend-library-not-load-validation",
+      "changes": {
+        "probe.backends.0.health": {
+          "provenance": "DETECTED",
+          "value": "DETECTED_ONLY"
+        }
+      },
+      "status": "NOT_YET_QUALIFIED",
+      "eligible": false,
+      "reason": "BACKEND_NOT_VALIDATED"
+    },
+    {
+      "name": "runtime-version-mismatch",
+      "changes": {
+        "probe.os_version": {
+          "provenance": "DETECTED",
+          "value": "2"
+        }
+      },
+      "status": "UNSUPPORTED",
+      "eligible": false,
+      "reason": "RUNTIME_MISMATCH"
+    },
+    {
+      "name": "generic-requires-local-preflight",
+      "changes": {
+        "qualification.kind": "VALIDATED_GENERIC_PROFILE"
+      },
+      "status": "NOT_YET_QUALIFIED",
+      "eligible": false,
+      "reason": "PREFLIGHT_REQUIRED"
+    },
+    {
+      "name": "unqualified-device-class",
+      "changes": {
+        "probe.device_class": {
+          "provenance": "DETECTED",
+          "value": "other-device"
+        }
+      },
+      "status": "NOT_YET_QUALIFIED",
+      "eligible": false,
+      "reason": "UNQUALIFIED"
+    }
+  ]
+}

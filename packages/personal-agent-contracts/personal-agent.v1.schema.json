@@ -1,0 +1,1763 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inbharat.pai.personal-agent.v1",
+  "title": "Inert personal-agent records (not authority)",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "PERSONA"
+        },
+        "payload": {
+          "$ref": "#/$defs/Persona"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "PERSONAL_AGENT"
+        },
+        "payload": {
+          "$ref": "#/$defs/PersonalAgent"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "TASK_SPEC"
+        },
+        "payload": {
+          "$ref": "#/$defs/TaskSpec"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "TASK_EVENT"
+        },
+        "payload": {
+          "$ref": "#/$defs/TaskEvent"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "AGENT_SPEC"
+        },
+        "payload": {
+          "$ref": "#/$defs/AgentSpec"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "TASK_RECEIPT"
+        },
+        "payload": {
+          "$ref": "#/$defs/TaskReceipt"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "HANDOFF"
+        },
+        "payload": {
+          "$ref": "#/$defs/Handoff"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "REPLICA_CHANGE"
+        },
+        "payload": {
+          "$ref": "#/$defs/ReplicaChange"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "MAIL_ACCOUNT"
+        },
+        "payload": {
+          "$ref": "#/$defs/MailAccount"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "MESSAGE_REF"
+        },
+        "payload": {
+          "$ref": "#/$defs/MessageRef"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "DRAFT"
+        },
+        "payload": {
+          "$ref": "#/$defs/Draft"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "CALENDAR_REF"
+        },
+        "payload": {
+          "$ref": "#/$defs/CalendarRef"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "EVENT_REF"
+        },
+        "payload": {
+          "$ref": "#/$defs/EventRef"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "version",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "schema": {
+          "const": "inbharat.pai.personal-agent"
+        },
+        "version": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "major",
+            "minor"
+          ],
+          "properties": {
+            "major": {
+              "const": 1
+            },
+            "minor": {
+              "const": 0
+            }
+          }
+        },
+        "kind": {
+          "const": "CAPABILITY_GRANT"
+        },
+        "payload": {
+          "$ref": "#/$defs/CapabilityGrant"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "Sensitivity": {
+      "type": "string",
+      "enum": [
+        "PUBLIC",
+        "PRIVATE",
+        "SENSITIVE"
+      ]
+    },
+    "PreferenceStatus": {
+      "type": "string",
+      "enum": [
+        "OBSERVED",
+        "APPROVED",
+        "CORRECTED"
+      ]
+    },
+    "ProvenanceSource": {
+      "type": "string",
+      "enum": [
+        "USER",
+        "MODEL",
+        "NATIVE",
+        "PEER"
+      ]
+    },
+    "HostKind": {
+      "type": "string",
+      "enum": [
+        "ANDROID",
+        "DESKTOP"
+      ]
+    },
+    "DelegationLevel": {
+      "type": "string",
+      "enum": [
+        "READ_AND_SUGGEST",
+        "PREPARE_DRAFTS",
+        "ACT_WITHIN_SCOPE"
+      ]
+    },
+    "NetworkPolicy": {
+      "type": "string",
+      "enum": [
+        "OFFLINE_ONLY",
+        "EXISTING_PROVIDER"
+      ]
+    },
+    "TaskTransition": {
+      "type": "string",
+      "enum": [
+        "PLANNED",
+        "WAITING_FOR_ACCESS",
+        "DRAFTED",
+        "READY_FOR_REVIEW",
+        "IN_PROGRESS",
+        "AWAITING_VERIFICATION",
+        "VERIFIED",
+        "BLOCKED",
+        "CANCELLED"
+      ]
+    },
+    "ReceiptOutcome": {
+      "type": "string",
+      "enum": [
+        "VERIFIED",
+        "ACTION_VERIFIED",
+        "RESPONDED",
+        "UNVERIFIED",
+        "NEEDS_USER",
+        "FAILED",
+        "CANCELLED"
+      ]
+    },
+    "ModelSelectionRule": {
+      "type": "string",
+      "enum": [
+        "LOCAL_QUALIFIED_ONLY"
+      ]
+    },
+    "ApprovalState": {
+      "type": "string",
+      "enum": [
+        "PENDING",
+        "APPROVED",
+        "REJECTED"
+      ]
+    },
+    "ChangeKind": {
+      "type": "string",
+      "enum": [
+        "UPSERT",
+        "TOMBSTONE"
+      ]
+    },
+    "ProviderKind": {
+      "type": "string",
+      "enum": [
+        "LOCAL",
+        "GMAIL",
+        "OUTLOOK",
+        "IMAP"
+      ]
+    },
+    "DataKind": {
+      "type": "string",
+      "enum": [
+        "ACCOUNT",
+        "FOLDER",
+        "CALENDAR",
+        "FILE",
+        "APP",
+        "RECORD"
+      ]
+    },
+    "Operation": {
+      "type": "string",
+      "enum": [
+        "READ",
+        "SUGGEST",
+        "DRAFT",
+        "ORGANIZE",
+        "SEND",
+        "CREATE",
+        "UPDATE",
+        "DELETE",
+        "INVITE"
+      ]
+    },
+    "DispatchIntent": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "OPEN_COMPOSER",
+        "OPEN_EVENT_FORM",
+        "PROVIDER_READ",
+        "PROVIDER_MUTATION",
+        "LOCAL_MUTATION"
+      ]
+    },
+    "RecordKind": {
+      "type": "string",
+      "enum": [
+        "PERSONA",
+        "PERSONAL_AGENT",
+        "TASK_SPEC",
+        "TASK_EVENT",
+        "AGENT_SPEC",
+        "TASK_RECEIPT",
+        "HANDOFF",
+        "REPLICA_CHANGE",
+        "MAIL_ACCOUNT",
+        "MESSAGE_REF",
+        "DRAFT",
+        "CALENDAR_REF",
+        "EVENT_REF",
+        "CAPABILITY_GRANT"
+      ]
+    },
+    "Version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "major",
+        "minor"
+      ],
+      "properties": {
+        "major": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "Provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "actor_id",
+        "replica_id",
+        "evidence_ref"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/ProvenanceSource"
+        },
+        "actor_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "replica_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "evidence_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Preference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "value",
+        "status",
+        "provenance"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "status": {
+          "$ref": "#/$defs/PreferenceStatus"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      }
+    },
+    "Budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_steps",
+        "max_tool_calls",
+        "max_duration_ms",
+        "max_bytes",
+        "max_network_calls",
+        "max_depth",
+        "max_children"
+      ],
+      "properties": {
+        "max_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_duration_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_network_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_children": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "DataScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "resource_id",
+        "operations"
+      ],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DataKind"
+        },
+        "resource_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "operations": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/Operation"
+          }
+        }
+      }
+    },
+    "Scopes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capabilities",
+        "tools",
+        "data",
+        "recipients",
+        "hosts",
+        "operations"
+      ],
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "tools": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "data": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/DataScope"
+          }
+        },
+        "recipients": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "hosts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "operations": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/Operation"
+          }
+        },
+        "delegation": {
+          "$ref": "#/$defs/DelegationLevel",
+          "default": "READ_AND_SUGGEST"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy",
+          "default": "OFFLINE_ONLY"
+        }
+      }
+    },
+    "Persona": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "person_id",
+        "revision",
+        "preferences",
+        "sensitivity",
+        "provenance",
+        "deleted",
+        "corrects_revision"
+      ],
+      "properties": {
+        "person_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "preferences": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/Preference"
+          }
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/Sensitivity"
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "corrects_revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PersonalAgent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_id",
+        "person_id",
+        "profile_revision",
+        "display_name",
+        "persona_revision",
+        "conversation_refs",
+        "capability_preferences"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "person_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "profile_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "display_name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "persona_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "conversation_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "capability_preferences": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        }
+      }
+    },
+    "TaskSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "agent_id",
+        "person_id",
+        "idempotency_key",
+        "goal",
+        "origin_replica_id",
+        "target_replica_id",
+        "host_requirements",
+        "scopes",
+        "budget",
+        "created_at_ms",
+        "deadline_ms",
+        "expected_postcondition",
+        "user_visible_policy",
+        "sensitivity"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "agent_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "person_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "idempotency_key": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "goal": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "origin_replica_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "target_replica_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host_requirements": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/HostKind"
+          }
+        },
+        "scopes": {
+          "$ref": "#/$defs/Scopes"
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "created_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expected_postcondition": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "user_visible_policy": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/Sensitivity"
+        }
+      }
+    },
+    "TaskEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "operation_id",
+        "task_id",
+        "predecessor_event_id",
+        "origin_replica_id",
+        "assigned_replica_id",
+        "step",
+        "deadline_ms",
+        "transition",
+        "evidence_ref",
+        "external_object_id"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "operation_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "predecessor_event_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin_replica_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "assigned_replica_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "deadline_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "transition": {
+          "$ref": "#/$defs/TaskTransition"
+        },
+        "evidence_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "external_object_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "AgentSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "child_id",
+        "parent_task_id",
+        "purpose",
+        "template_version",
+        "model_selection",
+        "scopes",
+        "budget",
+        "depth",
+        "expires_at_ms",
+        "stop_generation",
+        "verifier_id"
+      ],
+      "properties": {
+        "child_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "parent_task_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "purpose": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "template_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "model_selection": {
+          "$ref": "#/$defs/ModelSelectionRule"
+        },
+        "scopes": {
+          "$ref": "#/$defs/Scopes"
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "stop_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "verifier_id": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "TaskReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_id",
+        "task_id",
+        "attempt_id",
+        "actor_id",
+        "replica_id",
+        "before_evidence_refs",
+        "after_evidence_refs",
+        "dispatch_intent",
+        "observed_effect",
+        "outcome",
+        "reason",
+        "source",
+        "timestamp_ms",
+        "external_object_id"
+      ],
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "attempt_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "actor_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "replica_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "before_evidence_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "after_evidence_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "dispatch_intent": {
+          "$ref": "#/$defs/DispatchIntent"
+        },
+        "observed_effect": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "outcome": {
+          "$ref": "#/$defs/ReceiptOutcome"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "source": {
+          "$ref": "#/$defs/ProvenanceSource"
+        },
+        "timestamp_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "external_object_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handoff_id",
+        "task_id",
+        "from_replica_id",
+        "target_replica_id",
+        "encrypted_goal",
+        "receipt_operation_ids",
+        "host_requirements",
+        "approval",
+        "expires_at_ms"
+      ],
+      "properties": {
+        "handoff_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "from_replica_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "target_replica_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "encrypted_goal": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "receipt_operation_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "host_requirements": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/HostKind"
+          }
+        },
+        "approval": {
+          "$ref": "#/$defs/ApprovalState"
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "ReplicaChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "person_id",
+        "replica_id",
+        "sequence",
+        "operation_id",
+        "record_id",
+        "record_kind",
+        "predecessor_operation_id",
+        "record_revision",
+        "change",
+        "ciphertext",
+        "content_hash",
+        "provenance"
+      ],
+      "properties": {
+        "person_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "replica_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "operation_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "record_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "record_kind": {
+          "$ref": "#/$defs/RecordKind"
+        },
+        "predecessor_operation_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "record_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "change": {
+          "$ref": "#/$defs/ChangeKind"
+        },
+        "ciphertext": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_hash": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "provenance": {
+          "$ref": "#/$defs/Provenance"
+        }
+      }
+    },
+    "MailAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "person_id",
+        "provider",
+        "display_name",
+        "address"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "person_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "provider": {
+          "$ref": "#/$defs/ProviderKind"
+        },
+        "display_name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "MessageRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "message_id",
+        "thread_id",
+        "folder_id"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "message_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "folder_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Draft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "draft_id",
+        "task_id",
+        "account_id",
+        "reply_to",
+        "recipients",
+        "subject",
+        "body",
+        "attachment_refs",
+        "revision",
+        "approval"
+      ],
+      "properties": {
+        "draft_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "account_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "reply_to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MessageRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recipients": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "attachment_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "approval": {
+          "$ref": "#/$defs/ApprovalState"
+        }
+      }
+    },
+    "CalendarRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "calendar_id",
+        "display_name",
+        "time_zone"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "calendar_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "display_name": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "time_zone": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "EventRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calendar",
+        "event_id",
+        "start_ms",
+        "end_ms",
+        "time_zone",
+        "attendees"
+      ],
+      "properties": {
+        "calendar": {
+          "$ref": "#/$defs/CalendarRef"
+        },
+        "event_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "start_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "end_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "time_zone": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "attendees": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        }
+      }
+    },
+    "CapabilityGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "grant_id",
+        "person_id",
+        "replica_id",
+        "scopes",
+        "budget",
+        "issued_at_ms",
+        "expires_at_ms",
+        "stop_generation",
+        "revoked"
+      ],
+      "properties": {
+        "grant_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "person_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "replica_id": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "scopes": {
+          "$ref": "#/$defs/Scopes"
+        },
+        "budget": {
+          "$ref": "#/$defs/Budget"
+        },
+        "issued_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "stop_generation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "revoked": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

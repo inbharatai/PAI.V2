@@ -2,6 +2,7 @@ package com.unoone.agent.localbrain
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.unoone.agent.core.model.Result
 import com.unoone.agent.modelmanager.ModelManager
 import kotlinx.coroutines.runBlocking
 import org.junit.Assume.assumeTrue
@@ -9,15 +10,11 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Real device-time accuracy test for the Gemma 4 E2B brain.
+ * Real device-time smoke tests for the exact integrity-verified Gemma 4 E4B brain.
  *
- * This test only runs when a `.litertlm` model file is present on the device.
- * It loads the model, sends a set of known commands, and verifies that the
- * returned tool name matches the expected action.
- *
- * To run this test, push a model first:
- *   adb push /path/to/gemma-4-E2B-it.litertlm \
- *     /sdcard/Android/data/com.unoone.agent/files/models/brain/gemma-4-e2b/
+ * These tests exercise the planner directly. In the application, deterministic routing should handle
+ * simple commands before model inference; direct planning probes remain useful for proving that E4B
+ * can produce canonical calls when the agent lane invokes it.
  */
 class GemmaPlannerAccuracyTest {
 
@@ -32,33 +29,34 @@ class GemmaPlannerAccuracyTest {
     }
 
     @Test
-    fun modelLoadsWhenPresent() = runBlocking {
+    fun verifiedE4BLoadsWhenPresent() = runBlocking {
         val path = modelManager.getLlmModelPath()
-        assumeTrue("No .litertlm model found — skipping accuracy test", path != null)
+        assumeTrue("No integrity-verified E4B model found — skipping accuracy test", path != null)
 
         val planner = GemmaPlanner()
         val result = planner.load(path!!)
-        assert(result is com.unoone.agent.core.model.Result.Success) {
-            "Model load failed: ${(result as? com.unoone.agent.core.model.Result.Error)?.message}"
+        assert(result is Result.Success) {
+            "Model load failed: ${(result as? Result.Error)?.message}"
         }
+        assert(planner.loadedProfile()?.manifestId == "gemma-4-e4b")
         planner.close()
     }
 
     @Test
-    fun openChromeCommandProducesOpenChromeTool() = runBlocking {
+    fun openChromeCommandProducesCanonicalTool() = runBlocking {
         val path = modelManager.getLlmModelPath()
-        assumeTrue("No .litertlm model found — skipping accuracy test", path != null)
+        assumeTrue("No integrity-verified E4B model found — skipping accuracy test", path != null)
 
         val planner = GemmaPlanner()
         val loadResult = planner.load(path!!)
-        assert(loadResult is com.unoone.agent.core.model.Result.Success)
+        assert(loadResult is Result.Success)
 
         val planResult = planner.plan(
             "Open Chrome",
             ContextSnapshot(currentPackage = "com.unoone.agent")
         )
-        check(planResult is com.unoone.agent.core.model.Result.Success) {
-            "Planning failed: ${(planResult as? com.unoone.agent.core.model.Result.Error)?.message}"
+        check(planResult is Result.Success) {
+            "Planning failed: ${(planResult as? Result.Error)?.message}"
         }
 
         val toolCall = planResult.data
@@ -69,24 +67,91 @@ class GemmaPlannerAccuracyTest {
     }
 
     @Test
-    fun createNoteCommandProducesCreateNoteTool() = runBlocking {
+    fun createNoteCommandProducesRequiredArguments() = runBlocking {
         val path = modelManager.getLlmModelPath()
-        assumeTrue("No .litertlm model found — skipping accuracy test", path != null)
+        assumeTrue("No integrity-verified E4B model found — skipping accuracy test", path != null)
 
         val planner = GemmaPlanner()
         val loadResult = planner.load(path!!)
-        assert(loadResult is com.unoone.agent.core.model.Result.Success)
+        assert(loadResult is Result.Success)
 
         val planResult = planner.plan(
-            "Remember to buy milk tomorrow",
+            "Create a note titled Shopping with content buy milk tomorrow",
             ContextSnapshot(currentPackage = "com.unoone.agent")
         )
-        check(planResult is com.unoone.agent.core.model.Result.Success)
+        check(planResult is Result.Success) {
+            "Planning failed: ${(planResult as? Result.Error)?.message}"
+        }
 
         val toolCall = planResult.data
         assert(toolCall.tool == "create_note") {
             "Expected 'create_note' but got '${toolCall.tool}' with args ${toolCall.args}"
         }
+        assert(toolCall.args["title"]?.toString()?.isNotBlank() == true)
+        assert(toolCall.args["content"]?.toString()?.contains("milk", ignoreCase = true) == true)
         planner.close()
     }
+
+    @Test
+    fun basicChatRejectsPunctuationAndAnswersEnglishHindiContract() = runBlocking {
+        val path = modelManager.getLlmModelPath()
+        assumeTrue("No integrity-verified E4B model found — skipping chat contract", path != null)
+
+        val planner = GemmaPlanner()
+        assert(planner.load(path!!) is Result.Success)
+        val probes = listOf(
+            Triple("what is SAT", "en", listOf("sat", "assessment", "college", "admission")),
+            Triple("what is SAT", "hi", listOf("sat", "परीक्षा", "कॉलेज", "प्रवेश")),
+            Triple("SAT क्या है", "en", listOf("sat", "assessment", "college", "admission"))
+        )
+
+        probes.forEach { (question, replyLanguage, anchors) ->
+            val result = planner.chat(question, replyLanguage)
+            check(result is Result.Success) {
+                "Chat '$question'/$replyLanguage failed: ${(result as? Result.Error)?.message}"
+            }
+            val assessment = ChatAnswerValidator.assess(result.data)
+            assert(assessment.isValid) {
+                "Chat '$question'/$replyLanguage returned unusable text: '${result.data}'"
+            }
+            assert(anchors.any { result.data.contains(it, ignoreCase = true) }) {
+                "Chat '$question'/$replyLanguage missed semantic anchors: '${result.data}'"
+            }
+            if (replyLanguage == "hi") {
+                assert(result.data.any { it in '\u0900'..'\u097F' }) {
+                    "Hindi reply must contain Devanagari text: '${result.data}'"
+                }
+            }
+        }
+        planner.close()
+    }
+
+    @Test
+    fun routesHindiBlindStartAndMissingFieldsSafelyInSequence() = runBlocking {
+        val path = modelManager.getLlmModelPath()
+        assumeTrue("No integrity-verified E4B model found — skipping accuracy test", path != null)
+
+        val planner = GemmaPlanner()
+        assert(planner.load(path!!) is Result.Success)
+        val snapshot = ContextSnapshot(currentPackage = "com.unoone.agent")
+        val probes = listOf(
+            "ब्लाइंड मोड चालू करो" to "detect_objects",
+            "draft an email with subject status and body the build is ready" to "speak_response",
+            "schedule a dentist appointment" to "speak_response",
+            "open" to "speak_response",
+            "Open Chrome" to "open_chrome"
+        )
+
+        probes.forEach { (command, expected) ->
+            val result = planner.plan(command, snapshot)
+            check(result is Result.Success) {
+                "Planning '$command' failed: ${(result as? Result.Error)?.message}"
+            }
+            assert(result.data.tool == expected) {
+                "Expected '$expected' for '$command' but got '${result.data.tool}'"
+            }
+        }
+        planner.close()
+    }
+
 }

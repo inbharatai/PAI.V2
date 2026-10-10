@@ -1,0 +1,27 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "REPLICA_CHANGE",
+  "payload": {
+    "person_id": "person-1",
+    "replica_id": "phone-1",
+    "sequence": 1,
+    "operation_id": "change-1",
+    "record_id": "task-1",
+    "record_kind": "TASK_SPEC",
+    "predecessor_operation_id": null,
+    "record_revision": 1,
+    "change": "UPSERT",
+    "ciphertext": "ciphertext-placeholder",
+    "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "provenance": {
+      "source": "USER",
+      "actor_id": "person-1",
+      "replica_id": "phone-1",
+      "evidence_ref": null
+    }
+  }
+}

@@ -1,0 +1,549 @@
+{
+  "corpus_version": 1,
+  "decisions": [
+    {
+      "fingerprint": "OPEN_LINK|href=https://hdfcbank.com-verify-kyc.info/login",
+      "id": "scam-001",
+      "severity": "WARN",
+      "signals": [
+        "DESTINATION_MISMATCH",
+        "LOOKALIKE_DOMAIN",
+        "CREDENTIAL_REQUESTED",
+        "URGENCY",
+        "SENDER_AUTH_FAILED"
+      ],
+      "verification_route": "Open hdfcbank.com yourself by typing it, or use the app/number you already have for them — not this link."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://hdfcbаnk.com/netbanking/verify",
+      "id": "scam-002",
+      "severity": "WARN",
+      "signals": [
+        "LOOKALIKE_DOMAIN",
+        "IDN_HOST",
+        "URGENCY"
+      ],
+      "verification_route": "Open hdfcbank.com yourself by typing it, or use the app/number you already have for them — not this link."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=http://203.0.113.45/pay?ref=PARK",
+      "id": "scam-003",
+      "severity": "WARN",
+      "signals": [
+        "IP_LITERAL_HOST"
+      ],
+      "verification_route": "Contact the organisation through a number or address you already had before this message."
+    },
+    {
+      "fingerprint": "PAYMENT|payee=Acme Consulting|account=IN99OTHER55555|bank=ICIC0009999|amount=4500000INR",
+      "id": "scam-004",
+      "severity": "WARN",
+      "signals": [
+        "CHANGED_PAYEE_DETAIL",
+        "HIGH_IMPACT_ACTION",
+        "REQUESTED_BY_UNTRUSTED_CONTENT"
+      ],
+      "verification_route": "Call Acme Consulting on the number you already have (+91 98xxxxxx12) and confirm the new account before paying."
+    },
+    {
+      "fingerprint": "PAYMENT|payee=Acme Consulting|account=IN99OTHER55555|bank=ICIC0009999|amount=4500000INR",
+      "id": "scam-005",
+      "severity": "BLOCK",
+      "signals": [
+        "URGENCY",
+        "SENDER_AUTH_FAILED",
+        "SENDER_IMPERSONATION",
+        "CHANGED_PAYEE_DETAIL",
+        "HIGH_IMPACT_ACTION",
+        "REQUESTED_BY_UNTRUSTED_CONTENT"
+      ],
+      "verification_route": "Call Acme Consulting on the number you already have (+91 98xxxxxx12) and confirm the new account before paying."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=asha.menon@hdfcbank.com|subject=1c65480193eb6bad|body=0da0387c0715eb31|att=",
+      "id": "scam-006",
+      "severity": "BLOCK",
+      "signals": [
+        "SECRET_DISCLOSURE",
+        "CREDENTIAL_REQUESTED"
+      ],
+      "verification_route": "Never send codes, passwords or recovery phrases to anyone. Contact the organisation through a known channel."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=support@wallet-help.io|subject=fb7885d3dd23f3e6|body=bd10ee9c61712660|att=",
+      "id": "scam-007",
+      "severity": "BLOCK",
+      "signals": [
+        "NEW_RECIPIENT",
+        "SECRET_DISCLOSURE"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=ravi.acme.consulting@gmail.com|subject=e4dfc7472b8ff68e|body=2c47f7c49b9f1118|att=",
+      "id": "scam-008",
+      "severity": "WARN",
+      "signals": [
+        "NEW_RECIPIENT",
+        "URGENCY",
+        "SENDER_IMPERSONATION"
+      ],
+      "verification_route": "Confirm the recipient through a channel you already had (saved contact, phone), not from this message."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=asha.menon@hdfcbank.co|subject=bac9dd362bd6ab76|body=972700069147d674|att=",
+      "id": "scam-009",
+      "severity": "WARN",
+      "signals": [
+        "LOOKALIKE_RECIPIENT",
+        "NEW_RECIPIENT"
+      ],
+      "verification_route": "Confirm the recipient through a channel you already had (saved contact, phone), not from this message."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://accounts-google-support.com/recover?u=me",
+      "id": "scam-010",
+      "severity": "WARN",
+      "signals": [
+        "LOOKALIKE_DOMAIN",
+        "URGENCY",
+        "SENDER_AUTH_FAILED",
+        "SENDER_IMPERSONATION"
+      ],
+      "verification_route": "Open google.com yourself by typing it, or use the app/number you already have for them — not this link."
+    },
+    {
+      "fingerprint": "SHARE_FILE|file=vault-export.json|dest=backup@safe-cloud-store.net|bytes=4096",
+      "id": "scam-011",
+      "severity": "BLOCK",
+      "signals": [
+        "BROAD_DATA_EXPORT",
+        "HIGH_IMPACT_ACTION",
+        "UNTRUSTED_INSTRUCTIONS_PRESENT"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://sbi.co.in@onlinesbi-login.xyz/",
+      "id": "scam-012",
+      "severity": "BLOCK",
+      "signals": [
+        "DESTINATION_MISMATCH",
+        "CREDENTIALS_IN_URL"
+      ],
+      "verification_route": "Contact the organisation through a number or address you already had before this message."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://irctc.co.in.refund-claims.site/claim",
+      "id": "scam-013",
+      "severity": "WARN",
+      "signals": [
+        "LOOKALIKE_DOMAIN",
+        "URGENCY",
+        "SENDER_IMPERSONATION"
+      ],
+      "verification_route": "Open irctc.co.in yourself by typing it, or use the app/number you already have for them — not this link."
+    },
+    {
+      "fingerprint": "PAYMENT|payee=BrightPath School|account=IN11NEW0001|bank=AXIS0001111|amount=2500000INR",
+      "id": "scam-014",
+      "severity": "WARN",
+      "signals": [
+        "CHANGED_PAYEE_DETAIL",
+        "HIGH_IMPACT_ACTION",
+        "REQUESTED_BY_UNTRUSTED_CONTENT"
+      ],
+      "verification_route": "Call BrightPath School on the number you already have (school office +91 80 2xxx xxxx) and confirm the new account before paying."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=billing@quickrefund.co|subject=b5614e90e87b455f|body=f95a411272c4d4e8|att=",
+      "id": "scam-015",
+      "severity": "BLOCK",
+      "signals": [
+        "NEW_RECIPIENT",
+        "SECRET_DISCLOSURE"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "PAYMENT|payee=Lottery Board|account=IN00LOT777|bank=YESB0000001|amount=UNKNOWN",
+      "id": "scam-016",
+      "severity": "BLOCK",
+      "signals": [
+        "NEW_PAYEE",
+        "UNKNOWN_AMOUNT",
+        "HIGH_IMPACT_ACTION",
+        "REQUESTED_BY_UNTRUSTED_CONTENT"
+      ],
+      "verification_route": "Confirm this payee through a channel you already had before paying."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://amazon-in-helpdesk.online/call",
+      "id": "scam-017",
+      "severity": "WARN",
+      "signals": [
+        "LOOKALIKE_DOMAIN",
+        "URGENCY",
+        "SENDER_AUTH_FAILED",
+        "SENDER_IMPERSONATION"
+      ],
+      "verification_route": "Open amazon.in yourself by typing it, or use the app/number you already have for them — not this link."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=mum@gmail.com|subject=a63b01f6557796a8|body=e09b0367b813f7dd|att=",
+      "id": "scam-018",
+      "severity": "BLOCK",
+      "signals": [
+        "SECRET_DISCLOSURE"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=dev-help@buildbot-ci.xyz|subject=da790a75a8d81d78|body=386f97e1296c8fb9|att=",
+      "id": "scam-019",
+      "severity": "BLOCK",
+      "signals": [
+        "NEW_RECIPIENT",
+        "SECRET_DISCLOSURE"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=procurement@globalparts-trade.biz|subject=846b3790b6e25c1c|body=b8f325db7f697bc4|att=",
+      "id": "scam-020",
+      "severity": "WARN",
+      "signals": [
+        "NEW_RECIPIENT",
+        "BANK_DETAILS_TO_UNKNOWN_RECIPIENT"
+      ],
+      "verification_route": "Confirm the recipient through a channel you already had (saved contact, phone), not from this message."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://gооgle.com/signin",
+      "id": "scam-021",
+      "severity": "WARN",
+      "signals": [
+        "LOOKALIKE_DOMAIN",
+        "IDN_HOST"
+      ],
+      "verification_route": "Open google.com yourself by typing it, or use the app/number you already have for them — not this link."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+      "id": "scam-022",
+      "severity": "BLOCK",
+      "signals": [
+        "DANGEROUS_SCHEME"
+      ],
+      "verification_route": "Contact the organisation through a number or address you already had before this message."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=hr@brightpath-school.edu.co|subject=5ad83e6f2edec287|body=6e39d82846afb949|att=receipt.pdf",
+      "id": "scam-023",
+      "severity": "WARN",
+      "signals": [
+        "LOOKALIKE_RECIPIENT",
+        "NEW_RECIPIENT",
+        "UNEXPECTED_ATTACHMENT"
+      ],
+      "verification_route": "Confirm the recipient through a channel you already had (saved contact, phone), not from this message."
+    },
+    {
+      "fingerprint": "CHANGE_RECIPIENT|from=ravi@acme-consulting.co.in|to=ravi.payments@acme-consulting-pay.com",
+      "id": "scam-024",
+      "severity": "WARN",
+      "signals": [
+        "NEW_RECIPIENT"
+      ],
+      "verification_route": "Confirm the change with ravi@acme-consulting.co.in through a channel you already had."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=asha.menon@hdfcbank.com|subject=758d92e6234d6f0f|body=15369579ade6cabc|att=",
+      "id": "scam-025",
+      "severity": "BLOCK",
+      "signals": [
+        "SECRET_DISCLOSURE",
+        "CREDENTIAL_REQUESTED"
+      ],
+      "verification_route": "Never send codes, passwords or recovery phrases to anyone. Contact the organisation through a known channel."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://netbanking.hdfcbank.com/netbanking/",
+      "id": "legit-001",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=asha.menon@hdfcbank.com|subject=b007f09e8a9e9ebf|body=a7eb1ac6508e5e37|att=",
+      "id": "legit-002",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "PAYMENT|payee=Acme Consulting|account=IN12ACME000111|bank=HDFC0001234|amount=4500000INR",
+      "id": "legit-003",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=asha.menon@hdfcbank.com,priya@hdfcbank.com|subject=ee2452a397284041|body=cebca6ff034a8bc9|att=",
+      "id": "legit-004",
+      "severity": "WARN",
+      "signals": [
+        "NEW_RECIPIENT",
+        "URGENCY"
+      ],
+      "verification_route": "Confirm the recipient through a channel you already had (saved contact, phone), not from this message."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://en.wikipedia.org/wiki/Phishing",
+      "id": "legit-005",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=sales@parts-supply.example|subject=70a5d875c5467e57|body=4f10015d304e9c14|att=",
+      "id": "legit-006",
+      "severity": "ALLOW",
+      "signals": [
+        "NEW_RECIPIENT"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://fees.brightpath-school.edu.in/pay/term2",
+      "id": "legit-007",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=dr.rao@cityclinic.in|subject=b2880d60a1f52b0f|body=8c3dab71318a6c3c|att=",
+      "id": "legit-008",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=mum@gmail.com|subject=2ba5f4d8f3bd7c57|body=50c36b09b86fee60|att=",
+      "id": "legit-009",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://www.google.com/maps?q=City+Clinic",
+      "id": "legit-010",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://myaadhaar.uidai.gov.in/",
+      "id": "legit-011",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=mailto:hr@brightpath-school.edu.in",
+      "id": "legit-012",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://www.amazon.in/gp/your-account/order-history",
+      "id": "legit-013",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SHARE_FILE|file=holiday.jpg|dest=mum@gmail.com|bytes=2400000",
+      "id": "legit-014",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SHARE_FILE|file=rent-agreement.pdf|dest=ravi@acme-consulting.co.in|bytes=300000",
+      "id": "legit-015",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SPAWN_CHILD|template=summarize_sources|tools=model.respond|network=false|depth=1",
+      "id": "legit-016",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "EXECUTE_TASK|task=t-1|tools=model.respond|network=false|export=false|impact=false",
+      "id": "legit-017",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://www.irctc.co.in/nget/train-search",
+      "id": "legit-018",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=ravi@acme-consulting.co.in|subject=4e88cccaab0a893a|body=e4293af751cc633d|att=",
+      "id": "legit-019",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=asha.menon@hdfcbank.com|subject=758d92e6234d6f0f|body=2ddeda054e62f54f|att=",
+      "id": "legit-020",
+      "severity": "ALLOW",
+      "signals": [
+        "CREDENTIAL_REQUESTED"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=new.neighbour@outlook.com|subject=63f0bfacf2c00f6b|body=3450069e56e688ba|att=",
+      "id": "legit-021",
+      "severity": "ALLOW",
+      "signals": [
+        "NEW_RECIPIENT"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=ravi@acme-consulting.co.in|subject=45771306645eac50|body=f5882a0cd7de4084|att=",
+      "id": "legit-022",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://example-recipes.net/dal",
+      "id": "legit-023",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://retail.onlinesbi.sbi.co.in/retail/login.htm",
+      "id": "legit-024",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "PAYMENT|payee=Plumber Suresh|account=IN55PLUMB0001|bank=UBIN0530001|amount=120000INR",
+      "id": "legit-025",
+      "severity": "WARN",
+      "signals": [
+        "NEW_PAYEE",
+        "HIGH_IMPACT_ACTION"
+      ],
+      "verification_route": "Confirm this payee through a channel you already had before paying."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=asha.menon@hdfcbank.com|subject=a736ce00bd9a5539|body=b11acc41de4ea11d|att=cards.jpg",
+      "id": "scam-hard-01",
+      "severity": "WARN",
+      "signals": [
+        "CREDENTIAL_REQUESTED",
+        "URGENCY",
+        "UNEXPECTED_ATTACHMENT"
+      ],
+      "verification_route": "Confirm the recipient through a channel you already had (saved contact, phone), not from this message."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://sbl-online.in/login",
+      "id": "scam-hard-02",
+      "severity": "WARN",
+      "signals": [
+        "CREDENTIAL_HARVEST_PATH"
+      ],
+      "verification_route": "Contact the organisation through a number or address you already had before this message."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://bit.ly/3xYzAbC",
+      "id": "scam-hard-03",
+      "severity": "WARN",
+      "signals": [
+        "HIDDEN_DESTINATION"
+      ],
+      "verification_route": "Contact the organisation through a number or address you already had before this message."
+    },
+    {
+      "fingerprint": "PAYMENT|payee=Acme Consulting Pvt Ltd|account=IN99OTHER55555|bank=ICIC0009999|amount=4500000INR",
+      "id": "scam-hard-04",
+      "severity": "WARN",
+      "signals": [
+        "NEW_PAYEE",
+        "HIGH_IMPACT_ACTION",
+        "REQUESTED_BY_UNTRUSTED_CONTENT"
+      ],
+      "verification_route": "Confirm this payee through a channel you already had before paying."
+    },
+    {
+      "fingerprint": "SHARE_FILE|file=Q3-salaries.xlsx|dest=ravi@acme-consulting.co.in|bytes=900000",
+      "id": "scam-hard-05",
+      "severity": "WARN",
+      "signals": [
+        "REQUESTED_BY_UNTRUSTED_CONTENT"
+      ],
+      "verification_route": "Check with the recipient through a known channel that they actually asked for this file."
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://accounts.google.co.in/signin",
+      "id": "legit-hard-01",
+      "severity": "WARN",
+      "signals": [
+        "LOOKALIKE_DOMAIN"
+      ],
+      "verification_route": "Open google.com yourself by typing it, or use the app/number you already have for them — not this link."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=new.neighbour@outlook.com|subject=fcdd8e672c75b713|body=94658eb6c291183a|att=",
+      "id": "legit-hard-02",
+      "severity": "ALLOW",
+      "signals": [
+        "NEW_RECIPIENT"
+      ],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=https://pay.razorpay.com/inv/abc123",
+      "id": "legit-hard-03",
+      "severity": "WARN",
+      "signals": [
+        "DESTINATION_MISMATCH"
+      ],
+      "verification_route": "Contact the organisation through a number or address you already had before this message."
+    },
+    {
+      "fingerprint": "SEND_MESSAGE|to=mum@gmail.com|subject=b718fbf789a9f5c9|body=f6c59521232909d1|att=",
+      "id": "legit-hard-04",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    },
+    {
+      "fingerprint": "OPEN_LINK|href=http://192.168.1.20/admin",
+      "id": "legit-hard-05",
+      "severity": "ALLOW",
+      "signals": [],
+      "verification_route": null
+    }
+  ],
+  "guardian_version": 1
+}

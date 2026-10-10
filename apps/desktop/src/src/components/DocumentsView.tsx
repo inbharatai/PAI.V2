@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { documentSourceSummary } from '../lib/readiness';
 import { tauriApi, type DocumentMetadata } from '../lib/tauri';
 
 const TYPE_ICONS: Record<string, string> = {
@@ -76,7 +77,7 @@ export function DocumentsView() {
         <div style={{ display: 'flex', gap: '8px' }}>
           <input
             type="text"
-            placeholder="Search documents and memories…"
+            placeholder="Filter by title or document type…"
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
             style={{
@@ -121,7 +122,10 @@ export function DocumentsView() {
                 <div className="memory-card-title">{doc.title}</div>
                 <div className="memory-card-preview">
                   {formatFileSize(doc.file_size_bytes)} · {doc.source_platform}
-                  {doc.word_count ? ` · ${doc.word_count} words` : ''}
+
+                </div>
+                <div className="memory-card-preview" style={{ marginTop: '8px', overflowWrap: 'anywhere' }}>
+                  {documentSourceSummary(doc)}
                 </div>
               </div>
             ))}
@@ -136,7 +140,7 @@ export function DocumentsView() {
               <polyline points="10 9 9 9 8 9" />
             </svg>
             <h3>No documents yet</h3>
-            <p>Import PDFs, Word documents, text files, and more. They'll be encrypted and stored on your Pocket USB.</p>
+            <p>No documents are listed in the current vault. Chat attachments are separate from this list; attaching a file does not automatically create a retained library source.</p>
           </div>
         )}
 
@@ -146,10 +150,11 @@ export function DocumentsView() {
             📄 Document Processing
           </h4>
           <div style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: 1.6 }}>
-            <p><strong>Text extraction:</strong> TXT, Markdown, CSV, HTML — fully supported</p>
-            <p><strong>Rich documents:</strong> PDF, DOCX, XLSX, PPTX — extracted locally via Rust backend</p>
+            <p><strong>Text extraction:</strong> TXT, Markdown, CSV and HTML — bounded extracts, not proof of complete document coverage</p>
+            <p><strong>Rich documents:</strong> Text-layer PDF, DOCX, XLSX, PPTX — extracted locally via Rust backend. Legacy DOC/XLS/PPT are not supported by these parsers.</p>
             <p><strong>OCR:</strong> Image text extraction lives in the Accessibility view (Blind Aid / OCR), not in Documents</p>
-            <p><strong>Search:</strong> TF-IDF text-based search across vault memory files</p>
+            <p><strong>PDF limits:</strong> 20 MiB input, 100 pages, 8,000 bytes of excerpt text. Page markers describe this extract, not durable citations. Empty text-layer pages are reported; scanned PDFs have no OCR fallback here.</p>
+            <p><strong>Search:</strong> This list filters metadata only. Memory retrieval elsewhere uses lexical TF-IDF, not vector search. Source text is untrusted evidence, not instructions or permission to act.</p>
           </div>
         </div>
       </div>

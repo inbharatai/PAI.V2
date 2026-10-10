@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     package="com.unoone.agent">
 
     <!-- Basic Connectivity -->
@@ -25,7 +26,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-<!-- WAKE_LOCK removed: no code path acquires a PowerManager wake lock; foreground services run without one. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -36,7 +38,8 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- System Integration & Control -->
-    <!-- READ_CONTACTS removed: declared but never used in code. Will trigger Play review. -->
+    <!-- Canonical resolve_contact uses explicit runtime permission; no background enumeration. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <!-- QUERY_ALL_PACKAGES removed: PackageResolver uses a hardcoded 10-app map, no runtime
          package query needed. This permission is sensitive and causes Play review rejection.
@@ -52,6 +55,7 @@
     <!-- Android 11+ package visibility for the small, curated offline app launcher map. This is
          intentionally exact-package visibility, not QUERY_ALL_PACKAGES. -->
     <queries>
+        <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
         <package android:name="com.whatsapp" />
         <package android:name="com.whatsapp.w4b" />
         <package android:name="com.google.android.gm" />
@@ -84,6 +88,17 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.UnoOne">
+
+        <activity android:name=".owl.OwlPracticeActivity" android:exported="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:windowSoftInputMode="stateAlwaysHidden" />
+
+        <!-- LiteRT-LM GPU acceleration. Both libraries are optional so unsupported devices cleanly
+             fall back to the existing CPU backend instead of failing application startup. -->
+        <uses-native-library
+            android:name="libvndksupport.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
 
         <activity
             android:name=".MainActivity"
@@ -123,7 +138,9 @@
         <service
             android:name=".FloatingAgentService"
             android:foregroundServiceType="specialUse"
-            android:exported="false" />
+            android:exported="false">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="User-enabled floating assistant controls with explicit task Stop; no background microphone authorization." />
+        </service>
 
         <!-- The "Hands" of the Agent - Accessibility Service -->
         <service
@@ -156,6 +173,8 @@
             </intent-filter>
         </receiver>
 
+        <receiver android:name=".TaskStopReceiver" android:exported="false" />
+        <service android:name="androidx.work.impl.foreground.SystemForegroundService" android:foregroundServiceType="dataSync" tools:node="merge" />
     </application>
 
 </manifest>

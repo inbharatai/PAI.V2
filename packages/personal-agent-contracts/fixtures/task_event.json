@@ -1,0 +1,21 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "TASK_EVENT",
+  "payload": {
+    "event_id": "event-1",
+    "operation_id": "op-1",
+    "task_id": "task-1",
+    "predecessor_event_id": null,
+    "origin_replica_id": "phone-1",
+    "assigned_replica_id": "phone-1",
+    "step": 0,
+    "deadline_ms": 61000,
+    "transition": "PLANNED",
+    "evidence_ref": null,
+    "external_object_id": null
+  }
+}

@@ -2,75 +2,139 @@ package com.unoone.agent.browser
 
 import android.content.Context
 import com.unoone.agent.AgentOrchestrator
-import com.unoone.agent.core.model.BrainModelRegistry
+import com.unoone.agent.resolveBrainLoadPath
+import com.unoone.agent.core.model.BrainRuntime
+import com.unoone.agent.localbrain.PageAgentPlan
+import com.unoone.agent.localbrain.QwenPageAgentPlanner
+import com.unoone.agent.core.model.BrainModelSpec
 import com.unoone.agent.core.model.ExclusiveBrainLeaseState
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.localbrain.PageAgentGemmaPlanner
 import com.unoone.agent.modelmanager.ModelManager
 import com.unoone.agent.securebrowser.BrowserModelPort
 import com.unoone.agent.securebrowser.PageAgentModelDecision
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
- * Exclusive ownership of the Gemma 4 model while the local Page Agent is active.
+ * Exclusive ownership of the selected local brain profile while the local Page Agent is active.
  *
- * Mobile memory cannot safely hold separate phone-agent and browser-agent copies of Gemma. Acquiring
- * this lease closes the main UnoOne brain, loads the same qualified artifact into a browser-only
- * planner, and exposes a [BrowserModelPort]. Normal release restores the main brain when it was loaded
- * before acquisition. Emergency release skips restoration so memory-pressure handling cannot
+ * Mobile memory must never hold separate phone-agent and browser-agent copies of a model. Acquiring this
+ * lease closes the main UnoOne brain, loads the same integrity-verified artifact into a browser-only
+ * planner, and exposes a [BrowserModelPort]. Normal release restores the main brain when it was
+ * loaded before acquisition. Emergency release skips restoration so memory-pressure handling cannot
  * immediately reallocate the model it just freed.
  */
 class SecureBrowserModelLease(
     context: Context,
-    private val orchestrator: AgentOrchestrator
+    private val orchestrator: AgentOrchestrator,
+    private val selectedProfile: () -> BrainModelSpec? = { null }
 ) {
 
     private val modelManager = ModelManager(context.applicationContext)
-    private val planner = PageAgentGemmaPlanner()
+    private val gemma by lazy { PageAgentGemmaPlanner() }
+    private val qwen by lazy { QwenPageAgentPlanner(residentOwner = OWNER_ID) }
+    @Volatile private var runtime = BrainRuntime.LITERT_LM
     private val mutex = Mutex()
 
     @Volatile private var active = false
-    private var restoreMainBrain = false
+    private var previousPhone: BrowserLeasePolicy.PhoneModel? = null
     private var leasedModelPath: String? = null
 
+    @Volatile private var stopping = false
+    fun requestStop() { stopping = true; requestCancel("browser task stop") }
+    suspend fun awaitStopAcknowledgement(): Boolean {
+        val acknowledged = cancelAndAwaitIdle()
+        if (acknowledged) stopping = false
+        return acknowledged
+    }
+
     fun isActive(): Boolean = active
-    fun activeBackend(): String = planner.activeBackend()
-    fun lastLoadError(): String = planner.lastLoadError()
+    fun activeBackend(): String = when (runtime) {
+        BrainRuntime.LITERT_LM -> gemma.activeBackend()
+        BrainRuntime.MNN -> qwen.activeBackend()
+        BrainRuntime.LLAMA_CPP -> ""
+    }
+    fun configReceipt(): String? = when (runtime) {
+        BrainRuntime.LITERT_LM -> null
+        BrainRuntime.MNN -> qwen.configReceipt()
+        BrainRuntime.LLAMA_CPP -> null
+    }
+    fun lastLoadError(): String = when (runtime) {
+        BrainRuntime.LITERT_LM -> gemma.lastLoadError()
+        BrainRuntime.MNN -> qwen.lastLoadError()
+        BrainRuntime.LLAMA_CPP -> "GUI-Owl browser protocol unsupported"
+    }
 
-    suspend fun acquire(): Result<BrowserModelPort> = mutex.withLock {
-        if (active) return@withLock Result.Error("Secure Browser already owns the Gemma model")
+    suspend fun acquire(): Result<BrowserModelPort> = com.unoone.agent.task.ModelTransitions.run { acquireUnderScheduler() }
 
-        val spec = BrainModelRegistry.GEMMA_4_E2B
-        val path = modelManager.getLlmModelPath(spec)
-            ?: return@withLock Result.Error(
-                "Gemma 4 E2B is not installed. Add a qualified .litertlm artifact before starting Secure Browser."
-            )
+    private suspend fun acquireUnderScheduler(): Result<BrowserModelPort> = mutex.withLock {
+        val generation = com.unoone.agent.core.runtime.GlobalTaskCancellation.generation
+        if (!BrowserLeasePolicy.canAcquire(active || ExclusiveBrainLeaseState.isActive())) return@withLock Result.Error("A local brain model is already exclusively reserved")
 
-        val mainWasLoaded = orchestrator.isLlmLoaded()
+        // Snapshot restoration identity before unload; never substitute the browser path.
+        val phoneResident = orchestrator.isPhoneBrainResident()
+        val prior = if (phoneResident) {
+            val priorPath = orchestrator.loadedBrainPath()
+                ?: return@withLock Result.Error("Phone artifact identity unavailable; browser acquisition refused")
+            val priorSpec = orchestrator.loadedBrainProfile()
+                ?: return@withLock Result.Error("Phone profile unavailable; browser acquisition refused")
+            BrowserLeasePolicy.PhoneModel(priorPath, priorSpec)
+        } else null
+        val selected = try { selectedProfile() }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { return@withLock Result.Error("Brain selection is not ready; try again after initialization") }
+        val spec = selected ?: BrowserLeasePolicy.browserProfile(prior, null)
+        // Capability admission MUST precede artifact resolution, reservation and phone unload.
+        if (!spec.supportsBrowserProtocol || spec.runtime == BrainRuntime.LLAMA_CPP) {
+            return@withLock Result.Error("${spec.displayName} does not support the Secure Browser protocol")
+        }
+        val path = withContext(Dispatchers.IO) { modelManager.resolveBrainLoadPath(spec) }
+            ?: return@withLock Result.Error("${spec.displayName} is not installed or failed integrity verification")
         if (!ExclusiveBrainLeaseState.acquire(OWNER_ID)) {
-            return@withLock Result.Error(
-                "Gemma is already reserved by ${ExclusiveBrainLeaseState.currentOwner() ?: "another UnoOne mode"}."
-            )
+            return@withLock Result.Error("Local brain is already reserved by another UnoOne mode")
         }
 
-        restoreMainBrain = mainWasLoaded
+        runtime = spec.runtime
+        previousPhone = prior
         leasedModelPath = path
-        if (restoreMainBrain) orchestrator.unloadLlmModel()
+        var browserLoadStarted = false
+        try {
+            val restoreAuthorization = com.unoone.agent.task.PhoneModelRestoreAuthorization.capture()
+            // Always run the native unload barrier, including when a load was in flight.
+            val unloaded = orchestrator.unloadLlmModel()
+            if (!BrowserLeasePolicy.canLoadBrowser(unloaded, orchestrator.isPhoneBrainResident())) {
+                previousPhone = null
+                leasedModelPath = null
+                ExclusiveBrainLeaseState.release(OWNER_ID)
+                return@withLock Result.Error("Phone native engine remains resident; browser acquisition refused")
+            }
 
-        val load = planner.load(path, spec)
-        if (load is Result.Error) {
-            ExclusiveBrainLeaseState.release(OWNER_ID)
-            if (restoreMainBrain) orchestrator.loadLlmModel(path, spec)
-            restoreMainBrain = false
-            leasedModelPath = null
-            return@withLock load
-        }
+            check(com.unoone.agent.core.runtime.AgentRuntimeGate.isEnabled() && generation == com.unoone.agent.core.runtime.GlobalTaskCancellation.generation) { "Browser transition revoked" }
+            browserLoadStarted = true
+            val load = loadBrowser(path, spec)
+            if (load is Result.Error) {
+                if (!closeBrowser()) {
+                    active = true
+                    return@withLock Result.Error("Browser cleanup refused; exclusive lease retained")
+                }
+                restorePreviousPhone(restoreAuthorization)
+                previousPhone = null
+                leasedModelPath = null
+                ExclusiveBrainLeaseState.release(OWNER_ID)
+                return@withLock load
+            }
 
-        active = true
-        Result.Success(
+            check(com.unoone.agent.core.runtime.AgentRuntimeGate.isEnabled() && generation == com.unoone.agent.core.runtime.GlobalTaskCancellation.generation) { "Browser transition revoked" }
+            active = true
+            Result.Success(
             BrowserModelPort { invocation ->
-                when (val result = planner.plan(
+                if (stopping) return@BrowserModelPort kotlin.Result.failure(IllegalStateException("Native browser stop is not yet acknowledged"))
+                when (val result = planBrowser(
                     pageAgentSystemPrompt = invocation.systemPrompt,
                     pageAgentUserPrompt = invocation.userPrompt,
                     macroToolSchemaJson = invocation.macroToolSchemaJson,
@@ -90,30 +154,125 @@ class SecureBrowserModelLease(
                     )
                 }
             }
-        )
+            )
+        } catch (cancelled: CancellationException) {
+            requestCancel("browser acquisition cancelled")
+            withContext(NonCancellable + Dispatchers.IO) {
+                val browserClosed = !browserLoadStarted || runCatching { closeBrowser() }.getOrDefault(false)
+                if (browserClosed) {
+                    // Failed or revoked acquisition must not resurrect the phone brain.
+                    active = false
+                    previousPhone = null
+                    leasedModelPath = null
+                    ExclusiveBrainLeaseState.release(OWNER_ID)
+                } else {
+                    // Native work is still alive. Keep the exclusive lease so no phone engine can
+                    // be created beside it; a later explicit release will retry cancellation.
+                    active = true
+                    leasedModelPath = path
+                }
+            }
+            throw cancelled
+        } catch (error: Exception) {
+            withContext(NonCancellable + Dispatchers.IO) {
+                val browserClosed = !browserLoadStarted || runCatching { closeBrowser() }.getOrDefault(false)
+                if (browserClosed) {
+                    // Failed or revoked acquisition must not resurrect the phone brain.
+                    active = false
+                    previousPhone = null
+                    leasedModelPath = null
+                    ExclusiveBrainLeaseState.release(OWNER_ID)
+                } else {
+                    active = true
+                    leasedModelPath = path
+                }
+            }
+            Result.Error("Secure Browser model transition failed: ${error.message}", error)
+        }
     }
 
-    suspend fun release(restore: Boolean = true): Result<Unit> = mutex.withLock {
+    suspend fun release(restore: Boolean = true): Result<Unit> {
+        val generation = com.unoone.agent.core.runtime.GlobalTaskCancellation.generation
+        return com.unoone.agent.task.ModelTransitions.run(cleanup = true) { releaseUnderScheduler(restore, generation) }
+    }
+
+    private suspend fun releaseUnderScheduler(restore: Boolean, generation: Long): Result<Unit> = mutex.withLock {
         if (!active && leasedModelPath == null) {
             ExclusiveBrainLeaseState.release(OWNER_ID)
             return@withLock Result.Success(Unit)
         }
 
-        planner.close()
-        active = false
-        val path = leasedModelPath
-        val shouldRestore = restore && restoreMainBrain
-        leasedModelPath = null
-        restoreMainBrain = false
-        ExclusiveBrainLeaseState.release(OWNER_ID)
-
-        if (shouldRestore && path != null) {
-            return@withLock orchestrator.loadLlmModel(path, BrainModelRegistry.GEMMA_4_E2B)
+        requestCancel("browser lease released")
+        val browserClosed = closeBrowser()
+        if (!browserClosed) {
+            return@withLock Result.Error(
+                "Secure Browser native inference did not stop; phone brain was not restored"
+            )
         }
-        Result.Success(Unit)
+        active = false
+        // Capture while still in the exact scheduling owner, before deliberate cleanup Job change.
+        val restoreAuthorization = com.unoone.agent.task.PhoneModelRestoreAuthorization.capture()
+        // Keep ownership until restoration finishes, including cancellation/exception cleanup.
+        withContext(NonCancellable) {
+            try {
+                if (restore && com.unoone.agent.core.runtime.AgentRuntimeGate.isEnabled() && generation == com.unoone.agent.core.runtime.GlobalTaskCancellation.generation) restorePreviousPhone(restoreAuthorization) else Result.Success(Unit)
+            } finally {
+                leasedModelPath = null
+                previousPhone = null
+                ExclusiveBrainLeaseState.release(OWNER_ID)
+            }
+        }
+    }
+
+    /** Only invoked after browser close proof. Never create a second phone engine on unload refusal. */
+    private suspend fun restorePreviousPhone(authorization: com.unoone.agent.task.PhoneModelRestoreAuthorization): Result<Unit> {
+        val prior = BrowserLeasePolicy.restoration(
+            previousPhone, browserClosed = true, phoneResident = orchestrator.isPhoneBrainResident()
+        ) ?: return Result.Success(Unit)
+        return orchestrator.loadLlmModelUnderLease(prior.path, prior.spec, authorization)
+    }
+
+    private fun requestCancel(reason: String) {
+        when (runtime) {
+        BrainRuntime.LITERT_LM -> gemma.requestCancel(reason)
+        BrainRuntime.MNN -> qwen.requestCancel(reason)
+        BrainRuntime.LLAMA_CPP -> Unit
+    }
+    }
+
+    private suspend fun cancelAndAwaitIdle(): Boolean =
+        when (runtime) {
+        BrainRuntime.LITERT_LM -> gemma.cancelAndAwaitIdle()
+        BrainRuntime.MNN -> qwen.cancelAndAwaitIdle()
+        BrainRuntime.LLAMA_CPP -> false
+    }
+
+    private suspend fun closeBrowser(): Boolean =
+        when (runtime) {
+        BrainRuntime.LITERT_LM -> gemma.close()
+        BrainRuntime.MNN -> qwen.close()
+        BrainRuntime.LLAMA_CPP -> false
+    }
+
+    private suspend fun loadBrowser(path: String, spec: BrainModelSpec): Result<Unit> =
+        when (runtime) {
+        BrainRuntime.LITERT_LM -> gemma.load(path, spec, OWNER_ID)
+        BrainRuntime.MNN -> qwen.load(path, spec, OWNER_ID)
+        BrainRuntime.LLAMA_CPP -> Result.Error("GUI-Owl browser protocol unsupported")
+    }
+
+    private suspend fun planBrowser(
+        pageAgentSystemPrompt: String,
+        pageAgentUserPrompt: String,
+        macroToolSchemaJson: String,
+        maxOutputTokens: Int
+    ): Result<PageAgentPlan> = when (runtime) {
+        BrainRuntime.MNN -> qwen.plan(pageAgentSystemPrompt, pageAgentUserPrompt, macroToolSchemaJson, maxOutputTokens)
+        BrainRuntime.LITERT_LM -> gemma.plan(pageAgentSystemPrompt, pageAgentUserPrompt, macroToolSchemaJson, maxOutputTokens)
+        BrainRuntime.LLAMA_CPP -> Result.Error("GUI-Owl browser protocol unsupported")
     }
 
     companion object {
-        const val OWNER_ID = "secure-browser-page-agent"
+        const val OWNER_ID = "secure-browser"
     }
 }

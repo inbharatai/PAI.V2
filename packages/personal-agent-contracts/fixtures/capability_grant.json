@@ -1,0 +1,53 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "CAPABILITY_GRANT",
+  "payload": {
+    "grant_id": "grant-1",
+    "person_id": "person-1",
+    "replica_id": "phone-1",
+    "scopes": {
+      "capabilities": [
+        "mail.read"
+      ],
+      "tools": [
+        "draft_email"
+      ],
+      "data": [
+        {
+          "kind": "ACCOUNT",
+          "resource_id": "mail-1",
+          "operations": [
+            "READ"
+          ]
+        }
+      ],
+      "recipients": [],
+      "hosts": [
+        "phone-1"
+      ],
+      "operations": [
+        "READ",
+        "SUGGEST"
+      ],
+      "delegation": "READ_AND_SUGGEST",
+      "network": "OFFLINE_ONLY"
+    },
+    "budget": {
+      "max_steps": 8,
+      "max_tool_calls": 8,
+      "max_duration_ms": 60000,
+      "max_bytes": 8192,
+      "max_network_calls": 0,
+      "max_depth": 2,
+      "max_children": 2
+    },
+    "issued_at_ms": 1000,
+    "expires_at_ms": 61000,
+    "stop_generation": 0,
+    "revoked": false
+  }
+}

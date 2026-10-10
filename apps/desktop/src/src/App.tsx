@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, Component, type ReactNode } f
 import { UnlockScreen } from './components/UnlockScreen';
 import { Sidebar, type ViewId } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
+import { PersonalAgentPanel } from './components/PersonalAgentPanel';
 import { RecordingView } from './components/RecordingView';
 import { MemoryExplorer } from './components/MemoryExplorer';
 import { VaultView } from './components/VaultView';
@@ -14,7 +15,7 @@ import { DocumentsView } from './components/DocumentsView';
 import { AccessibilityView } from './components/AccessibilityView';
 import { CodingTaskView } from './components/CodingTaskView';
 import { KnowledgeView } from './components/KnowledgeView';
-import { tauriApi, type StartupPhase, type PendingGrantInfo } from './lib/tauri';
+import { tauriApi, type StartupPhase, type PendingGrantInfo, type VaultInfo } from './lib/tauri';
 import { listen } from '@tauri-apps/api/event';
 import { ensureBrowserWorkspaceWindow } from './lib/browserWorkspaceWindow';
 import { ensurePreviewWindow } from './lib/previewWindow';
@@ -63,6 +64,7 @@ function App() {
   const [currentView, setCurrentView] = useState<ViewId>('chat');
   const [vaultId, setVaultId] = useState<string>('');
   const [vaultRoot, setVaultRoot] = useState<string>('');
+  const [storageKind, setStorageKind] = useState<VaultInfo['storage_kind']>(undefined);
   // Root detected while the unlock screen is still showing. The model
   // weights live on the pen drive as public assets (MODELS/, not the
   // encrypted vault), so the model server can begin loading the moment the
@@ -78,7 +80,8 @@ function App() {
   const screenRef = useRef(screen);
   screenRef.current = screen;
 
-  const handleUnlock = useCallback((id: string, root: string) => {
+  const handleUnlock = useCallback((id: string, root: string, kind?: VaultInfo['storage_kind']) => {
+    setStorageKind(kind || 'legacy_drive');
     setVaultId(id);
     setVaultRoot(root);
     setScreen('main');
@@ -127,7 +130,9 @@ function App() {
     tauriApi.detectVault()
       .then(info => {
         if (active && info?.detected && info?.vault_root) {
-          setPreUnlockRoot(info.vault_root);
+          setStorageKind(info.storage_kind || 'legacy_drive');
+          // Local vault creation is not permission to boot an unverified model.
+          if (info.storage_kind !== 'local') setPreUnlockRoot(info.vault_root);
         }
       })
       .catch(() => undefined);
@@ -144,7 +149,12 @@ function App() {
   // state to READY after model identity and health verification.
   useEffect(() => {
     const bootRoot = vaultRoot || preUnlockRoot;
-    if (!bootRoot) return;
+    if (!bootRoot || !storageKind) return;
+    // Local mode boots only after unlock (preUnlockRoot is never set for it)
+    // and runs the SAME chain: the backend's single native decision function
+    // admits an already-present, hash-verified file or refuses; a start is
+    // only reported successful after a real inference smoke. Nothing is
+    // downloaded. Failure lands in Limited mode with the native reason.
     if (screen !== 'unlock' && screen !== 'main') return;
     if (bootstrappedRoot.current === bootRoot) return;
     // The chain is deliberately NOT cancelled by effect cleanup: the user
@@ -202,7 +212,7 @@ function App() {
         setBootError(`Limited mode: ${e instanceof Error ? e.message : String(e)}`);
       }
     })();
-  }, [screen, vaultRoot, preUnlockRoot]);
+  }, [screen, vaultRoot, preUnlockRoot, storageKind]);
 
   useEffect(() => {
     if (screen !== 'main') return;
@@ -227,7 +237,7 @@ function App() {
     let active = true;
     let unlisten: (() => void) | undefined;
     void listen<string>('pai-disconnected', () => {
-      if (!active) return;
+      if (!active || storageKind === 'local') return;
       handleLock();
       setBootError('Pocket AI was disconnected. Inference and recording were stopped and the vault was locked.');
     }).then(fn => { unlisten = fn; });
@@ -235,7 +245,7 @@ function App() {
       active = false;
       unlisten?.();
     };
-  }, [handleLock]);
+  }, [handleLock, storageKind]);
 
   // Defect #31 (live-caught 2026-09-14): the blur auto-lock calls
   // handleLock → stop_model_server, which killed an in-flight agent task —
@@ -399,6 +409,8 @@ function App() {
     switch (currentView) {
       case 'chat':
         return null; // ChatView is always mounted below.
+      case 'personal':
+        return <PersonalAgentPanel />;
       case 'recordings':
         return <RecordingView />;
       case 'memory':
@@ -435,7 +447,7 @@ function App() {
         <div className="main-content">
           {startupPhase !== 'READY' && (
             <div style={{ padding: '8px 16px', background: 'var(--surface-secondary)', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', fontSize: '12px' }}>
-              Pocket AI startup: {startupPhase.replaceAll('_', ' ')}
+              {storageKind === 'local' ? 'Local installation' : 'Pocket AI startup'}: {startupPhase.replaceAll('_', ' ')}
             </div>
           )}
           {bootError && (

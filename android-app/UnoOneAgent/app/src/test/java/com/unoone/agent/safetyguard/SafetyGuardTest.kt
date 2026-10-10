@@ -18,8 +18,7 @@ class SafetyGuardTest {
         val directTools = listOf(
             "create_note", "search_notes", "summarize_text", "speak_response",
             "open_chrome", "open_app", "deactivate_blind_aid", "check_calendar", "open_calendar",
-            "prepare_document_fill", "go_home", "go_back", "scroll",
-            "open_notifications", "open_recents", "resolve_contact", "check_calendar_conflict"
+            "prepare_document_fill"
         )
         for (tool in directTools) {
             assertEquals("$tool should be DIRECT", RiskLevel.DIRECT, guard.classify(tool))
@@ -29,11 +28,8 @@ class SafetyGuardTest {
     @Test
     fun confirmToolsClassifiedCorrectly() {
         val confirmTools = listOf(
-            "open_url", "open_calendar_insert", "create_calendar_event", "open_dialer",
-            "share_text", "open_camera", "create_skill",
-            "click_accessibility_node", "type_into_accessibility_node",
-            "long_press_accessibility_node", "voice_recording", "web_search",
-            "secure_browser_task"
+            "open_url", "open_calendar_insert", "open_dialer", "share_text",
+            "open_camera", "create_skill"
         )
         for (tool in confirmTools) {
             assertEquals("$tool should be CONFIRM", RiskLevel.CONFIRM, guard.classify(tool))
@@ -44,8 +40,9 @@ class SafetyGuardTest {
     fun strongConfirmToolsClassifiedCorrectly() {
         val strongConfirmTools = listOf(
             "delete_notes", "delete_all_notes", "export_data", "detect_objects",
-            "draft_email", "send_whatsapp", "send_prepared_whatsapp", "system_control",
-            "describe_scene", "read_screen", "ocr_screen", "draft_whatsapp_message"
+            "draft_email", "send_whatsapp", "system_control", "find_and_click", "fill",
+            // Imported native screen capture requires the stronger privacy boundary.
+            "read_screen", "ocr_screen"
         )
         for (tool in strongConfirmTools) {
             assertEquals("$tool should be STRONG_CONFIRM", RiskLevel.STRONG_CONFIRM, guard.classify(tool))
@@ -215,44 +212,5 @@ class SafetyGuardTest {
         val toolRisk = guard.classify("send_whatsapp")
         val inputRisk = guard.classifyFromInput("send a whatsapp message to mom")
         assertEquals(toolRisk, inputRisk)
-    }
-
-    // === M3: "message" keyword false-positive fix ===
-
-    @Test
-    fun readMessageOnScreen_notBlocked() {
-        // "read the message on screen" should NOT be blocked — it's a read-only operation.
-        assertEquals(RiskLevel.DIRECT, guard.classifyFromInput("read the message on screen"))
-    }
-
-    @Test
-    fun searchMessage_notBlocked() {
-        assertEquals(RiskLevel.DIRECT, guard.classifyFromInput("search for the message from Rahul"))
-    }
-
-    @Test
-    fun checkMessage_notBlocked() {
-        assertEquals(RiskLevel.DIRECT, guard.classifyFromInput("check the message on WhatsApp"))
-    }
-
-    @Test
-    fun showMessage_notBlocked() {
-        assertEquals(RiskLevel.DIRECT, guard.classifyFromInput("show the message from mom"))
-    }
-
-    @Test
-    fun whatMessage_notBlocked() {
-        assertEquals(RiskLevel.DIRECT, guard.classifyFromInput("what does the message say"))
-    }
-
-    @Test
-    fun lookMessage_notBlocked() {
-        assertEquals(RiskLevel.DIRECT, guard.classifyFromInput("look at the message from Priya"))
-    }
-
-    @Test
-    fun sendMessage_stillBlocked() {
-        // "send message" without read/search/check context is still blocked.
-        assertEquals(RiskLevel.BLOCK, guard.classifyFromInput("send message to John"))
     }
 }

@@ -1,0 +1,23 @@
+[package]
+name = "unoone-personal-provider-adapters"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+reqwest = { version = "=0.12.28", features = ["json"] }
+tokio = { version = "=1.53.1", features = ["rt", "time", "net", "macros"] }
+sha2 = "=0.10.9"
+base64 = "=0.22.1"
+rand = "=0.8.7"
+uuid = { version = "=1.24.1", features = ["v4"] }
+chrono = "=0.4.45"
+zeroize = "=1.9.0"
+unoone-vault-core = { path = "../vault-core" }
+unoone-personal-agent-runtime = { path = "../personal-agent-runtime" }
+unoone-privacy-guardian = { path = "../privacy-guardian" }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

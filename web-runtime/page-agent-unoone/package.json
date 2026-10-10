@@ -9,11 +9,10 @@
     "bundle:android": "npm run build && node scripts/copy-to-android.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests",
-    "test:e2e": "playwright test"
+    "test:e2e": "npm run build && playwright test"
   },
   "dependencies": {
     "@page-agent/core": "1.12.1",
-    "@page-agent/page-controller": "1.12.1",
     "zod": "4.4.3"
   },
   "devDependencies": {

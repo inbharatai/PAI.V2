@@ -325,7 +325,7 @@ impl DocumentProcessor {
                                                 success: true,
                                                 extracted_text: Some(text),
                                                 summary: Some(format!(
-                                                    "[PDF extracted, {} words]",
+                                                    "[PDF text-layer excerpt, {} words including extraction notices; not a full-document word count]",
                                                     word_count
                                                 )),
                                                 error: None,
@@ -574,64 +574,11 @@ pub(crate) fn strip_html_tags(html: &str) -> String {
     unoone_text::truncate_bytes_with_notice(&text, 8000)
 }
 
-/// Extract text from a PDF using the lopdf crate for proper content stream parsing
-pub(crate) fn extract_pdf_text(path: &PathBuf) -> Result<String, String> {
-    let pdf = lopdf::Document::load(path).map_err(|e| format!("Failed to parse PDF: {}", e))?;
-
-    let mut text_parts: Vec<String> = Vec::new();
-
-    // Iterate over all pages using the page tree
-    let pages = pdf.get_pages();
-
-    for (_, page_id) in pages {
-        // Get the page content stream
-        match pdf.get_page_content(page_id) {
-            Ok(content) => {
-                // Parse the content stream for text operators
-                let content_str = String::from_utf8_lossy(&content);
-
-                // Extract text from Tj and TJ operators
-                for line in content_str.lines() {
-                    if let Some(text) = extract_pdf_string(line) {
-                        if !text.trim().is_empty() {
-                            text_parts.push(text);
-                        }
-                    }
-                }
-            }
-            Err(_) => continue, // Skip pages that can't be read
-        }
-    }
-
-    // If lopdf extraction yielded nothing, the PDF might be image-based
-    if text_parts.is_empty() {
-        return Err(
-            "No text could be extracted from this PDF. It may be image-based or encrypted."
-                .to_string(),
-        );
-    }
-
-    let result = text_parts.join(" ");
-    let word_count = result.split_whitespace().count();
-    if word_count < 3 {
-        return Err("PDF appears to contain no readable text. It may be image-based.".to_string());
-    }
-
-    Ok(unoone_text::truncate_bytes_with_notice(&result, 8000))
-}
-
-/// Extract a text string from a PDF Tj/TJ operator line
-fn extract_pdf_string(line: &str) -> Option<String> {
-    // Look for (text) Tj pattern
-    if let Some(start) = line.find('(') {
-        if let Some(end) = line.rfind(')') {
-            if end > start {
-                return Some(line[start + 1..end].to_string());
-            }
-        }
-    }
-    None
-}
+// Kept separate so the production extractor and hermetic fixtures can be tested
+// without compiling the desktop shell or invoking any model.
+#[path = "documents_pdf.rs"]
+mod pdf_text;
+pub(crate) use pdf_text::extract_pdf_text;
 
 /// Extract text from a DOCX file using proper ZIP+XML parsing
 pub(crate) fn extract_docx_text(path: &PathBuf) -> Result<String, String> {

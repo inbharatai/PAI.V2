@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -28,6 +29,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -42,7 +44,7 @@ import com.unoone.agent.ui.theme.DoneGreen
 import com.unoone.agent.ui.theme.FailedRed
 import com.unoone.agent.ui.viewmodel.ModelStatusViewModel
 
-/** Model health, installation and sole-brain qualification screen. */
+/** Model health, installation and selected-brain qualification screen. */
 @Composable
 fun ModelStatusScreen(viewModel: ModelStatusViewModel, onBack: () -> Unit) {
     val rows by viewModel.rows.collectAsState()
@@ -50,9 +52,50 @@ fun ModelStatusScreen(viewModel: ModelStatusViewModel, onBack: () -> Unit) {
     val storageUsageMb by viewModel.storageUsageMb.collectAsState()
     val resultMessage by viewModel.resultMessage.collectAsState()
     val busy by viewModel.busy.collectAsState()
+    val profiles by viewModel.profiles.collectAsState()
     val brainStatus by viewModel.brainStatus.collectAsState()
     val selfTest by viewModel.selfTest.collectAsState()
     val brainBusy by viewModel.brainBusy.collectAsState()
+    val verifying by viewModel.verifying.collectAsState()
+    val pendingExperimentalSelection by viewModel.pendingExperimentalSelection.collectAsState()
+    pendingExperimentalSelection?.let { selectedId ->
+        val owl = selectedId == com.unoone.agent.core.model.GuiOwlArtifact.MANIFEST_ID
+        AlertDialog(
+            onDismissRequest = viewModel::dismissExperimentalSelection,
+            title = { Text(if (owl) "Opt in to experimental GUI-Owl?" else "Opt in to experimental Qwen?") },
+            text = { Text(if (owl) "GUI-Owl 1.5 4B uses llama.cpp with a required GGUF decoder + projector (about 2.95 GB). 8 GB RAM is conservative policy, not a measured guarantee; model + KV/vision overhead must fit available RAM. Phone qualification is pending. Browser DOM protocol is unsupported. No fallback or screenshot consent is granted. Other profiles remain installed. " + com.unoone.agent.core.model.GuiOwlArtifact.PROVENANCE_DISCLOSURE else "Qwen 3.5 2B uses MNN and a complete nine-file artifact set. Native/device, vision and performance qualification are pending. This changes only your selected profile; E2B/E4B remain available. No automatic fallback or screenshot capture is enabled.") },
+            confirmButton = { Button(onClick = viewModel::confirmExperimentalSelection) { Text("Opt in and select") } },
+            dismissButton = { TextButton(onClick = viewModel::dismissExperimentalSelection) { Text("Cancel") } }
+        )
+    }
+    val pendingDeviceCheck by viewModel.pendingDeviceCheck.collectAsState()
+    pendingDeviceCheck?.let { check ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissDeviceCheck,
+            title = { Text("Device Check — manual, unqualified") },
+            text = { Text(check.summary() + "\nExplicit approval is limited to this exact profile, 24 hours, the shown download and bounded local storage. This is not automatic recommendation, licence clearance, or screenshot consent.") },
+            confirmButton = { Button(onClick = viewModel::confirmDeviceCheck, enabled = check.physicalPreview.allowed) { Text("Accept manual risk") } },
+            dismissButton = { TextButton(onClick = viewModel::dismissDeviceCheck) { Text("Pause") } }
+        )
+    }
+    val pendingMeteredInstall by viewModel.pendingMeteredInstall.collectAsState()
+    val activation by viewModel.activation.collectAsState()
+
+    pendingMeteredInstall?.let { modelId ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissMeteredInstall,
+            title = { Text("Use mobile data?") },
+            text = {
+                Text("$modelId is a large offline model. Wi-Fi is recommended. Continue on this metered connection only if you approve the data use.")
+            },
+            confirmButton = {
+                Button(onClick = viewModel::confirmMeteredInstall) { Text("Use mobile data") }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissMeteredInstall) { Text("Wait for Wi-Fi") }
+            }
+        )
+    }
 
     LaunchedEffect(resultMessage) {
         if (resultMessage != null) {
@@ -107,18 +150,66 @@ fun ModelStatusScreen(viewModel: ModelStatusViewModel, onBack: () -> Unit) {
                         progress = { item.percent / 100f },
                         modifier = Modifier.fillMaxWidth()
                     )
+                    TextButton(onClick = viewModel::cancelInstall) { Text("Cancel download") }
                 }
             }
             Spacer(modifier = Modifier.height(12.dp))
         }
 
+        activation?.let { state ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    val phases = listOf("Download", "Staged", "Verifying", "Active")
+                    val reached = when (state.phase) {
+                        com.unoone.agent.model.StagedActivation.Phase.STAGED -> 1
+                        com.unoone.agent.model.StagedActivation.Phase.VERIFYING -> 2
+                        com.unoone.agent.model.StagedActivation.Phase.ACTIVE -> 3
+                        com.unoone.agent.model.StagedActivation.Phase.FAILED -> 2
+                    }
+                    Text("${state.modelId}: " + phases.mapIndexed { i, name ->
+                        if (i < reached || (i == reached && state.phase != com.unoone.agent.model.StagedActivation.Phase.FAILED)) "✓ $name" else name
+                    }.joinToString(" → "), fontWeight = FontWeight.SemiBold)
+                    if (state.phase == com.unoone.agent.model.StagedActivation.Phase.FAILED) {
+                        Text("Activation failed — previous active model retained.", color = FailedRed)
+                    }
+                    Text(state.detail, style = MaterialTheme.typography.bodySmall)
+                    if (state.phase == com.unoone.agent.model.StagedActivation.Phase.VERIFYING) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        TextButton(onClick = viewModel::dismissActivation) { Text("Dismiss") }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
+        Text("Planning profile", style = MaterialTheme.typography.titleMedium)
+        Text("E2B is the new-install default. Existing verified E4B installations are retained. Qwen and GUI-Owl are independently experimental and opt-in only. Selecting or downloading never deletes other profiles.",
+            style = MaterialTheme.typography.bodySmall)
+        profiles.forEach { profile ->
+            val selected = profile.manifestId == brainStatus?.manifestId
+            OutlinedButton(
+                onClick = { viewModel.selectBrain(profile.manifestId) },
+                enabled = !selected && !brainBusy && !verifying && !busy
+            ) {
+                Text("${if (selected) "Selected: " else "Select "}${profile.displayName} — ${if (profile.installed) "installed" else "not installed"}")
+            }
+        }
+        if (brainStatus?.installed == false) {
+            Text("Selected profile is not installed or failed integrity verification. Install it below, or explicitly select an installed profile above. No automatic fallback.",
+                style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(modifier = Modifier.height(12.dp))
         brainStatus?.let { brain ->
             BrainCard(
                 row = brain,
                 selfTest = selfTest,
-                busy = brainBusy,
+                busy = brainBusy || verifying,
+                verifying = verifying,
                 onLoad = viewModel::loadBrain,
-                onSelfTest = viewModel::runBrainSelfTest
+                onSelfTest = viewModel::runBrainSelfTest,
+                onVerify = viewModel::verifyBrainArtifact
             )
         }
 
@@ -139,7 +230,7 @@ fun ModelStatusScreen(viewModel: ModelStatusViewModel, onBack: () -> Unit) {
             Text("No models declared in the bundled manifest.")
         } else {
             rows.forEach { row ->
-                ModelRowCard(row, busy, viewModel::installModel, viewModel::uninstallModel)
+                ModelRowCard(row, busy || brainBusy, viewModel::installModel, viewModel::uninstallModel, viewModel::activateStaged)
             }
         }
     }
@@ -150,8 +241,10 @@ private fun BrainCard(
     row: ModelStatusViewModel.BrainStatusRow,
     selfTest: BrainSelfTestResult?,
     busy: Boolean,
+    verifying: Boolean,
     onLoad: () -> Unit,
-    onSelfTest: () -> Unit
+    onSelfTest: () -> Unit,
+    onVerify: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -166,15 +259,23 @@ private fun BrainCard(
             HorizontalDivider()
             Spacer(modifier = Modifier.height(8.dp))
 
-            DetailLine("Runtime", "LiteRT-LM")
+            DetailLine("Runtime", row.runtime)
+            DetailLine("Artifact set", row.artifactSummary)
+            DetailLine("Runtime status", row.runtimeStatus)
+            DetailLine("Experimental vision", "Off — trusted privacy gate and fresh image provider not wired")
             DetailLine("Installed", if (row.installed) "Yes" else "No")
             DetailLine(
-                "Integrity",
-                if (row.installed && row.isDeviceVerified) "Device-qualified" else "Qualification pending"
+                "Evidence",
+                when {
+                    row.installed && row.isDeviceVerified -> "Qualified — signed physical-device record"
+                    row.installed -> row.evidenceLabel
+                    else -> "Unknown — not installed"
+                }
             )
+            if (row.lastReceipt.isNotBlank()) DetailLine("Last native receipt", row.lastReceipt)
             DetailLine(
                 "Memory gate",
-                "${row.minimumRamMb} MB minimum · ${row.recommendedRamMb} MB recommended"
+                "${row.minimumRamMb} MB minimum · ${row.recommendedRamMb} MB recommended (policy, not measured qualification)"
             )
             DetailLine(
                 "Loaded",
@@ -193,6 +294,7 @@ private fun BrainCard(
                 DetailLine(
                     "Self-test",
                     when {
+                        result.manifestId == com.unoone.agent.core.model.GuiOwlArtifact.MANIFEST_ID -> result.message
                         !result.installed -> "Artifact not installed"
                         !result.loaded -> "Load failed: ${result.loadError}"
                         result.proposedTool == null -> "Loaded on ${result.backend}; no tool proposed"
@@ -203,12 +305,18 @@ private fun BrainCard(
             }
 
             Spacer(modifier = Modifier.height(12.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (busy) {
                     CircularProgressIndicator(modifier = Modifier.height(24.dp), strokeWidth = 2.dp)
+                    Text(if (verifying) "Hashing the complete artifact…" else "Working…")
                 } else {
-                    OutlinedButton(onClick = onLoad, enabled = row.installed) { Text("Load Brain") }
-                    Button(onClick = onSelfTest, enabled = row.installed) { Text("Run Self-Test") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onLoad, enabled = row.installed) { Text("Load Brain") }
+                        Button(onClick = onSelfTest, enabled = row.installed) { Text(if (row.manifestId == com.unoone.agent.core.model.GuiOwlArtifact.MANIFEST_ID) "Run Owl Self-Test" else "Run Self-Test") }
+                    }
+                    OutlinedButton(onClick = onVerify, enabled = row.installed) {
+                        Text("Verify complete SHA-256")
+                    }
                 }
             }
         }
@@ -220,7 +328,8 @@ private fun ModelRowCard(
     row: ModelStatusViewModel.ModelRow,
     busy: Boolean,
     onInstall: (String) -> Unit,
-    onUninstall: (String) -> Unit
+    onUninstall: (String) -> Unit,
+    onActivate: (String) -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -258,6 +367,8 @@ private fun ModelRowCard(
             DetailLine("Backend", row.backend)
             DetailLine("Minimum RAM", if (row.minRamMb > 0) "${row.minRamMb} MB" else "—")
             DetailLine("SHA-256", row.sha256Preview, mono = true)
+            DetailLine("Evidence", row.evidenceLabel)
+            if (row.staged) DetailLine("Bundle", "Staged — not yet Active (previous bundle still routed)")
             if (!row.verified) DetailLine("Health", row.healthMessage)
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -268,6 +379,11 @@ private fun ModelRowCard(
                     Button(onClick = { onInstall(row.id) }) {
                         Icon(Icons.Default.CloudDownload, contentDescription = null)
                         Text(if (row.present) "Repair" else "Install", modifier = Modifier.padding(start = 6.dp))
+                    }
+                }
+                if (row.staged && !busy) {
+                    Button(onClick = { onActivate(row.id) }) {
+                        Text("Verify & activate")
                     }
                 }
                 if (row.present && !busy) {

@@ -31,7 +31,7 @@ interface ConversationTurnDao {
     suspend fun allOnce(): List<ConversationTurnEntity>
 
     /** Turns not yet mirrored to the vault (created while detached/locked). */
-    @Query("SELECT * FROM conversation_turns WHERE vaultRecordId IS NULL ORDER BY id ASC")
+    @Query("SELECT * FROM conversation_turns WHERE (vaultRecordId IS NULL OR id IN (SELECT localId FROM pending_writes WHERE recordKind IN ('TRANSCRIPT'))) ORDER BY id ASC")
     suspend fun notSynced(): List<ConversationTurnEntity>
 
     /** Link a cache row to the vault record it was mirrored as. */
@@ -39,11 +39,11 @@ interface ConversationTurnDao {
     suspend fun setVaultLink(id: Long, vaultRecordId: String, vaultRevision: Int): Int
 
     /** Cache eviction that can never lose data: only already-synced turns. */
-    @Query("DELETE FROM conversation_turns WHERE createdAt < :cutoff AND vaultRecordId IS NOT NULL")
+    @Query("DELETE FROM conversation_turns WHERE createdAt < :cutoff AND vaultRecordId IS NOT NULL AND id NOT IN (SELECT localId FROM pending_writes WHERE recordKind IN ('TRANSCRIPT'))")
     suspend fun deleteOlderThanSynced(cutoff: Long): Int
 
     /** Vault-disconnect cleanup that can never lose data: only synced turns. */
-    @Query("DELETE FROM conversation_turns WHERE vaultRecordId IS NOT NULL")
+    @Query("DELETE FROM conversation_turns WHERE vaultRecordId IS NOT NULL AND id NOT IN (SELECT localId FROM pending_writes WHERE recordKind IN ('TRANSCRIPT'))")
     suspend fun deleteSynced(): Int
 
     /**

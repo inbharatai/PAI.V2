@@ -1,6 +1,5 @@
 package com.unoone.agent.core.agent
 
-import com.unoone.agent.core.model.ModelProfiles
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.model.ToolCall
 import kotlinx.serialization.json.JsonObject
@@ -31,8 +30,7 @@ class ReActLoopControllerTest {
     @Test
     fun shouldEngageOnlyForObservationTools() {
         for (tool in listOf("search_notes", "summarize_text", "web_search", "read_screen",
-                "ocr_screen", "detect_objects", "voice_recording", "check_calendar",
-                "check_calendar_conflict")) {
+                "ocr_screen", "detect_objects", "voice_recording", "check_calendar")) {
             assertTrue("$tool should engage the loop", ReActLoopController.shouldEngage(tool))
         }
     }
@@ -40,8 +38,7 @@ class ReActLoopControllerTest {
     @Test
     fun shouldNotEngageForOneShotOrSpeechTools() {
         for (tool in listOf("open_app", "open_chrome", "create_note", "send_whatsapp",
-                "system_control", "delete_all_notes", "speak_response", "open_camera",
-                "send_prepared_whatsapp", "draft_whatsapp_message")) {
+                "system_control", "delete_all_notes", "speak_response", "open_camera")) {
             assertTrue("$tool should NOT engage the loop", !ReActLoopController.shouldEngage(tool))
         }
     }
@@ -128,9 +125,9 @@ class ReActLoopControllerTest {
     fun stopsAtMaxSteps() {
         val last = call("search_notes", "query" to "trip")
         val proposal = Result.Success(call("summarize_text", "text" to "x"))
-        // DEFAULT_MAX_STEPS (2) includes the first call; once that many have executed, no more.
+        // MAX_STEPS includes the first call; once that many have executed, no more continuations.
         val decision = ReActLoopController.decide(
-            stepsExecuted = ReActLoopController.DEFAULT_MAX_STEPS,
+            stepsExecuted = ReActLoopController.MAX_STEPS,
             lastExecutedCall = last,
             proposal = proposal
         ) as LoopDecision.Stop
@@ -142,7 +139,7 @@ class ReActLoopControllerTest {
         val last = call("search_notes", "query" to "trip")
         val proposal = Result.Success(call("summarize_text", "text" to "x"))
         val decision = ReActLoopController.decide(
-            stepsExecuted = ReActLoopController.DEFAULT_MAX_STEPS - 1,
+            stepsExecuted = ReActLoopController.MAX_STEPS - 1,
             lastExecutedCall = last,
             proposal = proposal
         )
@@ -157,94 +154,10 @@ class ReActLoopControllerTest {
         // MAX_STEPS — the user hears the model's own words, not a generic "step limit" line.
         val proposal = Result.Success(speak("done"))
         val decision = ReActLoopController.decide(
-            stepsExecuted = ReActLoopController.DEFAULT_MAX_STEPS,
+            stepsExecuted = ReActLoopController.MAX_STEPS,
             lastExecutedCall = call("read_screen"),
             proposal = proposal
         ) as LoopDecision.Stop
         assertEquals(StopReason.SPOKE_RESPONSE, decision.reason)
-    }
-
-    // --- per-model step limits (V2) ─────────────────────────────────────
-
-    @Test
-    fun liteMaxSteps_is2() {
-        assertEquals("Lite profile should allow 2 agent steps", 2, ModelProfiles.LITE.maxAgentSteps)
-    }
-
-    @Test
-    fun mediumMaxSteps_is4() {
-        assertEquals("Medium profile should allow 4 agent steps", 4, ModelProfiles.MEDIUM.maxAgentSteps)
-    }
-
-    @Test
-    fun stopsAtLiteMaxSteps() {
-        val last = call("search_notes", "query" to "trip")
-        val proposal = Result.Success(call("summarize_text", "text" to "x"))
-        val decision = ReActLoopController.decide(
-            stepsExecuted = ModelProfiles.LITE.maxAgentSteps,
-            lastExecutedCall = last,
-            proposal = proposal,
-            maxSteps = ModelProfiles.LITE.maxAgentSteps
-        ) as LoopDecision.Stop
-        assertEquals(StopReason.MAX_STEPS, decision.reason)
-    }
-
-    @Test
-    fun stopsAtMediumMaxSteps() {
-        val last = call("search_notes", "query" to "trip")
-        val proposal = Result.Success(call("summarize_text", "text" to "x"))
-        val decision = ReActLoopController.decide(
-            stepsExecuted = ModelProfiles.MEDIUM.maxAgentSteps,
-            lastExecutedCall = last,
-            proposal = proposal,
-            maxSteps = ModelProfiles.MEDIUM.maxAgentSteps
-        ) as LoopDecision.Stop
-        assertEquals(StopReason.MAX_STEPS, decision.reason)
-    }
-
-    @Test
-    fun continuesBelowMediumMaxSteps() {
-        val last = call("search_notes", "query" to "trip")
-        val proposal = Result.Success(call("summarize_text", "text" to "x"))
-        // Step 3 of 4 (Medium) should continue
-        val decision = ReActLoopController.decide(
-            stepsExecuted = 3,
-            lastExecutedCall = last,
-            proposal = proposal,
-            maxSteps = ModelProfiles.MEDIUM.maxAgentSteps
-        )
-        assertTrue("step 3 of 4 (Medium) should Continue", decision is LoopDecision.Continue)
-    }
-
-    @Test
-    fun stopsAtStep2WithLiteMaxSteps() {
-        val last = call("search_notes", "query" to "trip")
-        val proposal = Result.Success(call("summarize_text", "text" to "x"))
-        // Step 2 of 2 (Lite) should stop
-        val decision = ReActLoopController.decide(
-            stepsExecuted = 2,
-            lastExecutedCall = last,
-            proposal = proposal,
-            maxSteps = ModelProfiles.LITE.maxAgentSteps
-        ) as LoopDecision.Stop
-        assertEquals(StopReason.MAX_STEPS, decision.reason)
-    }
-
-    @Test
-    fun speakResponseBeatsMaxSteps_mediumProfile() {
-        val proposal = Result.Success(speak("all done"))
-        val decision = ReActLoopController.decide(
-            stepsExecuted = ModelProfiles.MEDIUM.maxAgentSteps,
-            lastExecutedCall = call("read_screen"),
-            proposal = proposal,
-            maxSteps = ModelProfiles.MEDIUM.maxAgentSteps
-        ) as LoopDecision.Stop
-        assertEquals(StopReason.SPOKE_RESPONSE, decision.reason)
-    }
-
-    @Test
-    fun checkCalendarConflict_isObservationTool() {
-        assertTrue("check_calendar_conflict should be an observation tool",
-            ReActLoopController.shouldEngage("check_calendar_conflict"))
     }
 }

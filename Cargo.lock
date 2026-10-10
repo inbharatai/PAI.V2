@@ -3252,8 +3252,12 @@ dependencies = [
  "similar",
  "tempfile",
  "unoone-capability-contracts",
+ "unoone-personal-agent-contracts",
+ "unoone-personal-agent-runtime",
+ "unoone-privacy-guardian",
  "unoone-runtime-select",
  "unoone-vault-core",
+ "uuid",
 ]
 
 [[package]]
@@ -3773,6 +3777,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
+
+[[package]]
 name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3970,6 +3986,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -5384,6 +5401,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "unoone-android-vault-jni"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "jni",
+ "serde_json",
+ "unoone-vault-core",
+ "zeroize",
+]
+
+[[package]]
 name = "unoone-browser-policy"
 version = "0.1.0"
 dependencies = [
@@ -5414,6 +5442,68 @@ name = "unoone-document-migration"
 version = "0.1.0"
 
 [[package]]
+name = "unoone-local-peer-sync"
+version = "0.1.0"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "unoone-personal-agent-contracts",
+ "unoone-personal-agent-runtime",
+ "unoone-vault-core",
+ "uuid",
+]
+
+[[package]]
+name = "unoone-model-admission"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "unoone-personal-agent-contracts"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "unoone-personal-agent-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "unoone-personal-agent-contracts",
+ "unoone-vault-core",
+ "uuid",
+]
+
+[[package]]
+name = "unoone-personal-provider-adapters"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "rand 0.8.7",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "unoone-personal-agent-runtime",
+ "unoone-privacy-guardian",
+ "unoone-vault-core",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "unoone-power"
 version = "0.1.0"
 dependencies = [
@@ -5434,6 +5524,7 @@ dependencies = [
  "quick-xml 0.37.5",
  "rand 0.8.7",
  "reqwest 0.12.28",
+ "ring",
  "screenshots",
  "serde",
  "serde_json",
@@ -5447,6 +5538,11 @@ dependencies = [
  "unoone-browser-policy",
  "unoone-capability-contracts",
  "unoone-document-migration",
+ "unoone-local-peer-sync",
+ "unoone-model-admission",
+ "unoone-personal-agent-runtime",
+ "unoone-personal-provider-adapters",
+ "unoone-privacy-guardian",
  "unoone-recording-policy",
  "unoone-runtime-select",
  "unoone-speech-contracts",
@@ -5457,6 +5553,15 @@ dependencies = [
  "uuid",
  "windows-sys 0.59.0",
  "zip",
+]
+
+[[package]]
+name = "unoone-privacy-guardian"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
 ]
 
 [[package]]
@@ -6598,6 +6703,15 @@ dependencies = [
  "bitflags 2.13.1",
  "libc",
  "quick-xml 0.41.0",
+]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
 ]
 
 [[package]]

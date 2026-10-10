@@ -1,0 +1,11 @@
+[package]
+name = "unoone-privacy-guardian"
+version = "0.1.0"
+edition = "2021"
+description = "Host-owned deterministic risk check for links, sends, payees, shares, connectors, child spawns and task execution (brief §3.6). No network, no model authority."
+
+[dependencies]
+# Exact versions already present in the workspace Cargo.lock; dependency EDGES only, no new package/version.
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+url = "=2.5.8"

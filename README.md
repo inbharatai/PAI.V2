@@ -1,10 +1,12 @@
 <p align="center">
-  <img src="apps/desktop/src-tauri/icons/128x128@2x.png" width="96" alt="UnoOne logo">
+  <img src="https://pub.hyperagent.com/api/published/pbf01M4KKATN3_0AQ8CKJX7V7C702C/fd786aee-e6c3-4ad4-bb4f-0863495c612c.png" width="720" alt="Illustration of one UnoOne personal agent shared by a phone and a laptop, each holding its own encrypted vault and syncing over local Wi-Fi">
+  <br>
+  <sub><i>Illustration, not a screenshot.</i></sub>
 </p>
 
-<h1 align="center">UnoOne Pocket AI (PAI)</h1>
+<h1 align="center">UnoOne Personal AI (PAI)</h1>
 
-<p align="center"><b>Private AI on a pen drive — two host platforms, one encrypted vault, zero cloud.</b></p>
+<p align="center"><b>One private personal agent on your phone and your PC — two independent encrypted vaults, local Wi-Fi sync, no cloud, no account, no pen drive required.</b></p>
 
 <p align="center">
   <a href="https://github.com/inbharatai/PAI.V2/actions/workflows/desktop-ci.yml"><img src="https://github.com/inbharatai/PAI.V2/actions/workflows/desktop-ci.yml/badge.svg?branch=main" alt="Desktop CI"></a>
@@ -16,209 +18,169 @@
 
 > **Patent pending** — Indian provisional application **202631102427** (filed 2026-08-25). See [PATENT.md](PATENT.md).
 
+> **Read this first.** This README describes the integrated tree committed in October 2026. Every claim below carries one of three evidence labels:
+>
+> | Label | Meaning |
+> |---|---|
+> | **Historical device run** | Recorded on real hardware before this integration — Xiaomi 14 (July 2026) and the Windows laptop / Pocket AI drive (2026-07 … 2026-10). It does **not** cover the current build. |
+> | **Host-tested** | Automated tests run on a Linux CI-class host against this exact source. No model inference, no phone, no Windows/macOS. |
+> | **Blocked** | Cannot be exercised until the owner supplies an input: a signed model catalog, a Google OAuth client registration, a Windows/macOS build host, or a physical phone. |
+>
+> Plainly: in this snapshot the **Tauri desktop crate (`unoone-power`) has not been compiled**, **no model inference has been run**, **no live Google account has been connected**, and the **Android SQLCipher 6→7 migration has not been executed on a device**. The independent adversarial review's verdict is **BLOCK** until the desktop crate compiles and device qualification runs ([details](#status-at-a-glance)).
+
 ## What it is
 
-Pocket AI is the physical UnoOne pen drive. Its models, runtimes, applications,
-identity and encrypted vault live on that removable device; Windows and Android
-are only **hosts** for it. The host disk is never the canonical copy, and no
-data or inference goes to a cloud.
+UnoOne is **one personal agent** — one public agent identity bound to one person — that lives on both your Android phone (**UnoOne Mobile**) and your Windows/macOS PC (**UnoOne Power**). Each host keeps its **own encrypted vault** (Argon2id + AES-256-GCM, independent keys, password-only). The two vaults converge over **local Wi-Fi / hotspot with mutual TLS** using an append-only ledger, a causal (non-last-writer-wins) fold and monotonic tombstones. Nothing requires a cloud, an account or a removable drive.
+
+The original **Pocket AI pen drive** remains a supported **legacy lane**: launch Power with `--vault-root <drive>` and the manifest-verified drive package, BootGate and asset sweep behave as before.
 
 ```mermaid
-flowchart LR
-    subgraph DRIVE["Pocket AI pen drive"]
-        MAN["manifest.json<br/>sizes + SHA-256"]
-        APPS["APPS<br/>Windows apps · Android APK"]
-        MODELS["MODELS<br/>desktop GGUF tiers · mobile LiteRT"]
-        RUNTIMES["RUNTIMES · SPEECH<br/>llama.cpp · voice · audio.cpp"]
-        VAULT[("VAULT<br/>encrypted records")]
+flowchart TB
+    subgraph PHONE["Android phone · UnoOne Mobile"]
+        MV[("Local file vault<br/>Argon2id · AES-GCM")]
+        MR["Room cache · SQLCipher<br/>transactional outbox"]
+        MA["Same personal agent"]
     end
-    subgraph PC["Windows laptop"]
-        DOCK["UnoOne Dock /<br/>Start UnoOne.exe"]
-        POWER["UnoOne Power<br/>Tauri 2 + React · llama.cpp"]
+    subgraph PC["Windows / macOS · UnoOne Power"]
+        PV[("Local vault<br/>OS app-data")]
+        PA["Same personal agent"]
+        LL["llama.cpp on 127.0.0.1"]
     end
-    subgraph PHONE["Android phone"]
-        MOBILE["UnoOne Mobile<br/>Kotlin · Gemma 4 E2B on LiteRT-LM"]
-    end
-    DOCK -->|"validate manifest + hashes"| MAN
-    DOCK -->|"launch verified copy"| POWER
-    POWER -->|"load verified model + runtime"| MODELS
-    POWER <-->|"unlock with password"| VAULT
-    MOBILE -->|"SAF access · validate schema v2,<br/>VERSION, vault.id"| MAN
-    MOBILE <-->|"notes · memories · conversation"| VAULT
+    MR --> MV
+    MA --> MV
+    PA --> PV
+    PA --> LL
+    MV <-->|"mTLS over local Wi-Fi<br/>append-only ledger · causal fold"| PV
+    DRIVE[("Legacy Pocket AI drive<br/>--vault-root")] -.->|"compatibility lane"| PA
 ```
 
-| | UnoOne Mobile | UnoOne Power |
+## Capabilities and evidence
+
+| Capability | What exists in this tree | Evidence level |
 |---|---|---|
-| **Platform** | Android 9+ | Windows desktop (the Rust workspace also builds and unit-tests on Linux and macOS in CI; no macOS app yet) |
-| **Model** | Gemma 4 E2B (LiteRT-LM); an E4B profile is defined but not yet loaded by the app | Gemma 4 12B / E4B / E2B Q4 GGUF, RAM-tiered (llama.cpp) |
-| **UI** | Jetpack Compose | Tauri 2 + React 19 |
-| **Storage** | SQLCipher Room cache → USB vault | RAM → USB vault |
-| **Voice** | Sherpa-ONNX STT/TTS | InBharat Audio (Qwen3-ASR / omnivoice) with Whisper/Piper as the explicit fallback |
-| **Eyes-free** | TalkBack, Blind Aid, camera OCR | Screen reader, high contrast, OCR, camera describe + narration |
+| Local encrypted vault on Power (no drive) | `local_install.rs` / `local_vault.rs`: OS app-data root, staged create → publish by rename, recovery phrase unlock, locked encrypted backup, 0700 roots, symlink/junction rejection | **Host-tested** (24 harness tests over real `vault-core` crypto; frontend 640/640). **Blocked**: the Tauri crate containing this code is not compiled; Windows ACL path not run |
+| Local encrypted file vault on Android | `PrivateFileVaultIO` under `noBackupFilesDir`, same `vault-core` header/record format, native Argon2id via `android-vault-jni`, RAM/heap admission before the KDF | **Host-tested** (24 JUnit + 27 JNI host tests, arm64 `.so` and AAR built, Rust re-opens a Kotlin-created vault). **Blocked**: physical phone create/unlock/LMKD |
+| Room → vault transactional outbox, non-evicting | Triggers enqueue inside the Room mutation, exact-generation CAS, idempotent tombstones; `MIGRATION_6_7` marks pre-existing ids `HISTORICAL` | **Host-tested** on framework SQLite (storage 46, vaultbridge 67). **Blocked**: SQLCipher 6→7 migration not executed on a device |
+| Pairing + local sync | `local-peer-sync`: self-signed pinned certs, loopback mTLS, explicit `UNIFY_ARCHIVE` adoption with fingerprint confirmation, v2 shared ledger, replay-safe cursor/ACK, revocation | **Host-tested** (13 peer + 5 runtime Rust integration tests over real temp vaults and real loopback mTLS; 9 + 6 Kotlin; 13 mounted React). **Blocked**: phone ↔ Power over a real LAN/hotspot |
+| One personal agent: persona, encrypted task ledger, bounded specialists | `personal-agent-contracts` (14 typed records, Rust ↔ Kotlin goldens), `personal-agent-runtime` (append-only ledger is the outbox; projection derived), child scope/budget attenuation, learning gate | **Host-tested** (contracts 11, runtime 5, harness `personal_` 11, Kotlin 5). **Blocked**: real-model journeys; persona not yet injected into chat prompts |
+| Model admission core | `model-admission`: pure `evaluate()` over signed `CatalogCandidate` + `DeviceProbe`; no deserializable permits; Ed25519 verifier is an injected native adapter | **Host-tested** (33 core vectors + 14 Kotlin golden mirrors). **Blocked**: shipping trust set is empty — no signed catalog exists |
+| Power local model lane | `decide_local`: present, declared, hash-verified file → tier + available-RAM rule → spawn → identity → mandatory inference smoke → promote or roll back; three UI states **Qualified / Works here / Unknown** | **Host-tested** (76 external-harness tests compiling `provisioning*.rs`, `local_install.rs`, `desktop_model_policy.rs`, `gguf_meta.rs` by path; smoke exercised against loopback HTTP fixtures). **Blocked**: `llama.rs` glue not type-checked (crate uncompiled); **no real model loaded** |
+| Android model admission | `LoadAdmission.decide` on boot, explicit load, activation and download; `StagedActivation` with real smoke and atomic `active-v1` pointer; native load receipts ("Works here"); legacy installs grandfathered | **Host-tested** (modelmanager 47, core 107, app 32; all faked runtimes). **Blocked**: no model loaded on any device |
+| Model download | Power: `require_shipping_admission()` is a constant refusal; Download button disabled. Android: download needs admission and lands **Staged**, never active, until verified | **Blocked** by design until a signed catalog and qualification records exist |
+| Google inbox / calendar typed adapters | `personal-provider-adapters` (Rust) + Android `providers/`: PKCE OAuth, device-local encrypted tokens, bounded typed read/search/draft/reply/send/events/free-busy; every mutation re-checks grant + session epoch immediately before the first network byte; calendar drafts say "no event persistence or invitation delivery was verified" | **Host-tested** (16 unit + 1 integration Rust against fixtures, 1 live smoke `ignored`; Kotlin 4 + 20). **Blocked**: no Google OAuth client, no live account — nothing has ever been sent |
+| Privacy guardian | `privacy-guardian`: deterministic `check → ALLOW / WARN / BLOCK`, lookalike/OTP/payee/urgency signals, untrusted content wrapped as masked DATA, connector manifest + offline-default egress policy, receipts and corrections; Kotlin mirror | **Host-tested** (17 + 3 Rust, 8 Kotlin, 41 mounted React; authored corpus 60 items: 0 harmful misses, 2 false alarms). **Blocked**: real-world detection rate; end-to-end journeys with sync and children; Hindi copy |
+| Legacy Pocket AI drive lane | Manifest schema v2 validation, SHA-256-addressed host cache, BootGate, 20-minute sweep, removal lock | **Historical device run** (Windows laptop + drive, 2026-09/10; drive reloaded 2026-10-04). Host startup-coordinator tests pass; not re-run on hardware for this tree |
+| Android phone agent | 42-tool registry with risk classes, deterministic fast paths, verified outcomes, 7-language offline speech, Blind Aid, Page Agent Secure Browser; four brain profiles (Gemma 4 E2B default, E4B, Qwen3.5-2B MNN and GUI-Owl opt-in) | **Historical device run** (Xiaomi 14, July 2026 — E2B/E4B loads, 55 instrumented tests). **Host-tested** now: app 497/497, all modules pass, lint 0 errors, debug APK builds |
+| Desktop knowledge + coding workspace | Encrypted knowledge library, verified learning in a Linux sandbox, coding tasks with per-file review | **Host-tested** (`pai-harness-adapter` 191 tests in this run). Historical CI green on three OSes at `05baa79` (2026-10-07) |
+| Speech (InBharat Audio) | `SpeechRouter`, Qwen3-ASR + omnivoice with Whisper/Piper fallback | **Historical device run** (19/19 language matrix on the staged drive, 2026-09-15). Not re-run |
 
-The release identity is not a drive letter, volume label or USB VID/PID: every
-host validates `manifest.json`, `VERSION`, `VAULT/identity/vault.id`, the
-declared architecture and every required asset hash before use.
+## How a request flows
 
-## What it does
+```mermaid
+flowchart TB
+    REQ["Request<br/>voice · text · UI"] --> PLAN["Planner<br/>deterministic fast path or local model"]
+    PLAN --> SPEC["Bounded specialists<br/>exact scope · budget · depth ≤ 2"]
+    SPEC --> TOOLS["Native tools<br/>phone · files · providers"]
+    TOOLS --> GUARD{"Privacy guardian<br/>ALLOW · WARN · BLOCK"}
+    GUARD -->|"BLOCK"| STOP["Refused · receipt recorded"]
+    GUARD -->|"WARN"| ACK["Human acknowledges<br/>exact fingerprint · 5 min"]
+    ACK --> EXEC["Execute"]
+    GUARD -->|"ALLOW"| EXEC
+    EXEC --> RCPT["Receipt<br/>RESPONDED · ACTION_VERIFIED · VERIFIED"]
+    RCPT --> LEDGER[("Encrypted ledger<br/>append-only")]
+```
 
-### UnoOne Mobile (Android)
+Receipt vocabulary is deliberately narrow: **RESPONDED** = the agent answered; **ACTION_VERIFIED** = one bounded action was independently verified by the host (not the wider goal); **VERIFIED** = the task postcondition was verified natively. A wire claim of VERIFIED without host evidence stays `AWAITING_VERIFICATION`. Raw model output never executes tools directly.
 
-- A local Gemma 4 E2B planner (hash-pinned) behind deterministic fast paths for wake words, language switches, app launches and accessibility shortcuts.
-- A 42-tool registry with argument validation and risk classes (DIRECT / CONFIRM / STRONG_CONFIRM / blocked) byte-synced in CI with `packages/tool-contracts/tools.v1.json`; the model only ever sees a few candidate tools per task.
-- Verified outcomes: the model may announce success only when the app has independently verified the action.
-- Offline speech with language packs for 7 languages (en, hi, bn, ta, te, kn, ml), hands-free sessions and an offline wake word ("Uno").
-- Phone actions and reviewable drafts (Calendar, WhatsApp, email) — UnoOne never presses the external app's final Send/Save.
-- Blind Aid object detection, camera OCR and Read Screen; a master **Disable UnoOne** switch.
-- With a Pocket AI attached and unlocked, the drive vault is the canonical store for notes, memories and conversation turns.
+## Model admission and provisioning
 
-### UnoOne Power (Windows desktop)
+```mermaid
+flowchart TB
+    FILE["Model file present<br/>declared + hash-verified"] --> PROBE["Device check<br/>RAM total · available · backend"]
+    PROBE --> DECIDE{"decide<br/>signed record?"}
+    DECIDE -->|"signed + evaluate OK"| QUAL["Qualified"]
+    DECIDE -->|"no record · fits"| LOAD["Load + inference smoke"]
+    DECIDE -->|"does not fit"| REFUSE["Refused with numbers"]
+    LOAD -->|"smoke passed on this device"| WORKS["Works here"]
+    LOAD -->|"failed"| ROLL["Roll back · previous model kept"]
+    FILE -.->|"not yet load-tested"| UNKNOWN["Unknown"]
+    DL["Download"] --> CAT{"Signed catalog?"}
+    CAT -->|"none exists"| BLOCKED["Blocked · fail-closed"]
+```
 
-- Chat with a local, manifest-verified Gemma model through the harness bridge (deterministic fast path / model / full agent loop) with audited tool calls and per-step transcripts.
-- Agent tools inside a granted-folder fence: files, `doc.create` (PDF/DOCX/MD/TXT), workspace search and patch, `process.run` with per-session consent, sub-agents.
-- A real browser lane over the WebView (logged-in sessions persist on that machine; credentials are never stored or typed by the agent) and live website preview.
-- Persistent, encrypted conversation memory; document search; recording with enforced privacy levels; 15-language speech output.
-- Fast startup (BootGate), RAM-aware model admission, launch from a SHA-256-verified host copy, and emergency vault lock on drive removal.
+- **Power**: `provisioning::decide_local` is the single entry point for selection, start and the device assessment. Memory is checked against **both** total RAM (legacy tier rule) and **available** RAM. After `/health` and identity, one bounded `POST /v1/chat/completions` must return tokens or the candidate is killed and the previous server stays published. All of this is **Host-tested** against fixtures only — the crate is uncompiled and no model has run.
+- **Android**: `LoadAdmission.decide(profile, probe, policy, evidence, purpose)` is called on boot, explicit load, activation and download. `PHYSICALLY_IMPOSSIBLE` (bytes > total RAM) and measured `lowMemory` can never be overridden; a PASSED native receipt on this device overrides *estimates*. Working-set numbers are **estimates**, labelled as such.
+- **Qualified** exists only via a signed qualification record. The production trust set is empty; nothing is minted from manifests, host runs or UI flags.
 
-### Knowledge and coding workspace (new, 2026-10-07)
+## Vaults and sync
 
-| Capability | Windows | Linux |
-|---|---|---|
-| Smarter chat context (greetings send no old history; named continuations pick one task) | ✅ | ✅ |
-| Knowledge library in the vault: distill pasted text, encrypted search, review, consented export | ✅ | ✅ |
-| Distill files from granted folders | — | ✅ |
-| Verified learning (tests really run in a sandbox before a fix counts) | — | ✅ |
-| Coding tasks: isolated edits, sandboxed checks, per-file review, apply to a separate folder, live preview | view-only | ✅ |
-| Memory Explorer search | ✅ | ✅ |
+```mermaid
+flowchart TB
+    subgraph A["Phone vault"]
+        AL["Append-only ledger<br/>per-replica chain"]
+        AT["Tombstones<br/>monotonic"]
+    end
+    subgraph B["Power vault"]
+        BL["Append-only ledger<br/>per-replica chain"]
+        BT["Tombstones<br/>monotonic"]
+    end
+    AL <-->|"mTLS · pinned fingerprints<br/>selective causal export"| BL
+    AL --> FOLD["Causal fold<br/>vector contexts · no LWW"]
+    BL --> FOLD
+    FOLD --> VIEW["Shared board<br/>conflicts retained for review"]
+    AT -.-> FOLD
+    BT -.-> FOLD
+```
 
-Sandboxed execution is Linux-only by design; on Windows and macOS it refuses
-before starting anything. These features are implemented and tested but have
-not yet been run on Windows hardware. Details: [docs/FEATURES.md](docs/FEATURES.md).
+- Two vaults, two independent master keys, two replica UUIDs; one person UUID and one public agent UUID shared only after explicit adoption on **both** screens.
+- The ledger **is** the pending outbox; the projection is derived, so state and outbox cannot diverge. Hard bounds (4 MiB ledger, 2048 mutations, 128 task ids) fail closed rather than evict.
+- Concurrent edits are retained as visible conflict heads; an explicit later correction that observes both heads resolves them. Tombstones suppress stale resurrection.
+- Interruption between runtime commit and cursor save replays identical dots safely. Revocation blocks future connections; it cannot erase copies already delivered.
+- Adoption starts an **empty shared board**; old local records stay as an encrypted archive. No archive browser yet.
+
+Encryption (unchanged contract, shared Kotlin ↔ Rust test vectors): Argon2id 256 MiB / t=3 / p=4 → key-encryption key; 24-word BIP-39 recovery wrap; random master key zeroed on lock; HKDF-SHA-256 → AES-256-GCM records (legacy XChaCha20-Poly1305 readable), write-ahead journal and indexes.
+
+## Privacy guardian
+
+A host-owned, deterministic check that runs before links open, messages or payments go out, files are shared, connectors are granted or child agents spawn. It is **not** a model and cannot be talked out of a decision: planted instructions in email, PDF or web content are wrapped as labelled, masked DATA and surface only as an informational signal.
+
+- Signals: real destination vs display text, lookalike domains and recipients (homoglyph skeleton, edit distance, brand-embedded, suffix swap), IDN/punycode, credentials in URL, shorteners, OTP/password/recovery-phrase/card detection, urgency and credential-request phrasing, changed or new payee, broad connector scope, child network/scope/depth.
+- Decisions: **ALLOW**, **WARN** (needs a fresh human acknowledgement bound to the exact decision fingerprint, 5-minute lifetime, never deserializable), **BLOCK** (secrets, vault export, failed-auth payee change, high impact without a verification route).
+- Connectors: a typed manifest declares exact hosts, operations, scopes, retention and byte/day ceilings; the egress policy is **offline by default** and refuses anything not covered by a consented, unexpired manifest. No cloud fallback path exists.
+- Receipts and corrections (false alarm / confirmed harmful / missed warning) are written as masked notes into the encrypted task ledger.
+
+Honest limits: the 60-item corpus (30 scam / 30 legitimate; 0 harmful misses, 2 false alarms) was authored by the rule author and is a regression floor, not a detection rate. On Android only `open_url` and `share_text` are gated today — composer drafts and data export are not; OAuth token traffic bypasses the egress audit. Details: [`packages/privacy-guardian/README.md`](packages/privacy-guardian/README.md).
 
 ## Status at a glance
 
-| Area | Status |
+### Host gates at this source (Linux CI-class host, 4 GB sandbox)
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Rust workspace, every crate except the Tauri desktop crate | **533 / 533 passed**, 0 failed, across **50 test binaries** | `cargo test --workspace` minus `unoone-power` (`build-evidence/workspace-nongui-test-2.log`) |
+| Android unit tests, all modules | **all pass**; `:app` **497 / 497** | `gradlew testDebugUnitTest` (`android-integration-gates/app-tests-alone-8.log`, exit 0) |
+| Android lint | **0 errors** (4 hints; 15 baseline-filtered issues, baseline not expanded) | `gradlew :app:lintDebug` |
+| Android debug APK | **builds** (`app-debug.apk`, ~451 MB, bundled OCR + native runtimes, no model weights) | `gradlew :app:assembleDebug` |
+| Power frontend (mounted React, mocked IPC) | **640 / 640 passed** | `node --test tests/*.test.mjs` |
+| Repo invariants, tool/speech contract sync, `git diff --check` | pass | `scripts/ci/check_repo_invariants.py`, `scripts/check_tool_contract_sync.py`, `scripts/check_speech_language_sync.py` |
+
+### Blocked — needs owner inputs or a different host
+
+| Item | Why it is blocked |
 |---|---|
-| Physical Pocket AI | Integrity-verified prototype, reloaded 2026-10-04 (`verify-only`: valid, 0 failures). Not yet carrying the 2026-10-07 build |
-| Desktop app | Agent lane, browser, preview, speech and memory live-verified on the staged drive (2026-09/10); CI green on Windows, Ubuntu and macOS |
-| Windows apps | Power, Dock and Starter built together by CI with SHA-256 sums; launched from a digest-verified host copy |
-| Android app | Android CI green; device evidence on Xiaomi 14 only; physical phone ↔ drive round trip pending |
-| Vault | Argon2id + AES-256-GCM, hardened (Wave 1), Kotlin ↔ Rust cross-platform vectors proven in CI |
-| Speech | InBharat Audio live matrix 19/19 on the staged drive (2026-09-15) |
-| Knowledge + coding workspace | Implemented, independently reviewed, adapter suites pass with the real Linux sandbox; not yet on the drive |
-| macOS | Rust workspace compiles and tests in CI; no macOS app, not tested on Mac hardware |
+| **Tauri desktop crate `unoone-power` not compiled** | Host lacks `webkit2gtk-4.1` / `javascriptcoregtk-4.1`. ~3.6 k new lines in `llama.rs`, `main.rs`, `providers.rs`, `local_vault.rs`, `peer_sync.rs`, `personal_agent.rs`, `personal_execution.rs` are rustfmt-parsed and reviewed, **not type-checked**. First action on a Windows/macOS/GUI-Linux host: `cargo fmt --all && cargo check -p unoone-power` |
+| **No model inference run** | No model loaded on any host or device; smoke paths proven against loopback fixtures only |
+| **No signed model catalog** | Power download is a constant refusal; Android downloads stay Staged; no file can reach **Qualified** |
+| **No Google OAuth client / live account** | Provider adapters tested against fixtures; the one live smoke test is `#[ignore]`d. Nothing has been sent |
+| **SQLCipher 6→7 migration not executed on device** | Proven on framework SQLite in JVM tests only |
+| **No physical phone for this build** | Local vault create/unlock under real heap/LMKD, pairing over LAN, model load, instrumented suites — all pending. Xiaomi 14 evidence is from July 2026 |
+| **No Windows/macOS build** | Legacy drive lane, local-vault ACLs, OS-session-lock hook, packaged WebView untested for this tree |
 
-Full table, CI gates and dated test evidence: [docs/STATUS_AND_EVIDENCE.md](docs/STATUS_AND_EVIDENCE.md).
+### Independent review verdict
 
-## Architecture
+The final adversarial re-review (`Sentinel`, 2026-10-10) found the eight prior findings F1–F7 **fixed at source and host-proven**, F8 (downloadable Power loading a local model) **partially fixed by design**, dependencies/licences/secret handling clean, and no renderer or sync bypass of fail-closed admission. Verdict: **BLOCK — not yet ready for device qualification** until (1) the desktop crate compiles and `cargo fmt --check` is green, and (2) the full Android gate is re-recorded green on the committed SHA, followed by device qualification. Residual P2 items: guardian hooks narrower than the brief on Android (N3), OAuth egress audit gap (N4), `FAILED_HERE_PREVIOUSLY` also denies explicit retry (N5), Android split-field calendar zone unusable without a configured zone (N6).
 
-### Desktop (UnoOne Power)
-
-```mermaid
-flowchart TB
-    UI["React UI<br/>Chat · Coding Task · Knowledge · Memory · Vault · Model · Browser · …"]
-    subgraph RUST["Tauri 2 backend (Rust)"]
-        BRIDGE["harness_bridge<br/>chat context · routing · audited tools"]
-        TOOLS["Agent tools<br/>granted-folder fence · host-command consent<br/>browser · web.preview · doc.create"]
-        LLAMA["llama.cpp server on 127.0.0.1<br/>verified GGUF tier + mmproj"]
-        SPEECH["SpeechRouter<br/>InBharat Audio → Whisper/Piper"]
-        ADAPTER["pai-harness-adapter<br/>knowledge · search · distiller · verification<br/>coding tasks · ledger · diffs · worktree · preview"]
-    end
-    HARNESS["vendor/inbharat-harness<br/>L0 / L1 / L3 routing · tool execution"]
-    SANDBOX["Linux sandbox<br/>setpriv · bubblewrap · prlimit · seccomp"]
-    VAULT[("Encrypted vault on the drive<br/>vault-core")]
-    UI --> BRIDGE
-    UI --> ADAPTER
-    BRIDGE --> HARNESS
-    BRIDGE --> TOOLS
-    BRIDGE --> LLAMA
-    UI --> SPEECH
-    ADAPTER -->|"generated code · Linux only"| SANDBOX
-    BRIDGE --> VAULT
-    ADAPTER --> VAULT
-```
-
-### Launch and integrity (Windows)
-
-```mermaid
-flowchart TB
-    INSERT["Drive inserted"] --> DOCK["UnoOne Dock<br/>or Start UnoOne.exe"]
-    DOCK --> CHECK{"manifest.json schema v2<br/>VERSION · vault.id · architecture<br/>size + SHA-256 of every asset"}
-    CHECK -->|"any mismatch, symlink,<br/>junction or traversal"| STOP["Refuse to launch"]
-    CHECK -->|"valid"| CACHE["Copy Power into the host cache<br/>PowerCache, keyed by SHA-256"]
-    CACHE --> POWER["Start UnoOne Power"]
-    POWER --> GATE["BootGate: identity + runtimes<br/>model usable ≈15 s after detect"]
-    GATE --> SWEEP["Full package sweep<br/>continues in the background"]
-    POWER --> REMOVE["Drive removed → stop inference,<br/>discard recording buffers, lock vault"]
-```
-
-### Vault encryption
-
-```mermaid
-flowchart TB
-    PW["Vault password"] --> KDF["Argon2id<br/>256 MiB · t=3 · p=4 · per-vault salt"]
-    KDF --> KEK["Key-encryption key"]
-    PHRASE["24-word BIP-39 recovery phrase"] --> RKEK["Recovery key (independent wrap)"]
-    KEK --> MK["Vault master key<br/>random · zeroed on lock"]
-    RKEK --> MK
-    HDR["Header A/B slots<br/>HMAC-SHA-256"] -.->|"holds the wrapped master key"| MK
-    MK --> HKDF["HKDF-SHA-256"]
-    HKDF --> REC["Records<br/>AES-256-GCM (legacy XChaCha20-Poly1305 readable)"]
-    HKDF --> JOURNAL["Write-ahead journal"]
-    HKDF --> IDX["Indexes"]
-```
-
-Password-only (no account, no email, no cloud); tombstones propagate across
-platforms; the Kotlin vault engine on Android uses the same contract, proven by
-shared test vectors in CI.
-
-### Android agent pipeline
-
-```mermaid
-flowchart TB
-    IN["Voice · text · floating assistant · accessibility"] --> NORM["LanguageNormalizer<br/>7 languages · confidence check"]
-    NORM --> ROUTER{"DeterministicIntentRouter"}
-    ROUTER -->|"wake · language · app launch ·<br/>shortcuts (no model)"| EXEC
-    ROUTER -->|"no deterministic match"| TIER["Lite profile E2B<br/>2–3 candidate tools · 2 steps"]
-    ROUTER -.->|"not yet wired"| E4B["E4B Medium profile<br/>3–6 tools · 4 steps"]
-    TIER --> GEMMA["Local Gemma<br/>fresh planning conversation"]
-    GEMMA --> VALID["ToolProposalValidator"]
-    VALID --> GUARD["Permissions · SafetyGuard · security mode"]
-    GUARD --> EXEC["Phone tools · notes · memory · Skills ·<br/>Blind Aid · documents"]
-    EXEC --> VERIFY{"ActionVerifier"}
-    VERIFY -->|"verified / unverified evidence"| LOOP["ReAct loop · max steps per profile"]
-    LOOP --> SPEAK["speak_response → TTS"]
-```
-
-More: [Android architecture](docs/ARCHITECTURE.md).
-
-### Knowledge and verified learning
-
-```mermaid
-flowchart TB
-    SRC["Pasted text · files in granted folders<br/>· a finished coding task"] --> EV["Evidence<br/>immutable, encrypted"]
-    EV --> CAND["Candidate<br/>cites the exact passage"]
-    CAND -->|"tests run in the Linux sandbox:<br/>old code fails · fix passes · tests unchanged"| VP["VerifiedPattern<br/>signed receipts"]
-    VP -->|"explicit approval in the UI"| AP["ApprovedProcedure"]
-    AP -->|"revoke"| INV["Invalidation"]
-    CAND -->|"reject"| INV
-    EV & CAND & VP & AP --> INDEX[("Sealed search index<br/>exact source · version · file · platform")]
-```
-
-Nothing is promoted automatically, nothing leaves the machine, and there is no
-export for model training.
-
-### Safety
-
-- Raw model output never executes tools directly.
-- Desktop: SafetyGuard levels STANDARD / RELAXED / OFF with blocked actions; file
-  tools are fenced to granted folders and `process.run` needs per-session consent;
-  agent processes are terminated on lock, removal or exit. In the default
-  full-access lane, confirmations are auto-approved, so desktop risk classes are
-  labels rather than per-call dialogs.
-- Android: risk classes from the CI-synced tool contract.
-
-Full tables: [docs/SAFETY.md](docs/SAFETY.md).
+Dated historical evidence (drive, laptop, Xiaomi 14, speech matrix, CI runs): [docs/STATUS_AND_EVIDENCE.md](docs/STATUS_AND_EVIDENCE.md) — read every entry with its date.
 
 ## Quick start
 
@@ -227,113 +189,90 @@ Full tables: [docs/SAFETY.md](docs/SAFETY.md).
 ```bash
 git clone https://github.com/inbharatai/PAI.V2.git
 cd PAI.V2/android-app/UnoOneAgent
-./gradlew assembleDebug
+./gradlew assembleDebug          # JDK 17, Android SDK 35, NDK 27.2 (builds the vault JNI .so via cargo)
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### Desktop
+First launch creates a **local file vault** (password or passphrase, no USB, no account). The 256 MiB Argon2id KDF is admitted only when the app heap and device RAM allow it; otherwise the app refuses with an explanation and the encrypted Room cache remains usable.
+
+### Desktop (Windows / macOS)
 
 ```bash
-# Prerequisites: Rust (stable), Node 24 LTS; on Windows, MSVC Build Tools.
-cd apps/desktop/src && npm ci && npm run build && cd ../../..   # the frontend is embedded at compile time
-cargo build --release -p unoone-power -p unoone-dock-windows -p unoone-starter-windows
-cargo run -p unoone-power                                       # or run Power from source
+# Prerequisites: Rust stable, Node 24 LTS; Windows: MSVC Build Tools; macOS: Xcode CLT.
+cd apps/desktop/src && npm ci && npm run build && cd ../../..   # frontend is embedded at compile time
+cargo fmt --all --check
+cargo check -p unoone-power                                     # <-- not yet done anywhere for this tree
+cargo run -p unoone-power                                       # ordinary launch = local vault in OS app-data
+cargo run -p unoone-power -- --vault-root E:\                   # legacy Pocket AI drive lane
 ```
 
-On a prepared Pocket AI, Windows users start at `Start UnoOne.exe`, which can
-install UnoOne Dock for automatic opening on later insertions.
+On Linux the Tauri crate additionally needs `libwebkit2gtk-4.1-dev` and `libjavascriptcoregtk-4.1-dev` (plus `libgtk-3-dev`, `libsoup-3.0-dev`); the integration host did not have them, which is why the crate is uncompiled in this snapshot.
 
-### Update a Pocket AI drive
+### Pairing
 
-When desktop code lands, only the three executables on the drive change.
-`scripts/Stage-PocketAiDrive.ps1` stages them from a green **Pocket AI Windows
-Bundle** CI artifact: it verifies the bundle's SHA-256 sums, backs up the current
-executables to `RECOVERY\package-backups\<timestamp>`, copies the new ones, gates
-frontend embedding, regenerates `manifest.json` and runs
-`Start UnoOne.exe --verify-only`. Models, runtimes, `VAULT` and `CONFIG` are
-untouched.
-
-```powershell
-# Quit UnoOne and back up VAULT first. From a checkout at the bundle's commit,
-# with apps/desktop/src/dist built. For the desktop copy use
-# -VaultRoot "$env:USERPROFILE\Desktop\UNOONE" instead of the drive letter.
-powershell -ExecutionPolicy Bypass -File scripts\Stage-PocketAiDrive.ps1 `
-    -VaultRoot "E:\" `
-    -BundleDir "$env:USERPROFILE\Downloads\pocket-ai-windows-x86_64-<sha>"
-```
-
-## Drive layout
-
-The drive is formatted exFAT (FAT32 cannot hold the 7.14 GiB 12B model).
-Generated and checked by `scripts/New-UnoOneManifestV2.ps1`:
-
-```
-UNOONE/
-├── Start UnoOne.exe          # on-drive fallback launcher
-├── manifest.json             # strict schema v2
-├── VERSION
-├── APPS/WINDOWS/             # UnoOnePower.exe, UnoOneDock.exe
-├── APPS/ANDROID/             # UnoOne.apk (tamper-evidence)
-├── RUNTIMES/WINDOWS/         # CPU, CUDA, VULKAN (llama.cpp), VOICE, AUDIO
-├── MODELS/MOBILE/            # Android E2B / E4B .litertlm
-├── MODELS/DESKTOP/           # Gemma-12B (+ optional E4B / E2B), each with its mmproj
-├── SPEECH/                   # config/ and models/ for InBharat Audio
-├── VAULT/                    # identity/vault.id, header, records, indexes, journal, …
-├── CONFIG/  RECOVERY/  UPDATES/  LOGS/
-└── SOURCE/                   # optional: git archive of the staged commit
-```
-
-Discovery scans removable drives via WMI (falling back to probing `D:`–`P:` for
-an `UNOONE` folder), then accepts a drive only after manifest validation.
+From the Personal agent panel on both devices (same Wi-Fi or hotspot), start pairing, compare the **full** certificate fingerprints shown on both screens, choose the same adoption option on both, and confirm. Adoption starts an empty shared board; existing local records are archived encrypted, not merged or uploaded.
 
 ## Project structure
 
 ```
 PAI.V2/
-├── android-app/UnoOneAgent/     # Android app, 16 Gradle modules (mobile-protected tree)
-├── apps/desktop/                # UnoOne Power: src/ (React) and src-tauri/ (Rust, 27 modules)
-├── apps/dock/windows/           # per-user insertion monitor
-├── apps/starter/windows/        # on-drive fallback launcher
-├── packages/                    # vault-core, pai-harness-adapter, capability/tool/speech contracts,
-│                                # usb-manifest, recording, browser policy, Kotlin vault + contracts, …
-├── vendor/inbharat-harness/     # universal Rust control plane
-├── vendor/Inbharat-audiocpp/    # universal C++ speech plane
+├── android-app/UnoOneAgent/          # Android app, 16 Gradle modules (mobile-protected tree)
+│   ├── app/                          #   personal/, peersync/, providers/, vaultbridge/, model/ (StagedActivation, NativeBrainPort)
+│   ├── core/                         #   personal contracts mirror, modeladmission (LoadAdmission), guardian mirror
+│   ├── storage/                      #   SQLCipher Room, transactional outbox, MIGRATION_6_7
+│   ├── vault/                        #   local file vault, native KDF dispatch (LOCAL_FILE_VAULT.md)
+│   └── modelmanager/ localbrain/ voice/ languagepacks/ securebrowser/ phonecontrol/ skills/ memory/ …
+├── apps/desktop/                     # UnoOne Power: src/ (React) and src-tauri/ (Rust; local_install, local_vault,
+│                                     #   provisioning*, peer_sync, personal_agent, personal_execution, providers)
+├── apps/dock/windows/  apps/starter/windows/   # legacy drive lane: insertion monitor and on-drive launcher
+├── packages/
+│   ├── personal-agent-contracts/     # NEW  14 typed records, JSON schema, Rust ↔ Kotlin goldens
+│   ├── personal-agent-runtime/       # NEW  encrypted append-only ledger = outbox; v2 shared board
+│   ├── local-peer-sync/              # NEW  pinned-cert mTLS, selective causal export, cursor/ACK
+│   ├── model-admission/              # NEW  pure admission core, signed qualification, provisioner state machine
+│   ├── personal-provider-adapters/   # NEW  Google mail/calendar typed adapters, PKCE OAuth, egress guard
+│   ├── privacy-guardian/             # NEW  deterministic guardian + 60-item corpus, connector manifest
+│   ├── android-vault-jni/            # NEW  Argon2id JNI delegate to vault-core for the Android vault
+│   └── vault-core  pai-harness-adapter  usb-manifest  runtime-select  capability/tool/speech contracts  …
+├── vendor/inbharat-harness/  vendor/Inbharat-audiocpp/
 ├── distribution/  installer-pwa/  web-runtime/  SPEECH/config/
-├── scripts/                     # manifest/staging tools, contract sync checks, mobile baseline
-└── docs/                        # features, status, architecture, safety, models, speech, evidence
+├── scripts/                          # manifest/staging tools, contract sync checks, mobile baseline
+└── docs/                             # contracts, admission, sync v2, status, safety, models, speech, evidence
 ```
 
 ## Tests and CI
 
 ```bash
-cargo fmt --check && cargo test --workspace && cargo clippy --workspace -- -D warnings  # build apps/desktop/src first
-UNOONE_REQUIRE_ISOLATION=1 cargo test -p pai-harness-adapter --lib   # Linux + bubblewrap: sandbox tests run for real
-cd apps/desktop/src && npm ci && npm run build && npm run lint && npm run test:context
-cd android-app/UnoOneAgent && ./gradlew test
+# Rust — all crates except the Tauri desktop crate (what the integration host could run: 533/533, 50 binaries)
+cargo test --workspace --exclude unoone-power
+# Rust — full gate (needs GUI libs or Windows/macOS): NOT yet run for this tree
+cargo fmt --all --check && cargo check --workspace && cargo test --workspace && cargo clippy --workspace -- -D warnings
+UNOONE_REQUIRE_ISOLATION=1 cargo test -p pai-harness-adapter --lib          # Linux + bubblewrap: sandbox tests run for real
+
+# Power frontend (640/640; mounted React with official mocked IPC — not native)
+cd apps/desktop/src && npm ci && npm run build && npm run lint && node --test --test-concurrency=1 tests/*.test.mjs
+
+# Android (host JVM; use --no-parallel and ≥ 6 GB RAM — the vault KDF admission refuses in a 4 GB sandbox under Gradle+KSP)
+cd android-app/UnoOneAgent && ./gradlew testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+# Contracts and invariants
+python3 scripts/ci/check_repo_invariants.py && python3 scripts/check_tool_contract_sync.py && python3 scripts/check_speech_language_sync.py
 ```
 
-CI on every relevant push: **Desktop CI** (Rust on Windows, Ubuntu and macOS;
-frontend build; contract syncs; audio ctest; secret and artifact scans),
-**Pocket AI Windows Bundle** (release build of the three apps, embedding gate,
-voice smoke test), **Android CI**, **Distribution CI** and **Mobile
-Protection**. On CI runners without bubblewrap the 50 Linux sandbox tests are
-skipped with a visible warning. The desktop frontend Node suites
-(`npm run test:*`) are not yet in CI. Android changes require a reviewed
-re-baseline of `scripts/MOBILE_PROTECTED_TREE` ([policy](docs/MOBILE_GOLDEN_BASELINE.md)).
+CI on every relevant push: **Desktop CI** (Rust on Windows, Ubuntu, macOS; frontend build; contract syncs; audio ctest; secret and artifact scans), **Pocket AI Windows Bundle**, **Android CI**, **Distribution CI** and **Mobile Protection**. The Android tree-hash pointer (`scripts/MOBILE_PROTECTED_TREE`) and `MOBILE_GOLDEN_HASHES.txt` must be regenerated in a reviewed commit after the Android changes land ([policy](docs/MOBILE_GOLDEN_BASELINE.md)). The desktop frontend Node suites are still not in CI.
 
 ## Not production-ready yet
 
-- A second Android device and broader OEM/API matrix; E4B wired into the Android load path and tested on device.
-- Recorded-speech accuracy tests per language; a controlled Blind Aid corpus; human verification of audible speech and TalkBack.
-- A sustained thermal/memory/battery and 50-task benchmark; Page Agent site qualification and prompt-injection testing.
-- The physical phone ↔ drive ↔ desktop round trip and the Android boot auto-launch gates.
-- Licence review, SBOM, signing key and signed APK — including an open item: the Android Indic TTS voices use Meta MMS models listed as CC-BY-NC-4.0 (non-commercial) ([model licences](docs/model-licenses.md)).
-- Authenticode signing of the Windows executables and cryptographic manifest signing.
-- The known crash on a mid-sweep device-removal IO error (hardware-conditional).
-- Production catalogue signing, deployment, update and rollback testing (the installer PWA keeps downloads locked until a production key exists).
-- Desktop: real-microphone recording and blind-aid camera/OCR on a sustained corpus; WDAC policy testing.
-- The 2026-10-07 knowledge and coding workspace: staging on the drive, Windows hardware runs, local-model runs, the held-out acceptance suite, frontend suites in CI.
-- A macOS app bundle and Mac hardware testing.
+- **Compile the desktop crate** (`cargo check -p unoone-power`) and fix any type errors in the new Rust glue; run `cargo fmt --all`.
+- **Load a model** on each platform and record the first native load + inference smoke receipts; until then every model state is *Unknown*.
+- **Signed model catalog and qualification records**; grow the device probe (device class, thermal, TESTED backend) so `evaluate()` can ever return RECOMMENDED.
+- **Google OAuth client registration** (desktop installed-app and Android package/signer) and disposable-account journeys for inbox/calendar; nothing has been sent or verified live.
+- **Device qualification**: local vault create/unlock under real heap/LMKD, SQLCipher 6→7 upgrade from a real v6 install, pairing over LAN/hotspot, signed-upgrade install over the standalone app, instrumented suites on at least two phones.
+- Guardian coverage: gate Android composer/export tools, route OAuth traffic through the egress audit, Hindi copy, a corpus reviewed by someone other than the rule author.
+- Calendar: wire a user-configured zone so split date/time fields stop yielding `NEEDS_USER`; `FAILED_HERE_PREVIOUSLY` retry semantics.
+- Archive browser and v1→v2 pairing upgrade for adopted shared boards; ledger compaction.
+- Licence reconciliation (root proprietary notice vs Apache-2.0 components; GUI-Owl weight licence; Play-services SDK in SBOM), signing keys, Authenticode, signed APK, catalogue signing.
+- Everything listed under the previous release (second Android device, speech accuracy corpus, thermal/battery benchmark, Page Agent site qualification, macOS app bundle, WDAC) still stands.
 
 ## Prohibitions
 
@@ -341,18 +280,22 @@ re-baseline of `scripts/MOBILE_PROTECTED_TREE` ([policy](docs/MOBILE_GOLDEN_BASE
 - ❌ No plaintext storage on disk
 - ❌ No cloud fallback without explicit approval
 - ❌ No raw model output executing tools directly
-- ❌ No weakening SafetyGuard or PageAgent
-- ❌ Host disk is not canonical — USB is the single source of truth
+- ❌ No weakening SafetyGuard, the privacy guardian or PageAgent
+- ❌ No unencrypted host copy is canonical — the encrypted vault (local install, or the drive in the legacy lane) is the only source of truth
 - ❌ No mock data, no placeholder success states, no fake functionality
 - ❌ No Android changes without a reviewed golden-baseline re-baseline
-- ❌ No drive letter, volume label or VID/PID as identity — only manifest validation identifies Pocket AI
+- ❌ No drive letter, volume label or VID/PID as identity — only manifest validation identifies a Pocket AI drive
 - ❌ No claiming features work without test evidence (command, exit code, OS, hardware, date, commit)
 - ❌ No required external runtimes (Playwright, Tesseract, a separate Gemma download)
 - ❌ No weakening Windows Application Control to make an unsigned build appear successful
+- ❌ No minting model qualification from manifests, host runs or UI flags; no permits deserialized from the renderer or the wire
+- ❌ No "sent", "verified" or "qualified" wording without native proof
 
 ## Documentation
 
-- **[Features and internals](docs/FEATURES.md)** · **[Status and evidence](docs/STATUS_AND_EVIDENCE.md)**
+- **[Status and evidence](docs/STATUS_AND_EVIDENCE.md)** (dated) · **[Features and internals](docs/FEATURES.md)**
+- **New in this integration:** [Personal-agent contracts v1](docs/PERSONAL_AGENT_CONTRACTS.md) · [Model admission contract](docs/MODEL_ADMISSION_CONTRACT.md) · [Unified sync v2](docs/UNIFIED_SYNC_V2.md) · [Power provisioning adapters](apps/desktop/PROVISIONING_ADAPTERS.md) · [Android local file vault](android-app/UnoOneAgent/vault/LOCAL_FILE_VAULT.md) · [Android integration 2026-10](docs/ANDROID_INTEGRATION_2026-10.md)
+- Package READMEs: [personal-agent-runtime](packages/personal-agent-runtime/README.md) · [local-peer-sync](packages/local-peer-sync/README.md) · [personal-provider-adapters](packages/personal-provider-adapters/README.md) · [privacy-guardian](packages/privacy-guardian/README.md)
 - [Android build and validation](android-app/UnoOneAgent/README.md) · [Android architecture](docs/ARCHITECTURE.md) · [module walkthrough](docs/local-architecture.md) · [phone control](android-app/UnoOneAgent/phonecontrol/README.md)
 - [Safety](docs/SAFETY.md)
 - [Models](docs/MODELS.md) · [model acquisition](docs/MODEL_ACQUISITION_AND_DISTRIBUTION.md) · [model licences](docs/model-licenses.md) · [Blind Aid detector](docs/BLIND_AID_MODEL.md)

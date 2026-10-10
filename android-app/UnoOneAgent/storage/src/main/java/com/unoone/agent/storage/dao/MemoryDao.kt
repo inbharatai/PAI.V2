@@ -42,7 +42,7 @@ interface MemoryDao {
      * existence and are deliberately excluded — used by
      * [com.unoone.agent.storage.cache.VaultCacheLifecycle.evictExpired].
      */
-    @Query("DELETE FROM memories WHERE updatedAt < :cutoff AND vaultRecordId IS NOT NULL")
+    @Query("DELETE FROM memories WHERE updatedAt < :cutoff AND vaultRecordId IS NOT NULL AND id NOT IN (SELECT localId FROM pending_writes WHERE recordKind IN ('MEMORY', 'ENVOBS'))")
     suspend fun deleteOlderThanSynced(cutoff: Long): Int
 
     /** Deletes every cached memory (vault disconnect cleanup). Returns rows deleted. */
@@ -56,7 +56,7 @@ interface MemoryDao {
      * and must survive the vault going away — used by
      * [com.unoone.agent.storage.cache.VaultCacheLifecycle.clearOnVaultDisconnect].
      */
-    @Query("DELETE FROM memories WHERE vaultRecordId IS NOT NULL")
+    @Query("DELETE FROM memories WHERE vaultRecordId IS NOT NULL AND id NOT IN (SELECT localId FROM pending_writes WHERE recordKind IN ('MEMORY', 'ENVOBS'))")
     suspend fun deleteSynced(): Int
 
     /** Link a cache row to the vault record + revision it last wrote. */
@@ -75,7 +75,7 @@ interface MemoryDao {
      * HYPOTHESES (type="envobs_hypo" — a hypothesis never leaves the device
      * that recorded it; only verified facts/corrections mirror).
      */
-    @Query("SELECT * FROM memories WHERE vaultRecordId IS NULL AND type NOT IN ('outcome', 'procedure_outcome', 'envobs_hypo') ORDER BY id ASC")
+    @Query("SELECT * FROM memories WHERE (vaultRecordId IS NULL OR id IN (SELECT localId FROM pending_writes WHERE recordKind IN ('MEMORY', 'ENVOBS'))) AND type NOT IN ('outcome', 'procedure_outcome', 'envobs_hypo') ORDER BY id ASC")
     suspend fun notSynced(): List<MemoryEntity>
 
     /** Every memory, one-shot — used by vault hydration to dedupe known records. */

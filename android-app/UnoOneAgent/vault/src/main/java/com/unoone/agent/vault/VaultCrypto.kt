@@ -54,6 +54,7 @@ object VaultCrypto {
             mac.update(byteArrayOf(0x01))
             mac.doFinal()
         }
+        prk.fill(0)
         return t
     }
 
@@ -233,6 +234,7 @@ object VaultCrypto {
             subkey[i * 4 + 2] = ((v ushr 16) and 0xFF).toByte()
             subkey[i * 4 + 3] = ((v ushr 24) and 0xFF).toByte()
         }
+        state.fill(0)
         return subkey
     }
 
@@ -243,34 +245,51 @@ object VaultCrypto {
     }
 
     private fun wrapEncryptWithAad(key: ByteArray, nonce: ByteArray, plaintext: ByteArray, aad: ByteArray): ByteArray {
+        require(key.size == KEY_LEN && nonce.size == XCHACHA_NONCE_LEN)
         val subkey = xchachaSubkey(key, nonce)
-        val engine = org.bouncycastle.crypto.modes.ChaCha20Poly1305()
-        engine.init(true, ParametersWithIV(KeyParameter(subkey), chachaNonce(nonce)))
-        engine.processAADBytes(aad, 0, aad.size)
         val out = ByteArray(plaintext.size + 16)
-        var off = engine.processBytes(plaintext, 0, plaintext.size, out, 0)
-        off += engine.doFinal(out, off)
-        return out.copyOf(off)
+        try {
+            val engine = org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+            engine.init(true, ParametersWithIV(KeyParameter(subkey), chachaNonce(nonce)))
+            engine.processAADBytes(aad, 0, aad.size)
+            var off = engine.processBytes(plaintext, 0, plaintext.size, out, 0)
+            off += engine.doFinal(out, off)
+            return out.copyOf(off)
+        } finally { subkey.fill(0); out.fill(0) }
     }
 
     private fun wrapDecryptWithAad(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray, aad: ByteArray): ByteArray {
+        require(key.size == KEY_LEN && nonce.size == XCHACHA_NONCE_LEN)
         val subkey = xchachaSubkey(key, nonce)
-        val engine = org.bouncycastle.crypto.modes.ChaCha20Poly1305()
-        engine.init(false, ParametersWithIV(KeyParameter(subkey), chachaNonce(nonce)))
-        engine.processAADBytes(aad, 0, aad.size)
         val out = ByteArray(ciphertext.size)
-        var off = engine.processBytes(ciphertext, 0, ciphertext.size, out, 0)
-        off += engine.doFinal(out, off)
-        return out.copyOf(off)
+        try {
+            val engine = org.bouncycastle.crypto.modes.ChaCha20Poly1305()
+            engine.init(false, ParametersWithIV(KeyParameter(subkey), chachaNonce(nonce)))
+            engine.processAADBytes(aad, 0, aad.size)
+            var off = engine.processBytes(ciphertext, 0, ciphertext.size, out, 0)
+            off += engine.doFinal(out, off)
+            return out.copyOf(off)
+        } finally { subkey.fill(0); out.fill(0) }
     }
 
     // ------------------------------------------------------------------
-    // Argon2id KEK — implemented against the JVM Bouncy Castle provider in
-    // unit tests; wired into Android via the same spec constants.
-    // Production unlock path also uses this on-device.
+    // Argon2id KEK — existing Rust vault-core on native memory; exact same
+    // Bouncy Castle KDF only when native is unavailable and Java heap admits.
     // ------------------------------------------------------------------
+    fun deriveKek(password: ByteArray, salt: ByteArray): ByteArray =
+        NativeVaultKdf.derive(password, salt)
+
     fun sha256Hex(data: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(data).toHex()
 
-    fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+    fun ByteArray.toHex(): String {
+        val digits = "0123456789abcdef"
+        val out = CharArray(size * 2)
+        for (index in indices) {
+            val value = this[index].toInt() and 0xff
+            out[index * 2] = digits[value ushr 4]
+            out[index * 2 + 1] = digits[value and 15]
+        }
+        return String(out)
+    }
 }

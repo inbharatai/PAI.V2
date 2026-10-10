@@ -46,6 +46,7 @@ class VaultHydrator(
     private val skillDao: SkillDao,
     private val turnDao: ConversationTurnDao? = null,
     private val readerProvider: () -> VaultRecordReader?,
+    private val pendingWriteDao: com.unoone.agent.storage.dao.PendingWriteDao? = null,
 ) {
 
     /** What one hydration pass did — surfaced for logs and tests; never hidden. */
@@ -113,6 +114,12 @@ class VaultHydrator(
         var result = Result()
         for (fields in metadata) {
             val recordId = fields["record_id"] as? String ?: continue
+            // A linked row can contain a newer detached edit; defer remote changes/tombstones
+            // until that write is reconciled. Do not replace the only copy after a failed drain.
+            if (pendingWriteDao?.getAll()?.any { it.recordId == recordId } == true) {
+                result += Result(skippedUnknown = 1)
+                continue
+            }
             if (fields["tombstone"] == true) {
                 // Deleted on another host — propagate: remove the linked cache
                 // row so a tombstoned Skill/memory/turn cannot stay active here.

@@ -64,32 +64,15 @@ class CacheKeyManagerTest {
     }
 
     @Test
-    fun `corrupted blob resets to a fresh passphrase and reports RESET`() {
-        val original = CacheKeyManager(FakeCipher(), keyFile()).getOrCreate()
-        keyFile().writeBytes(byteArrayOf(0x00, 0x01, 0x02)) // no magic → decrypt throws
-
-        val reset = CacheKeyManager(FakeCipher(), keyFile()).getOrCreate()
-
-        assertEquals(KeyOutcome.RESET, reset.outcome)
-        assertEquals(CacheKeyManager.PASSPHRASE_LEN, reset.passphrase.size)
-        assertFalse(
-            "reset must produce a NEW passphrase",
-            reset.passphrase.contentEquals(original.passphrase),
-        )
-
-        // And the replacement blob is durable: the next start unwraps it.
-        val after = CacheKeyManager(FakeCipher(), keyFile()).getOrCreate()
-        assertEquals(KeyOutcome.UNWRAPPED, after.outcome)
-        assertArrayEquals(reset.passphrase, after.passphrase)
-    }
-
-    @Test
-    fun `truncated empty blob also resets`() {
-        CacheKeyManager(FakeCipher(), keyFile()).getOrCreate()
-        keyFile().writeBytes(ByteArray(0)) // crash-truncation stand-in
-
-        val reset = CacheKeyManager(FakeCipher(), keyFile()).getOrCreate()
-        assertEquals(KeyOutcome.RESET, reset.outcome)
+    fun `corrupted or empty blobs fail closed and remain byte identical`() {
+        for (bytes in listOf(byteArrayOf(0, 1, 2), ByteArray(0), byteArrayOf(0x7E, 1))) {
+            keyFile().writeBytes(bytes)
+            repeat(2) {
+                try { CacheKeyManager(FakeCipher(), keyFile()).getOrCreate(); org.junit.Assert.fail("Must refuse key replacement") }
+                catch (_: DatabaseRecoveryRequired) { }
+                assertArrayEquals(bytes, keyFile().readBytes())
+            }
+        }
     }
 
     @Test
@@ -99,15 +82,62 @@ class CacheKeyManagerTest {
     }
 
     @Test
-    fun `distinct resets produce distinct passphrases`() {
-        val a = CacheKeyManager(FakeCipher(), keyFile()).getOrCreate()
-        keyFile().writeBytes(byteArrayOf(1))
-        val b = CacheKeyManager(FakeCipher(), keyFile()).getOrCreate()
-        keyFile().writeBytes(byteArrayOf(2))
-        val c = CacheKeyManager(FakeCipher(), keyFile()).getOrCreate()
-
-        assertFalse(a.passphrase.contentEquals(b.passphrase))
-        assertFalse(b.passphrase.contentEquals(c.passphrase))
-        assertFalse(a.passphrase.contentEquals(c.passphrase))
+    fun `unavailable keystore never encrypts or mutates the wrapped blob`() {
+        val blob = byteArrayOf(9, 8, 7)
+        keyFile().writeBytes(blob)
+        val unavailable = object : PassphraseCipher {
+            override fun encrypt(plaintext: ByteArray): ByteArray = error("Encryption must not be called")
+            override fun decrypt(blob: ByteArray): ByteArray = throw IllegalStateException("Key unavailable")
+        }
+        try { CacheKeyManager(unavailable, keyFile()).getOrCreate(); org.junit.Assert.fail() }
+        catch (_: DatabaseRecoveryRequired) { }
+        assertArrayEquals(blob, keyFile().readBytes())
     }
+    @Test fun authenticatedLoneTemporaryKeyIsAdoptedWithoutCreatingAnother() {
+        val passphrase = ByteArray(32) { it.toByte() }
+        val blob = FakeCipher().encrypt(passphrase)
+        val pending = File(tmp.root, "cache_db_key.wrapped.tmp").apply { writeBytes(blob) }
+        val cipher = object : PassphraseCipher {
+            override fun encrypt(plaintext: ByteArray): ByteArray = error("must not generate")
+            override fun decrypt(blob: ByteArray) = FakeCipher().decrypt(blob)
+        }
+        val result = CacheKeyManager(cipher, keyFile()).getOrCreate()
+        assertEquals(KeyOutcome.UNWRAPPED, result.outcome)
+        assertArrayEquals(passphrase, result.passphrase)
+        assertArrayEquals(blob, keyFile().readBytes())
+        assertFalse(pending.exists())
+    }
+    @Test fun invalidTemporaryKeyAndConflictingFinalNeverCreateOrDelete() {
+        val pending = File(tmp.root, "cache_db_key.wrapped.tmp")
+        for (blob in listOf(byteArrayOf(), byteArrayOf(0), byteArrayOf(0x7E, 1))) {
+            pending.writeBytes(blob)
+            try { CacheKeyManager(FakeCipher(), keyFile()).getOrCreate(); org.junit.Assert.fail() }
+            catch (_: DatabaseRecoveryRequired) { }
+            assertArrayEquals(blob, pending.readBytes()); assertFalse(keyFile().exists())
+        }
+        val final = FakeCipher().encrypt(ByteArray(32) { 1 })
+        val other = FakeCipher().encrypt(ByteArray(32) { 2 })
+        keyFile().writeBytes(final); pending.writeBytes(other)
+        try { CacheKeyManager(FakeCipher(), keyFile()).getOrCreate(); org.junit.Assert.fail() }
+        catch (_: DatabaseRecoveryRequired) { }
+        assertArrayEquals(final, keyFile().readBytes()); assertArrayEquals(other, pending.readBytes())
+    }
+    @Test fun temporarySymlinkIsNotFollowedOrReplaced() {
+        val target = File(tmp.root, "target").apply { writeBytes(FakeCipher().encrypt(ByteArray(32))) }
+        val pending = File(tmp.root, "cache_db_key.wrapped.tmp")
+        java.nio.file.Files.createSymbolicLink(pending.toPath(), target.toPath())
+        try { CacheKeyManager(FakeCipher(), keyFile()).getOrCreate(); org.junit.Assert.fail() }
+        catch (_: DatabaseRecoveryRequired) { }
+        assertTrue(java.nio.file.Files.isSymbolicLink(pending.toPath())); assertFalse(keyFile().exists())
+        assertEquals(33, target.length().toInt())
+    }
+    @Test fun directorySyncFailureRetainsKeyAndRetryNeverGeneratesReplacement() {
+        val passphrase = ByteArray(32) { 9 }
+        File(tmp.root, "cache_db_key.wrapped.tmp").writeBytes(FakeCipher().encrypt(passphrase))
+        try { CacheKeyManager(FakeCipher(), keyFile(), syncDirectory = { throw java.io.IOException("disk") }).getOrCreate(); org.junit.Assert.fail() }
+        catch (_: DatabaseRecoveryRequired) { }
+        assertTrue(keyFile().exists())
+        assertArrayEquals(passphrase, CacheKeyManager(FakeCipher(), keyFile()).getOrCreate().passphrase)
+    }
+
 }

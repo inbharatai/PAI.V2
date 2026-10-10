@@ -48,23 +48,7 @@ class SafetyGuardToolCoverageTest {
             "web_search" to RiskLevel.CONFIRM,         // online lookup → single confirmation
             "describe_scene" to RiskLevel.STRONG_CONFIRM,  // captures + analyzes the screen
             "secure_browser_task" to RiskLevel.CONFIRM,  // drives the Secure Browser on an approved origin
-            "prepare_document_fill" to RiskLevel.DIRECT, // picker only; save remains explicit
-            // --- Atomic accessibility tools (prefer over system_control) ---
-            "go_home" to RiskLevel.DIRECT,
-            "go_back" to RiskLevel.DIRECT,
-            "scroll" to RiskLevel.DIRECT,
-            "open_notifications" to RiskLevel.DIRECT,
-            "open_recents" to RiskLevel.DIRECT,
-            "click_accessibility_node" to RiskLevel.CONFIRM,
-            "type_into_accessibility_node" to RiskLevel.CONFIRM,
-            "long_press_accessibility_node" to RiskLevel.CONFIRM,
-            // --- Messaging tools (prefer over send_whatsapp) ---
-            "resolve_contact" to RiskLevel.DIRECT,
-            "draft_whatsapp_message" to RiskLevel.STRONG_CONFIRM,
-            "send_prepared_whatsapp" to RiskLevel.STRONG_CONFIRM,
-            // --- Calendar tools (prefer over open_calendar_insert) ---
-            "check_calendar_conflict" to RiskLevel.DIRECT,
-            "create_calendar_event" to RiskLevel.CONFIRM
+            "prepare_document_fill" to RiskLevel.DIRECT // picker only; save remains explicit
         )
 
         for ((tool, expectedLevel) in expected) {
@@ -79,9 +63,7 @@ class SafetyGuardToolCoverageTest {
     fun destructiveToolsRequireStrongConfirmationOrBlock() {
         val destructiveTools = listOf(
             "delete_notes", "delete_all_notes", "export_data",
-            "detect_objects", "draft_email", "send_whatsapp", "send_prepared_whatsapp",
-            "system_control", "describe_scene", "read_screen", "ocr_screen",
-            "draft_whatsapp_message"
+            "detect_objects", "draft_email", "send_whatsapp", "system_control"
         )
         for (tool in destructiveTools) {
             val level = guard.classify(tool)

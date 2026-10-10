@@ -1,8 +1,16 @@
 import { useState, useEffect, useRef } from 'react';
+import { ModelReadinessPanel } from './ModelReadinessPanel';
+import { ModelSetupWizard, LocalStateBadge } from './ModelSetupWizard';
+import { fetchAssessment, type LocalModelReport } from './localModelLane';
+import { modelReadiness, TRUSTED_HOST_DISCLOSURE, CODING_ISOLATION_DISCLOSURE } from '../lib/readiness';
 import { tauriApi, type ModelInfo, type ModelConfig, type ModelStatus, type AccelerationBackend, type SecurityLevel, type ModelCacheStatus, type ContextBudget } from '../lib/tauri';
 
 export function ModelManager() {
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [localInstall, setLocalInstall] = useState(true);
+  // Native three-state labels for declared local files (Qualified / Works here /
+  // Unknown), keyed by path. Display only: the backend re-decides on Load.
+  const [localReports, setLocalReports] = useState<LocalModelReport[]>([]);
   const [selectedModelPath, setSelectedModelPath] = useState<string>('');
   const [modelStatus, setModelStatus] = useState<ModelStatus>('NOT_LOADED');
   const [loadingModel, setLoadingModel] = useState(false);
@@ -11,6 +19,12 @@ export function ModelManager() {
   const [accelBackends, setAccelBackends] = useState<AccelerationBackend[]>([]);
   const [config, setConfig] = useState<ModelConfig | null>(null);
   const [loading, setLoading] = useState(true);
+  const [runtimeConfig, setRuntimeConfig] = useState<ModelConfig | null>(null);
+  const [statusObserved, setStatusObserved] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [healthNotice, setHealthNotice] = useState<string | null>(null);
+  const selectionRef = useRef(selectedModelPath);
+  selectionRef.current = selectedModelPath;
   const [error, setError] = useState<string | null>(null);
   const [securityLevel, setSecurityLevel] = useState<SecurityLevel>('STANDARD');
   const [vaultRoot, setVaultRoot] = useState<string>('');
@@ -25,8 +39,13 @@ export function ModelManager() {
       try {
         // Detect vault root from USB pendrive, not hardcoded path
         const vaultInfo = await tauriApi.detectVault();
+        const isLocal = vaultInfo.storage_kind === 'local';
+        setLocalInstall(isLocal);
         const vaultRoot = vaultInfo.detected ? vaultInfo.vault_root : '';
         setVaultRoot(vaultRoot);
+        if (isLocal) {
+          try { setLocalReports((await fetchAssessment()).local_models ?? []); } catch { setLocalReports([]); }
+        }
 
         const [modelList, backends, status, modelConfig, secLevel] = await Promise.all([
           tauriApi.listModels(vaultRoot),
@@ -38,7 +57,9 @@ export function ModelManager() {
         setModels(modelList);
         setAccelBackends(backends);
         setModelStatus(status);
+        setStatusObserved(true);
         setConfig(modelConfig);
+        setRuntimeConfig(modelConfig);
         setSecurityLevel(secLevel);
 
         // Prefer the first available model; if none, fall back to any model path
@@ -63,8 +84,8 @@ export function ModelManager() {
     if (modelStatus !== 'LOADING' || loadingModel) return;
     let active = true;
     const interval = window.setInterval(() => {
-      void tauriApi.getModelStatus().then(status => {
-        if (active) setModelStatus(status);
+      void Promise.all([tauriApi.getModelStatus(), tauriApi.getModelConfig()]).then(([status, runtime]) => {
+        if (active) { setModelStatus(status); setRuntimeConfig(runtime); }
       }).catch(() => undefined);
     }, 1000);
     return () => { active = false; window.clearInterval(interval); };
@@ -87,6 +108,7 @@ export function ModelManager() {
   // the multi-GB model.
   useEffect(() => {
     let cancelled = false;
+    setCacheStatus(null);
     if (!selectedModelPath || !vaultRoot) return;
     void tauriApi
       .modelCacheStatus(selectedModelPath, vaultRoot)
@@ -105,11 +127,12 @@ export function ModelManager() {
 
   const stageToHostCache = async () => {
     if (!selectedModelPath || !vaultRoot) return;
+    const stagedPath = selectedModelPath;
     setStagingCache(true);
     setError(null);
     try {
       const status = await tauriApi.stageModelCache(selectedModelPath, vaultRoot);
-      setCacheStatus(status);
+      if (selectionRef.current === stagedPath) setCacheStatus(status);
     } catch (e: any) {
       setError(e?.message || 'Failed to stage the model to the host cache');
     } finally {
@@ -125,17 +148,28 @@ export function ModelManager() {
     );
   }
 
-  if (error) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '48px', gap: '12px' }}>
-        <h3 style={{ color: 'var(--danger)' }}>Error</h3>
-        <p style={{ color: 'var(--text-secondary)', textAlign: 'center' }}>{error}</p>
-        <button onClick={() => { setError(null); setLoading(true); window.location.reload(); }}>Retry</button>
-      </div>
-    );
-  }
-
   const bestBackend = accelBackends[0] || 'CPU';
+  const refreshObservations = async () => {
+    const path = selectedModelPath;
+    const operation = modelOperation.current;
+    setRefreshing(true);
+    try {
+      const [status, runtime, modelList, cache] = await Promise.all([
+        tauriApi.getModelStatus(), tauriApi.getModelConfig(), tauriApi.listModels(vaultRoot),
+        path && vaultRoot ? tauriApi.modelCacheStatus(path, vaultRoot).catch(() => null) : Promise.resolve(null),
+      ]);
+      if (operation !== modelOperation.current) return;
+      setModelStatus(status);
+      setStatusObserved(true);
+      setRuntimeConfig(runtime);
+      setModels(modelList);
+      if (selectionRef.current === path) setCacheStatus(cache);
+      setError(null);
+    } catch (e: unknown) {
+      setError(`Could not refresh observations: ${e instanceof Error ? e.message : String(e)}`);
+    } finally { setRefreshing(false); }
+  };
+
 
   return (
     <div>
@@ -154,14 +188,20 @@ export function ModelManager() {
                    modelStatus === 'LOADING' ? 'var(--warning)' :
                    modelStatus === 'ERROR' ? 'var(--danger)' : 'var(--text-muted)',
           }}>
-            {modelStatus}
+            {statusObserved ? modelStatus : 'UNKNOWN'}
           </span>
         </div>
       </div>
 
       <div className="main-body">
+        {localInstall && <ModelSetupWizard />}
+        <ModelReadinessPanel
+          rows={modelReadiness(models.find(model => model.path === selectedModelPath), statusObserved ? modelStatus : null, runtimeConfig, cacheStatus)}
+          refreshing={refreshing || loadingModel || stagingCache}
+          onRefresh={() => { void refreshObservations(); }}
+        />
         {/* Available Models */}
-        <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)' }}>
+        <h3 id="model-assets" style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)' }}>
           Available Models
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '24px' }}>
@@ -189,25 +229,25 @@ export function ModelManager() {
               <div className="recording-item-info">
                 <div className="recording-item-title">{model.name}</div>
                 <div className="recording-item-meta">
-                  {model.quantization} · {model.context_length.toLocaleString()} ctx
+                  {model.quantization === 'manifest-verified' ? 'Manifest-listed' : model.quantization} · {model.context_length.toLocaleString()} ctx
                   {model.context_verified ? '' : ' (unverified)'} · {model.file_size_gb.toFixed(1)} GB
-                  {!model.available && ' · Not downloaded'}
+                  {!model.available && ' · Not found on disk'}
                 </div>
               </div>
-              {/* Badge states ON-DISK truth only: "Available" = present and
-                  manifest-verified, NOT loaded. The server-load truth is the
-                  LOADING/LOADED pill in the header — never say "Ready" here;
-                  a live-caught mismatch (2026-10-02) showed the card claiming
-                  Ready while llama-server hadn't even spawned. */}
+              {/* Discovery reports presence, not a digest verification. */}
               <span className={`hw-badge ${model.available ? 'available' : 'unavailable'}`}>
-                {model.available ? 'Available' : 'Missing'}
+                {model.available ? 'Present' : 'Missing'}
               </span>
+              {localInstall && (() => {
+                const report = localReports.find(r => r.path === model.path);
+                return report ? <span title={`${report.label} — ${report.reasons.join('; ')}`} style={{ marginLeft: 8 }}><LocalStateBadge state={report.state} /></span> : null;
+              })()}
             </div>
           ))}
           {models.length === 0 && (
             <div className="empty-state">
               <h3>No models found</h3>
-              <p>Download Gemma 4 12B Q4_K_M GGUF to your Pocket USB's MODELS directory.</p>
+              <p>{localInstall ? 'No declared model file is present in the local installation root. The local setup above explains which publisher approvals are missing for downloads. Your vault remains usable.' : 'This explicit legacy package view reports existing model files; it does not qualify them for the new local setup.'}</p>
             </div>
           )}
         </div>
@@ -231,21 +271,21 @@ export function ModelManager() {
           }}>
             <div>
               <div style={{ fontSize: '13px', fontWeight: 600 }}>
-                {cacheStatus.staged ? '⚡ Staged to fast local cache' : 'Slow drive launch'}
+                {cacheStatus.staged ? 'Staged host cache' : 'Host cache not staged'}
               </div>
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
                 {cacheStatus.staged
-                  ? `Next launch loads from ${cacheStatus.cached_path} (${(cacheStatus.size_bytes ?? 0) / (1024 * 1024 * 1024)} GB) instead of the USB drive`
-                  : 'Stage the model to the host disk once so future launches skip the slow USB read. The copy is sha256-verified against the manifest.'}
+                  ? `Cached path: ${cacheStatus.cached_path} (${(cacheStatus.size_bytes ?? 0) / (1024 * 1024 * 1024)} GB). The cache marker is not a fresh digest check.`
+                  : 'Optional: copy the existing model to the host disk. Staging verifies SHA-256 against the manifest; it does not download or load a model.'}
               </div>
             </div>
             {cacheStatus.staged ? (
               <button className="btn btn-secondary" disabled={stagingCache} onClick={stageToHostCache}>
-                {stagingCache ? 'Re-checking…' : 'Re-stage'}
+                {stagingCache ? 'Staging…' : 'Re-stage'}
               </button>
             ) : (
               <button className="btn btn-primary" disabled={stagingCache} onClick={stageToHostCache}>
-                {stagingCache ? 'Staging… (one multi-GB pass)' : 'Stage to fast local cache'}
+                {stagingCache ? 'Staging… (may copy multi-GB)' : 'Stage to host cache'}
               </button>
             )}
           </div>
@@ -269,7 +309,7 @@ export function ModelManager() {
               }}>
                 <div style={{ fontSize: '13px', fontWeight: 600 }}>{backend}</div>
                 <div style={{ fontSize: '11px', color: isAvailable ? 'var(--success)' : 'var(--text-muted)', marginTop: '4px' }}>
-                  {isAvailable ? (isBest ? '✓ Best' : 'Available') : 'Not Available'}
+                  {isAvailable ? 'Detected — not load-tested' : 'Unknown / not detected'}
                 </div>
               </div>
             );
@@ -279,7 +319,7 @@ export function ModelManager() {
         {/* Model Configuration */}
         {config && (
           <>
-            <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)' }}>
+            <h3 id="model-configuration" style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: 'var(--text-secondary)' }}>
               Configuration
             </h3>
             <div className="settings-section" style={{ marginBottom: '24px' }}>
@@ -457,7 +497,7 @@ export function ModelManager() {
         )}
 
         {/* Actions */}
-        <div style={{ display: 'flex', gap: '12px', marginBottom: '24px' }}>
+        <div id="model-actions" style={{ display: 'flex', gap: '12px', marginBottom: '24px' }}>
           <button
             className="btn btn-primary"
             disabled={!selectedModelPath || !config || modelStatus === 'LOADING' || loadingModel}
@@ -471,11 +511,14 @@ export function ModelManager() {
                 const vaultInfo = await tauriApi.detectVault();
                 const vaultRoot = vaultInfo.detected ? vaultInfo.vault_root : '';
                 if (!vaultRoot) {
-                  throw new Error('No UnoOne vault detected. Insert the Pocket USB to load the model.');
+                  throw new Error('No UnoOne storage root detected. Unlock the local vault or insert the Pocket USB to load the model.');
                 }
 
                 window.dispatchEvent(new Event('unoone:model-manual-control'));
-                await tauriApi.stopModelServer();
+                // Local mode keeps the previous server running until the new
+                // one passes its native inference smoke (backend rule); the
+                // legacy drive lane stops first, unchanged.
+                if (!localInstall) await tauriApi.stopModelServer();
                 if (operation !== modelOperation.current) return;
                 // The displayed cache status may belong to a previous selection.
                 const selectedCache = await tauriApi.modelCacheStatus(selectedModelPath, vaultRoot).catch(() => null);
@@ -505,6 +548,10 @@ export function ModelManager() {
                 if (!health.model_id) throw new Error('The loaded model has no verified identity.');
                 setModelStatus('LOADED');
                 setConfig(nextConfig);
+                setRuntimeConfig(nextConfig);
+                if (localInstall) {
+                  try { setLocalReports((await fetchAssessment()).local_models ?? []); } catch { /* badges keep their last native value */ }
+                }
                 console.log('[ModelManager] llama-server started on port', port);
               } catch (e: unknown) {
                 if (operation === modelOperation.current) {
@@ -548,9 +595,9 @@ export function ModelManager() {
               setError(null);
               try {
                 const health = await tauriApi.checkModelHealth();
-                setError(`Health: ${JSON.stringify(health)}`);
+                setHealthNotice(`Health response (not workflow qualification): ${JSON.stringify(health)}`);
               } catch (e: any) {
-                setError(`Health check: ${e?.message || 'No inference backend responding'}`);
+                setHealthNotice(`Health check: ${e?.message || 'No inference backend responding'}`);
               }
             }}
           >
@@ -558,8 +605,10 @@ export function ModelManager() {
           </button>
         </div>
 
+        {healthNotice && <p role="status" style={{ fontSize: '12px', overflowWrap: 'anywhere' }}>{healthNotice}</p>}
         {error && (
           <div
+            role="alert"
             style={{
               marginBottom: '24px',
               padding: '12px',
@@ -571,19 +620,15 @@ export function ModelManager() {
             }}
           >
             {error}
+            <button className="btn btn-secondary btn-sm" onClick={() => window.location.reload()} style={{ marginLeft: '12px' }}>Retry</button>
           </div>
         )}
 
-        {/* Safety Pipeline Info */}
-        <div style={{ padding: '16px', background: 'var(--success-bg)', border: '1px solid rgba(52, 211, 153, 0.3)', borderRadius: 'var(--radius-md)' }}>
-          <h4 style={{ fontSize: '13px', fontWeight: 600, color: 'var(--success)', marginBottom: '8px' }}>
-            🛡️ Safety Pipeline
-          </h4>
-          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-            All model output goes through the canonical safety pipeline:<br />
-            <strong>Model → Parser → ToolAction → SafetyGuard → Execution</strong><br />
-            Raw model output never executes tools directly. Security level: <strong>{securityLevel}</strong>
-          </p>
+        <div style={{ padding: '16px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)' }}>
+          <h4 style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>Execution boundaries</h4>
+          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>{TRUSTED_HOST_DISCLOSURE}</p>
+          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>{CODING_ISOLATION_DISCLOSURE}</p>
+          <p style={{ fontSize: '12px' }}>Configured security level: <strong>{securityLevel}</strong>. This setting is not a safety certification.</p>
         </div>
       </div>
     </div>

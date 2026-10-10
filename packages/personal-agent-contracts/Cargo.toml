@@ -1,0 +1,10 @@
+[package]
+name = "unoone-personal-agent-contracts"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded inert personal-agent DTOs, native authority separation and deterministic task projection"
+# Distribution licence remains subject to the owner's repository-wide licence review.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

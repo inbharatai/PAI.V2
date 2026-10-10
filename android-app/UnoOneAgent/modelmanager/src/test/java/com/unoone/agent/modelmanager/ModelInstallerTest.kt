@@ -1,466 +1,219 @@
 package com.unoone.agent.modelmanager
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import org.junit.After
-import org.junit.Assert.assertArrayEquals
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
-import java.io.BufferedReader
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.io.IOException
-import java.io.InputStreamReader
-import java.io.OutputStream
+import org.junit.Assert.*
+import java.io.*
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream
 
-/**
- * Exercises [ModelInstaller] against a tiny in-process HTTP server built on plain [ServerSocket]
- * (no external deps, no `com.sun.net.httpserver` — that package is not in Android's Java SE
- * subset). This tests resume, checksum verification, corrupt-recovery, and zip extraction for real
- * over actual sockets, without a network or a device.
- */
+/** Actual filesystem + loopback HTTP tests. All positive admissions here are synthetic test grants. */
 class ModelInstallerTest {
-
-    private lateinit var baseDir: File
-    private lateinit var modelDir: String
-    private lateinit var installer: ModelInstaller
-
-    @Before
-    fun setUp() {
-        baseDir = Files.createTempDirectory("unoone-install-test").toFile()
-        modelDir = baseDir.resolve("models").absolutePath
-        installer = ModelInstaller(modelDir, dao = null)
+    private lateinit var base: File
+    private lateinit var store: ModelBundleStore
+    @Before fun setup() { base = Files.createTempDirectory("installer-bundle").toFile(); store = ModelBundleStore(base) }
+    @After fun cleanup() { base.deleteRecursively() }
+    private fun hash(b: ByteArray) = ModelBundleStore.sha256(b)
+    private fun descriptor(vararg files: ModelFile) = ModelDescriptor("m", "legacy/m", ModelType.llm, "v1", files = files.toList())
+    private fun asset(name: String, b: ByteArray) = ModelFile(name, "", hash(b), b.size.toLong(), asset = name)
+    private fun partial(d: ModelDescriptor) = store.stageDirectory(d.id, hash(Json.encodeToString(ModelDescriptor.serializer(), d).toByteArray()))
+    private fun run(d: ModelDescriptor, installer: ModelInstaller = ModelInstaller(base.path), cancel: () -> Boolean = { false }, guard: (() -> String?)? = { null }): ModelInstaller.InstallResult =
+        runBlocking { installer.install(d, shouldCancel = cancel, admission = guard) }
+    private fun staged(result: ModelInstaller.InstallResult): File {
+        assertTrue(result.toString(), result is ModelInstaller.InstallResult.Staged)
+        val bundle = (result as ModelInstaller.InstallResult.Staged).bundle
+        assertTrue(store.verify(bundle)); assertNull(store.active("m")); return bundle.root
     }
-
-    @After
-    fun tearDown() {
-        baseDir.deleteRecursively()
+    private class Loader : ModelBundleStore.NativeLoader {
+        override val retainsPreviousInstance = true
+        override fun freshAdmissionError(): String? = null
+        override fun loadAndSmoke(candidateRoot: File) = ModelBundleStore.NativeResult.PASSED
+        override fun commitRouting() { }
+        override fun rollbackCandidate() { }
     }
-
-    @Test
-    fun downloadsAndVerifiesChecksum() {
-        val content = "hello world\n".toByteArray()
-        val sha = sha256(content)
-        val server = MiniHttpServer(content, supportRange = false).apply { start() }
-        try {
-            val descriptor = descriptor("m", "file.bin", server.url("file.bin"), sha, content.size.toLong())
-            val result = runBlocking { installer.install(descriptor) }
-            assertTrue(result is ModelInstaller.InstallResult.Success)
-            val target = File(modelDir, "m/file.bin")
-            assertTrue(target.exists())
-            assertArrayEquals(content, target.readBytes())
-            assertFalse(File(modelDir, "m/file.bin.part").exists())
-        } finally {
-            server.stop()
+    @Test fun actualOldABNewASucceedsNewBFailsPreservesExactBundleAndPointer() {
+        val old = mapOf("A.bin" to "old-A".toByteArray(), "B.bin" to "old-B".toByteArray())
+        val installer = ModelInstaller(base.path) { old[it]?.inputStream() }
+        val before = run(descriptor(*old.map { asset(it.key, it.value) }.toTypedArray()), installer) as ModelInstaller.InstallResult.Staged
+        assertTrue(store.activate(before.bundle, Loader()))
+        val pointer = File(base, ".bundles-v1/m/active-v1"); val pointerBytes = pointer.readBytes()
+        val fresh = mapOf("A.bin" to "new-A".toByteArray(), "B.bin" to "wrong-B".toByteArray())
+        var readA = false
+        val replacement = ModelInstaller(base.path) { name -> if (name == "A.bin") readA = true; fresh[name]?.inputStream() }
+        val wanted = descriptor(asset("A.bin", fresh.getValue("A.bin")), asset("B.bin", "new-B".toByteArray())).copy(version = "v2")
+        assertTrue(run(wanted, replacement) is ModelInstaller.InstallResult.Failure)
+        assertTrue(readA)
+        assertArrayEquals(fresh.getValue("A.bin"), File(partial(wanted), "A.bin").readBytes())
+        assertArrayEquals(pointerBytes, pointer.readBytes())
+        old.forEach { (name, bytes) -> assertArrayEquals(bytes, File(before.bundle.root, name).readBytes()) }
+        assertEquals(before.bundle.bundleId, ModelBundleStore(base).active("m")!!.bundleId)
+        store.cleanupPartial("m", hash(Json.encodeToString(ModelDescriptor.serializer(), wanted).toByteArray()))
+        old.forEach { (name, bytes) -> assertArrayEquals(bytes, File(before.bundle.root, name).readBytes()) }
+    }
+    @Test fun ioFailureMidArtifactLikeEnospcKeepsOldActiveAndSealsNothing() {
+        val old = mapOf("A.bin" to "old-A".toByteArray(), "B.bin" to "old-B".toByteArray())
+        val before = run(descriptor(*old.map { asset(it.key, it.value) }.toTypedArray()), ModelInstaller(base.path) { old[it]?.inputStream() }) as ModelInstaller.InstallResult.Staged
+        assertTrue(store.activate(before.bundle, Loader()))
+        val pointer = File(base, ".bundles-v1/m/active-v1").readBytes()
+        val newB = "new-B".toByteArray()
+        val failing = ModelInstaller(base.path) { name ->
+            if (name == "A.bin") object : InputStream() {
+                var n = 0
+                override fun read(): Int { if (n++ < 2) return 'x'.code; throw IOException("No space left on device") }
+            } else newB.inputStream()
         }
+        val wanted = descriptor(asset("A.bin", "new-A".toByteArray()), asset("B.bin", newB)).copy(version = "v2")
+        assertTrue(run(wanted, failing) is ModelInstaller.InstallResult.Failure)
+        assertArrayEquals(pointer, File(base, ".bundles-v1/m/active-v1").readBytes())
+        old.forEach { (name, bytes) -> assertArrayEquals(bytes, File(before.bundle.root, name).readBytes()) }
+        assertFalse(File(partial(wanted), "A.bin").exists())
+        assertEquals(before.bundle.bundleId, ModelBundleStore(base).active("m")!!.bundleId)
+        assertEquals(1, File(base, ".bundles-v1/m").listFiles()!!.count { it.name.startsWith("bundle-") })
     }
-
-    @Test
-    fun resumesFromPartialFile() {
-        val full = "the quick brown fox jumps over the lazy dog".toByteArray()
-        val firstChunk = full.copyOfRange(0, 20) // "the quick brown fox"
-        val server = MiniHttpServer(full, supportRange = true).apply { start() }
-        try {
-            // Pre-seed a .part file with the first chunk to simulate an interrupted download.
-            File(modelDir, "m").mkdirs()
-            File(modelDir, "m/big.bin.part").writeBytes(firstChunk)
-
-            val descriptor = descriptor("m", "big.bin", server.url("big.bin"), "", 0L)
-            val result = runBlocking { installer.install(descriptor) }
-            assertTrue(result is ModelInstaller.InstallResult.Success)
-            val target = File(modelDir, "m/big.bin")
-            assertArrayEquals(full, target.readBytes())
-        } finally {
-            server.stop()
-        }
-    }
-
-    @Test
-    fun corruptRecoveryFailsWhenServerServesWrongSize() {
-        // Manifest declares sizeBytes = 50 but the server only ever serves 5 bytes ("short").
-        val server = MiniHttpServer("short".toByteArray(), supportRange = false).apply { start() }
-        try {
-            val descriptor = descriptor("m", "bad.bin", server.url("bad.bin"), "", 50L)
-            val result = runBlocking { installer.install(descriptor, listener = null) }
-            assertTrue(result is ModelInstaller.InstallResult.Failure)
-            assertFalse(File(modelDir, "m/bad.bin").exists())
-        } finally {
-            server.stop()
-        }
-    }
-
-    @Test
-    fun extractsZipArchiveAndDeletesArchive() {
-        val zipBytes = ByteArrayOutputStream().also { baos ->
-            ZipOutputStream(baos).use { zos ->
-                zos.putNextEntry(ZipEntry("inner.txt"))
-                zos.write("inside the zip".toByteArray())
-                zos.closeEntry()
-            }
-        }.toByteArray()
-        val server = MiniHttpServer(zipBytes, supportRange = false).apply { start() }
-        try {
-            val descriptor = ModelDescriptor(
-                id = "m", folder = "m", type = ModelType.tts, version = "v",
-                minRamMb = 0, backend = ModelBackend.cpu, defaultLanguage = "en",
-                files = listOf(ModelFile("arch.zip", server.url("arch.zip"), "", 0L, archive = true))
-            )
-            val result = runBlocking { installer.install(descriptor) }
-            assertTrue(result is ModelInstaller.InstallResult.Success)
-            assertTrue(File(modelDir, "m/inner.txt").exists())
-            assertEquals("inside the zip", File(modelDir, "m/inner.txt").readText())
-            // The archive file itself is deleted after extraction.
-            assertFalse(File(modelDir, "m/arch.zip").exists())
-        } finally {
-            server.stop()
-        }
-    }
-
-    @Test
-    fun idempotentSkipWhenFileAlreadyValid() {
-        val content = "already here".toByteArray()
-        val sha = sha256(content)
-        val server = MiniHttpServer(content, supportRange = false).apply { start() }
-        try {
-            File(modelDir, "m").mkdirs()
-            File(modelDir, "m/skip.bin").writeBytes(content)
-
-            val descriptor = descriptor("m", "skip.bin", server.url("skip.bin"), sha, content.size.toLong())
-            val result = runBlocking { installer.install(descriptor) }
-            assertTrue(result is ModelInstaller.InstallResult.Success)
-            assertArrayEquals(content, File(modelDir, "m/skip.bin").readBytes())
-        } finally {
-            server.stop()
-        }
-    }
-
-    @Test
-    fun reDownloadsWhenExistingFileIsTruncatedOrCorrupt() {
-        // A file is present but its checksum does not match the manifest (e.g. truncated by a crash).
-        // The installer must detect it is unhealthy and re-download rather than skip.
-        val correct = "the correct full content".toByteArray()
-        val sha = sha256(correct)
-        val server = MiniHttpServer(correct, supportRange = false).apply { start() }
-        try {
-            File(modelDir, "m").mkdirs()
-            File(modelDir, "m/recheck.bin").writeBytes("truncated/wrong".toByteArray())
-
-            val descriptor = descriptor("m", "recheck.bin", server.url("recheck.bin"), sha, correct.size.toLong())
-            val result = runBlocking { installer.install(descriptor) }
-            assertTrue(result is ModelInstaller.InstallResult.Success)
-            assertArrayEquals(correct, File(modelDir, "m/recheck.bin").readBytes())
-        } finally {
-            server.stop()
-        }
-    }
-
-    @Test
-    fun doesNotTrustZeroByteFileWhenNoIntegrityDeclared() {
-        // Regression for the empty-file guard in fileAlreadyValid: a 0-byte file on disk with NO
-        // declared size/sha must NOT be treated as valid (it may be a truncated download). The
-        // installer must re-download instead of skipping. Without the guard this test fails because
-        // fileAlreadyValid returns true for a present file whose sha is blank, and the 0-byte file
-        // is kept as-is.
-        val content = "the real content".toByteArray()
-        val server = MiniHttpServer(content, supportRange = false).apply { start() }
-        try {
-            File(modelDir, "m").mkdirs()
-            // Pre-place a 0-byte (truncated) file with no integrity fields declared.
-            File(modelDir, "m/zero.bin").writeBytes(ByteArray(0))
-
-            val descriptor = descriptor("m", "zero.bin", server.url("zero.bin"), "", 0L)
-            val result = runBlocking { installer.install(descriptor) }
-            assertTrue(result is ModelInstaller.InstallResult.Success)
-            assertArrayEquals(content, File(modelDir, "m/zero.bin").readBytes())
-        } finally {
-            server.stop()
-        }
-    }
-
-    @Test
-    fun commitsCompletePartFileWithoutNetwork() {
-        // Regression for the complete-.part commit guard + HTTP 416 recovery: a prior run finished
-        // downloading but crashed before the .part→final rename. When the manifest declares a size
-        // and the .part already holds that many bytes, the installer must commit directly without
-        // touching the network (otherwise a server returning 416 "Range Not Satisfiable" would make
-        // re-install fail forever). No server is started here — if the code path tried the network
-        // the test would fail instead of passing.
-        val content = "fully downloaded already".toByteArray()
-        File(modelDir, "m").mkdirs()
-        // Pre-place a complete .part; the final file does NOT exist yet.
-        File(modelDir, "m/done.bin.part").writeBytes(content)
-
-        val descriptor = descriptor("m", "done.bin", "http://invalid.invalid/done.bin", "", content.size.toLong())
-        val result = runBlocking { installer.install(descriptor) }
-        assertTrue(result is ModelInstaller.InstallResult.Success)
-        assertArrayEquals(content, File(modelDir, "m/done.bin").readBytes())
-        assertFalse(File(modelDir, "m/done.bin.part").exists())
-    }
-
-    @Test
-    fun installsArchiveFromAssetAndExtracts() {
-        // An asset-backed archive (espeak-ng-data.zip pattern): copied from the asset reader, then
-        // extracted into the model folder, then the zip deleted. No HTTP server is started — if the
-        // asset path weren't used the test would fail to find the bytes.
-        val zipBytes = ByteArrayOutputStream().also { baos ->
-            ZipOutputStream(baos).use { zos ->
-                zos.putNextEntry(ZipEntry("espeak-ng-data/af_dict"))
-                zos.write("af-data".toByteArray())
-                zos.closeEntry()
-                zos.putNextEntry(ZipEntry("espeak-ng-data/phondata"))
-                zos.write("phon".toByteArray())
-                zos.closeEntry()
-            }
-        }.toByteArray()
-        val assets = mapOf("espeak-ng-data.zip" to zipBytes)
-        val assetInstaller = ModelInstaller(modelDir, dao = null) { name ->
-            assets[name]?.let { ByteArrayInputStream(it) }
-        }
-        val descriptor = ModelDescriptor(
-            id = "tts", folder = "tts", type = ModelType.tts, version = "v",
-            minRamMb = 0, backend = ModelBackend.cpu, defaultLanguage = "en",
-            files = listOf(
-                ModelFile(
-                    "espeak-ng-data.zip", url = "", sha256 = "", sizeBytes = zipBytes.size.toLong(),
-                    archive = true, asset = "espeak-ng-data.zip"
-                )
-            )
-        )
-        val result = runBlocking { assetInstaller.install(descriptor) }
-        assertTrue(result is ModelInstaller.InstallResult.Success)
-        // Archive deleted after extraction.
-        assertFalse(File(modelDir, "tts/espeak-ng-data.zip").exists())
-        // Extracted directory present with contents (rooted at espeak-ng-data/).
-        assertTrue(File(modelDir, "tts/espeak-ng-data").isDirectory)
-        assertEquals("af-data", File(modelDir, "tts/espeak-ng-data/af_dict").readText())
-        assertEquals("phon", File(modelDir, "tts/espeak-ng-data/phondata").readText())
-    }
-
-    @Test
-    fun installsPlainFileFromAssetWithChecksum() {
-        val content = "asset payload".toByteArray()
-        val sha = sha256(content)
-        val assets = mapOf("payload.bin" to content)
-        val assetInstaller = ModelInstaller(modelDir, dao = null) { name ->
-            assets[name]?.let { ByteArrayInputStream(it) }
-        }
-        val descriptor = ModelDescriptor(
-            id = "m", folder = "m", type = ModelType.llm, version = "v",
-            minRamMb = 0, backend = ModelBackend.cpu, defaultLanguage = "en",
-            files = listOf(
-                ModelFile(
-                    "payload.bin", url = "", sha256 = sha, sizeBytes = content.size.toLong(),
-                    archive = false, asset = "payload.bin"
-                )
-            )
-        )
-        val result = runBlocking { assetInstaller.install(descriptor) }
-        assertTrue(result is ModelInstaller.InstallResult.Success)
-        assertArrayEquals(content, File(modelDir, "m/payload.bin").readBytes())
-    }
-
-    @Test
-    fun failsWhenAssetMissing() {
-        // An asset-backed file whose asset is absent must fail cleanly (not crash, not silently skip).
-        val assetInstaller = ModelInstaller(modelDir, dao = null) { _ -> null }
-        val descriptor = ModelDescriptor(
-            id = "m", folder = "m", type = ModelType.llm, version = "v",
-            minRamMb = 0, backend = ModelBackend.cpu, defaultLanguage = "en",
-            files = listOf(
-                ModelFile("payload.bin", url = "", sha256 = "", sizeBytes = 0, archive = false, asset = "payload.bin")
-            )
-        )
-        val result = runBlocking { assetInstaller.install(descriptor) }
-        assertTrue(result is ModelInstaller.InstallResult.Failure)
-        assertFalse(File(modelDir, "m/payload.bin").exists())
-    }
-
-    @Test
-    fun skipsAssetArchiveWhenAlreadyExtracted() {
-        // Idempotent: a fully extracted archive is proven by the completion
-        // marker (finding A2), so no asset copy is needed and the asset
-        // reader is never invoked.
-        File(modelDir, "tts/espeak-ng-data").mkdirs()
-        File(modelDir, "tts/espeak-ng-data/phondata").writeText("already")
-        File(modelDir, "tts/espeak-ng-data/${ModelInstaller.EXTRACTION_MARKER}").createNewFile()
+    @Test fun stalePartBesideVerifiedStagedFileStillSeals() {
+        val bytes = "payload".toByteArray()
+        val d = descriptor(asset("model.bin", bytes))
+        File(partial(d), "model.bin").writeBytes(bytes); File(partial(d), "model.bin.part").writeText("stale")
         var reads = 0
-        val assetInstaller = ModelInstaller(modelDir, dao = null) { _ ->
-            reads++
-            ByteArrayInputStream("should-not-be-used".toByteArray())
-        }
-        val descriptor = ModelDescriptor(
-            id = "tts", folder = "tts", type = ModelType.tts, version = "v",
-            minRamMb = 0, backend = ModelBackend.cpu, defaultLanguage = "en",
-            files = listOf(
-                ModelFile("espeak-ng-data.zip", url = "", sha256 = "", sizeBytes = 0, archive = true, asset = "espeak-ng-data.zip")
-            )
-        )
-        val result = runBlocking { assetInstaller.install(descriptor) }
-        assertTrue(result is ModelInstaller.InstallResult.Success)
-        assertEquals(0, reads) // asset reader never invoked
-        assertEquals("already", File(modelDir, "tts/espeak-ng-data/phondata").readText())
+        val root = staged(run(d, ModelInstaller(base.path) { reads++; bytes.inputStream() }))
+        assertEquals(0, reads); assertFalse(File(root, "model.bin.part").exists()); assertArrayEquals(bytes, File(root, "model.bin").readBytes())
     }
-
-    @Test
-    fun extractsTarBz2ArchiveWithExtractsTo() {
-        // The whisper-tiny pattern: a .tar.bz2 whose top directory ("sherpa-onnx-whisper-tiny")
-        // differs from the archive name and whose double extension (".tar.bz2") breaks the
-        // strip-last-extension fallback. `extractsTo` names the real top dir so the installer
-        // extracts and later health-checks the right path.
-        val tarBytes = tarBz2(
-            mapOf(
-                "sherpa-onnx-whisper-tiny/tiny-encoder.int8.onnx" to "ENC".toByteArray(),
-                "sherpa-onnx-whisper-tiny/tiny-tokens.txt" to "TOK".toByteArray()
-            )
-        )
-        val assets = mapOf("sherpa-onnx-whisper-tiny.tar.bz2" to tarBytes)
-        val assetInstaller = ModelInstaller(modelDir, dao = null) { name ->
-            assets[name]?.let { ByteArrayInputStream(it) }
-        }
-        val descriptor = ModelDescriptor(
-            id = "sherpa-asr-whisper", folder = "sherpa-asr-whisper", type = ModelType.asr,
-            version = "whisper-tiny-int8", minRamMb = 0, backend = ModelBackend.cpu,
-            defaultLanguage = "multi",
-            files = listOf(
-                ModelFile(
-                    name = "sherpa-onnx-whisper-tiny.tar.bz2",
-                    url = "", sha256 = "", sizeBytes = tarBytes.size.toLong(),
-                    archive = true, asset = "sherpa-onnx-whisper-tiny.tar.bz2",
-                    extractsTo = "sherpa-onnx-whisper-tiny"
-                )
-            )
-        )
-        val result = runBlocking { assetInstaller.install(descriptor) }
-        assertTrue(result is ModelInstaller.InstallResult.Success)
-        // Archive deleted after extraction.
-        assertFalse(File(modelDir, "sherpa-asr-whisper/sherpa-onnx-whisper-tiny.tar.bz2").exists())
-        // Extracted files sit under the extractsTo top directory.
-        val top = File(modelDir, "sherpa-asr-whisper/sherpa-onnx-whisper-tiny")
-        assertTrue(top.isDirectory)
-        assertEquals("ENC", File(top, "tiny-encoder.int8.onnx").readText())
-        assertEquals("TOK", File(top, "tiny-tokens.txt").readText())
+    @Test fun missingOrDeniedAdmissionStartsNoAssetBytes() {
+        val bytes = "payload".toByteArray(); var reads = 0
+        val installer = ModelInstaller(base.path) { reads++; bytes.inputStream() }
+        val d = descriptor(asset("model.bin", bytes))
+        assertTrue(run(d, installer, guard = null) is ModelInstaller.InstallResult.Failure)
+        for (reason in listOf("UNKNOWN_PROBE", "MEMORY_PRESSURE", "PERMANENT_MEMORY_MISFIT", "POLICY_EXPIRED", "DISABLED", "METERED", "STALE_PROBE"))
+            assertTrue(run(d, installer, guard = { reason }) is ModelInstaller.InstallResult.Failure)
+        assertEquals(0, reads)
     }
-
-    @Test
-    fun skipsTarBz2ArchiveWhenAlreadyExtractedViaExtractsTo() {
-        // Idempotent: when the extractsTo directory exists AND carries the
-        // completion marker (finding A2), the installer must skip without
-        // invoking the asset reader. This exercises archiveAlreadyExtracted
-        // with extractsTo (the strip-last-extension fallback would look for
-        // "pkg.tar" and never match).
-        val top = File(modelDir, "sherpa-asr-whisper/sherpa-onnx-whisper-tiny").apply { mkdirs() }
-        File(top, "tiny-encoder.int8.onnx").writeText("already")
-        File(top, ModelInstaller.EXTRACTION_MARKER).createNewFile()
+    @Test fun policyRevokedBetweenArtifactsNeverReadsSecond() {
+        val bytes = "payload".toByteArray(); var reads = 0; var revoked = false
+        val installer = ModelInstaller(base.path) { name -> reads++; if (name == "A.bin") revoked = true; bytes.inputStream() }
+        val d = descriptor(asset("A.bin", bytes), asset("B.bin", bytes))
+        assertTrue(run(d, installer, guard = { if (revoked) "REVOKED" else null }) is ModelInstaller.InstallResult.Failure)
+        assertEquals(1, reads); assertNull(store.active("m"))
+    }
+    @Test fun downloadVerifyAndResumeActualHttpRange() {
+        for (supports in listOf(false, true)) {
+            val bytes = "the quick brown fox jumps over the lazy dog".toByteArray()
+            val server = MiniHttpServer(bytes, supports).apply { start() }
+            try {
+                val d = descriptor(ModelFile("model.bin", server.url("model.bin"), hash(bytes), bytes.size.toLong())).copy(version = supports.toString())
+                File(partial(d), "model.bin.part").writeBytes(bytes.copyOfRange(0, 10))
+                val root = staged(run(d)); assertArrayEquals(bytes, File(root, "model.bin").readBytes())
+                assertFalse(File(root, "model.bin.part").exists())
+            } finally { server.stop() }
+        }
+    }
+    @Test fun mismatchedRangePreservesPartial() {
+        val bytes = "a long expected payload".toByteArray(); val server = MiniHttpServer(bytes, true, 1).apply { start() }
+        try {
+            val d = descriptor(ModelFile("model.bin", server.url("model.bin"), hash(bytes), bytes.size.toLong()))
+            val part = File(partial(d), "model.bin.part").apply { writeBytes(bytes.copyOfRange(0, 5)) }
+            assertTrue(run(d) is ModelInstaller.InstallResult.Failure); assertArrayEquals(bytes.copyOfRange(0, 5), part.readBytes())
+        } finally { server.stop() }
+    }
+    @Test fun completePartCommitsWithoutNetworkAndIdempotentSealedReuse() {
+        val bytes = "complete".toByteArray()
+        val d = descriptor(ModelFile("model.bin", "http://invalid.invalid/model", hash(bytes), bytes.size.toLong()))
+        File(partial(d), "model.bin.part").writeBytes(bytes)
+        val first = run(d) as ModelInstaller.InstallResult.Staged
+        assertArrayEquals(bytes, File(first.bundle.root, "model.bin").readBytes())
+        val again = run(d) as ModelInstaller.InstallResult.Staged
+        assertEquals(first.bundle.bundleId, again.bundle.bundleId)
+    }
+    @Test fun oversizedPartRejectedAndOrdinaryCancelRetained() {
+        val bytes = "expected".toByteArray()
+        val d = descriptor(ModelFile("model.bin", "http://invalid.invalid/model", hash(bytes), bytes.size.toLong()))
+        val part = File(partial(d), "model.bin.part").apply { writeText("oversized content") }
+        assertTrue(run(d) is ModelInstaller.InstallResult.Failure); assertFalse(part.exists())
+        part.writeText("part")
+        assertTrue(run(d, cancel = { true }) is ModelInstaller.InstallResult.Failure)
+        assertEquals("part", part.readText())
+    }
+    @Test fun connectionFailureRetryableWrongSizeOrHashCannotSeal() {
+        val port = ServerSocket(0).use { it.localPort }
+        val d = descriptor(ModelFile("model.bin", "http://127.0.0.1:$port/model", "0".repeat(64), 100))
+        val part = File(partial(d), "model.bin.part").apply { writeText("partial") }
+        val failure = run(d) as ModelInstaller.InstallResult.Failure
+        assertTrue(failure.retryable); assertEquals("partial", part.readText())
+        val server = MiniHttpServer("bad".toByteArray(), false).apply { start() }
+        try { assertTrue(run(d.copy(version = "bad", files = listOf(d.files.single().copy(url = server.url("bad"))))) is ModelInstaller.InstallResult.Failure) }
+        finally { server.stop() }
+        assertNull(store.active("m"))
+    }
+    @Test fun incompleteIntegrityNeverFetchesOrOverwritesStandaloneBin() {
+        val old = File(base, "legacy/m/model.bin").also { it.parentFile.mkdirs(); it.writeText("standalone") }
+        var reads = 0; val installer = ModelInstaller(base.path) { reads++; "new".byteInputStream() }
+        assertTrue(run(descriptor(ModelFile("model.bin", "", asset = "model.bin")), installer) is ModelInstaller.InstallResult.Failure)
+        assertEquals(0, reads); assertEquals("standalone", old.readText())
+    }
+    @Test fun assetMissingAndCorruptAssetFailWithoutActivation() {
+        val d = descriptor(asset("model.bin", "right".toByteArray()))
+        assertTrue(run(d, ModelInstaller(base.path) { null }) is ModelInstaller.InstallResult.Failure)
+        assertTrue(run(d, ModelInstaller(base.path) { "wrong".byteInputStream() }) is ModelInstaller.InstallResult.Failure)
+        assertNull(store.active("m"))
+    }
+    @Test fun verifiedZipExtractionAndInventoryRejectsMutationExtraMissingAndSymlink() {
+        val bytes = archiveZip("pkg/model" to "correct")
+        val f = ModelFile("pkg.zip", "", hash(bytes), bytes.size.toLong(), true, "pkg.zip")
+        var reads = 0; val installer = ModelInstaller(base.path) { reads++; bytes.inputStream() }
+        val d = descriptor(f); val root = staged(run(d, installer))
+        assertFalse(File(root, "pkg.zip").exists()); assertTrue(installer.archiveAlreadyExtracted(f, root))
+        assertTrue(run(d, installer) is ModelInstaller.InstallResult.Staged); assertEquals(1, reads)
+        val payload = File(root, "pkg/model")
+        payload.writeText("CORRUPT"); assertFalse(installer.archiveAlreadyExtracted(f, root)); payload.writeText("correct")
+        File(root, "pkg/extra").writeText("extra"); assertFalse(installer.archiveAlreadyExtracted(f, root)); File(root, "pkg/extra").delete()
+        payload.delete(); assertFalse(installer.archiveAlreadyExtracted(f, root))
+        val outside = File(base, "outside").apply { writeText("correct") }
+        Files.createSymbolicLink(payload.toPath(), outside.toPath()); assertFalse(installer.archiveAlreadyExtracted(f, root))
+    }
+    @Test fun badArchivePathsRootsAndUnpinnedArchivePreserveLivePayload() {
+        val legacy = File(base, "legacy/m/pkg/model").also { it.parentFile.mkdirs(); it.writeText("old") }
+        for (entry in listOf("../escape", "other/foreign")) {
+            val bytes = archiveZip("pkg/model" to "new", entry to "bad")
+            val f = ModelFile("pkg.zip", "", hash(bytes), bytes.size.toLong(), true, "pkg.zip")
+            assertTrue(run(descriptor(f), ModelInstaller(base.path) { bytes.inputStream() }) is ModelInstaller.InstallResult.Failure)
+            assertEquals("old", legacy.readText())
+        }
+        val f = ModelFile("pkg.zip", "", archive = true, asset = "pkg.zip")
         var reads = 0
-        val assetInstaller = ModelInstaller(modelDir, dao = null) { _ ->
-            reads++
-            ByteArrayInputStream("should-not-be-used".toByteArray())
-        }
-        val descriptor = ModelDescriptor(
-            id = "sherpa-asr-whisper", folder = "sherpa-asr-whisper", type = ModelType.asr,
-            version = "v", minRamMb = 0, backend = ModelBackend.cpu, defaultLanguage = "multi",
-            files = listOf(
-                ModelFile(
-                    name = "pkg.tar.bz2", url = "", sha256 = "", sizeBytes = 0,
-                    archive = true, asset = "pkg.tar.bz2", extractsTo = "sherpa-onnx-whisper-tiny"
-                )
-            )
-        )
-        val result = runBlocking { assetInstaller.install(descriptor) }
-        assertTrue(result is ModelInstaller.InstallResult.Success)
-        assertEquals(0, reads) // asset reader never invoked
-        assertEquals("already", File(top, "tiny-encoder.int8.onnx").readText())
+        assertTrue(run(descriptor(f), ModelInstaller(base.path) { reads++; null }) is ModelInstaller.InstallResult.Failure)
+        assertEquals(0, reads); assertEquals("old", legacy.readText())
     }
-
-    @Test
-    fun reextractsArchiveAfterInterruptedExtraction() {
-        // Finding A2 regression lock: an interrupted extraction leaves a
-        // PARTIAL output directory with no completion marker. The next
-        // install must re-extract (and re-verify the archive) instead of
-        // treating the partial directory as a complete install — the old
-        // "directory exists and is non-empty" check made the model
-        // unrecoverable once the archive was deleted.
-        val tarBytes = tarBz2(
-            mapOf(
-                "sherpa-onnx-whisper-tiny/tiny-encoder.int8.onnx" to "ENC".toByteArray(),
-                "sherpa-onnx-whisper-tiny/tiny-tokens.txt" to "TOK".toByteArray()
-            )
-        )
-        val assets = mapOf("sherpa-onnx-whisper-tiny.tar.bz2" to tarBytes)
-        val assetInstaller = ModelInstaller(modelDir, dao = null) { name ->
-            assets[name]?.let { ByteArrayInputStream(it) }
-        }
-        // Simulate the interrupted state: partial extraction, no marker.
-        val top = File(modelDir, "sherpa-asr-whisper/sherpa-onnx-whisper-tiny").apply { mkdirs() }
-        File(top, "tiny-encoder.int8.onnx").writeText("partial-garbage")
-
-        val descriptor = ModelDescriptor(
-            id = "sherpa-asr-whisper", folder = "sherpa-asr-whisper", type = ModelType.asr,
-            version = "whisper-tiny-int8", minRamMb = 0, backend = ModelBackend.cpu,
-            defaultLanguage = "multi",
-            files = listOf(
-                ModelFile(
-                    name = "sherpa-onnx-whisper-tiny.tar.bz2",
-                    url = "", sha256 = "", sizeBytes = tarBytes.size.toLong(),
-                    archive = true, asset = "sherpa-onnx-whisper-tiny.tar.bz2",
-                    extractsTo = "sherpa-onnx-whisper-tiny"
-                )
-            )
-        )
-        val result = runBlocking { assetInstaller.install(descriptor) }
-        assertTrue(result is ModelInstaller.InstallResult.Success)
-        // The partial file was overwritten by the fresh extraction and the
-        // completion marker now exists.
-        assertEquals("ENC", File(top, "tiny-encoder.int8.onnx").readText())
-        assertEquals("TOK", File(top, "tiny-tokens.txt").readText())
-        assertTrue(File(top, ModelInstaller.EXTRACTION_MARKER).exists())
-        // Archive deleted after the complete extraction.
-        assertFalse(File(modelDir, "sherpa-asr-whisper/sherpa-onnx-whisper-tiny.tar.bz2").exists())
+    @Test fun tarBz2ExtractsToExactRoot() {
+        val bytes = tarBz2(mapOf("speech/encoder" to "ENC".toByteArray(), "speech/tokens" to "TOK".toByteArray()))
+        val f = ModelFile("pkg.tar.bz2", "", hash(bytes), bytes.size.toLong(), true, "pkg.tar.bz2", "speech")
+        val root = staged(run(descriptor(f), ModelInstaller(base.path) { bytes.inputStream() }))
+        assertEquals("ENC", File(root, "speech/encoder").readText()); assertEquals("TOK", File(root, "speech/tokens").readText())
+        assertFalse(File(root, "pkg.tar.bz2").exists())
     }
-
-    // ---- helpers ----
-
-    private fun sha256(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-
-    /** Builds a tar.bz2 with the given `path → bytes` entries (commons-compress, no native deps). */
-    private fun tarBz2(entries: Map<String, ByteArray>): ByteArray {
-        val bos = ByteArrayOutputStream()
-        BZip2CompressorOutputStream(bos).use { bz ->
-            TarArchiveOutputStream(bz).use { tar ->
-                entries.forEach { (name, data) ->
-                    val entry = TarArchiveEntry(name)
-                    entry.size = data.size.toLong()
-                    tar.putArchiveEntry(entry)
-                    tar.write(data)
-                    tar.closeArchiveEntry()
-                }
-            }
-        }
-        return bos.toByteArray()
-    }
-
-    private fun descriptor(id: String, file: String, url: String, sha: String, size: Long): ModelDescriptor =
-        ModelDescriptor(
-            id = id, folder = id, type = ModelType.llm, version = "v",
-            minRamMb = 0, backend = ModelBackend.cpu, defaultLanguage = "en",
-            files = listOf(ModelFile(file, url, sha, size, archive = false))
-        )
-
+    private fun archiveZip(vararg entries: Pair<String, String>): ByteArray = ByteArrayOutputStream().also { out ->
+        ZipOutputStream(out).use { zip -> entries.forEach { (name, value) -> zip.putNextEntry(ZipEntry(name)); zip.write(value.toByteArray()); zip.closeEntry() } }
+    }.toByteArray()
+    private fun tarBz2(entries: Map<String, ByteArray>): ByteArray = ByteArrayOutputStream().also { out ->
+        BZip2CompressorOutputStream(out).use { bz -> TarArchiveOutputStream(bz).use { tar -> entries.forEach { (name, value) ->
+            val entry = TarArchiveEntry(name); entry.size = value.size.toLong(); tar.putArchiveEntry(entry); tar.write(value); tar.closeArchiveEntry()
+        } } }
+    }.toByteArray()
     /** Minimal HTTP/1.1 server over a plain socket serving [body], optionally honouring Range. */
-    private class MiniHttpServer(private val body: ByteArray, private val supportRange: Boolean) {
+    private class MiniHttpServer(
+        private val body: ByteArray,
+        private val supportRange: Boolean,
+        private val contentRangeStartDelta: Int = 0
+    ) {
         private val server = ServerSocket(0)
         private val thread = Thread { runServer() }
         private var stopped = false
@@ -499,8 +252,9 @@ class ModelInstallerTest {
                 val from = range.removePrefix("bytes=").substringBefore('-').toInt()
                 if (from in 0 until body.size) {
                     val slice = body.copyOfRange(from, body.size)
+                    val reportedStart = from + contentRangeStartDelta
                     writeResponse(out, "206 Partial Content", slice,
-                        extra = "Content-Range: bytes $from-${body.size - 1}/${body.size}\r\n")
+                        extra = "Content-Range: bytes $reportedStart-${body.size - 1}/${body.size}\r\n")
                 } else {
                     writeResponse(out, "416 Range Not Satisfiable", ByteArray(0), extra = "")
                 }

@@ -10,6 +10,11 @@ import { invoke as tauriInvoke, convertFileSrc } from '@tauri-apps/api/core';
 
 export interface VaultInfo {
   detected: boolean;
+  /** Optional for older explicit drive backends. Root is logical, not a readiness claim. */
+  storage_kind?: 'local' | 'legacy_drive';
+  install_root?: string;
+  local_vault_state?: 'new' | 'locked' | 'interrupted';
+  assets_ready?: boolean;
   vault_root: string;
   vault_id: string;
   startup_state: StartupPhase;
@@ -18,6 +23,8 @@ export interface VaultInfo {
 
 export type StartupPhase =
   | 'STARTING'
+  | 'LOCAL_SETUP'
+  | 'LOCAL_RECOVERY'
   | 'WAITING_FOR_PAI'
   | 'VALIDATING_PAI'
   | 'PAI_INVALID'
@@ -327,6 +334,7 @@ export interface HarnessChatResult {
   elapsed_ms: number;
   model_id: string;
   memory_namespace: string;
+  personal_binding?: { agent_id: string; person_id: string; replica_id: string; persona_revision: number; ledger_revision: number } | null;
   /** Set when the oldest turns were omitted to fit the granted context
    *  window — shown as a visible note on the reply, never silent. */
   context_note?: string | null;
@@ -470,7 +478,25 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
   return tauriInvoke<T>(command, converted);
 }
 
+export interface PersonalTask {
+  spec: { task_id: string; goal: string; deadline_ms: number; user_visible_policy: string; expected_postcondition: string; origin_replica_id: string };
+  events: { event_id: string; operation_id: string; predecessor_event_id: string | null; transition: string; step: number; evidence_ref: string | null }[];
+  draft: string; snooze_until_ms: number | null; deleted: boolean; status: string; execute_on_hydration: false; owner_replica_id?: string | null; owner_epoch?: number; remote_claims?: unknown[];
+}
+export interface PersonalAgentView {
+  revision: number; replica_id: string;
+  agent: { agent_id: string; person_id: string; display_name: string; profile_revision: number; conversation_refs: string[] };
+  persona: { revision: number; deleted: boolean; preferences: { key: string; value: string; status: string; provenance: { source: string; actor_id: string; replica_id: string } }[]; provenance: { source: string; actor_id: string; replica_id: string } };
+  tasks: PersonalTask[]; pending_mutations: number; sync_status: string; conflicts?: string[]; archived_mutations?: number;
+}
+export interface PersonalRequest {
+  operation_id: string; expected_revision: number; expected_replica_id: string;
+  action: 'PERSONA' | 'CLEAR_PERSONA' | 'CREATE' | 'EDIT' | 'ACCEPT' | 'SNOOZE' | 'CANCEL' | 'DELETE';
+  task_id: string | null; text: string; draft: string; snooze_until_ms: number | null;
+}
 export const tauriApi = {
+  personalAgentView: () => invoke<PersonalAgentView>('personal_agent_view'),
+  personalAgentMutate: (request: PersonalRequest) => invoke<PersonalAgentView>('personal_agent_mutate', { request }),
   // Vault
   detectVault: () => invoke<VaultInfo>('detect_vault'),
   getStartupStatus: () => invoke<StartupStatus>('get_startup_status'),
@@ -481,6 +507,9 @@ export const tauriApi = {
   devBypassUnlock: () => invoke<VaultUnlockResult>('dev_bypass_unlock'),
   setupVault: (password: string, profileName: string | null, vaultRoot: string) =>
     invoke<VaultSetupResult>('setup_vault', { password, profile_name: profileName, vault_root: vaultRoot }),
+  recoverLocalVault: (recoveryPhrase: string) => invoke<VaultUnlockResult>('recover_local_vault', { recovery_phrase: recoveryPhrase }),
+  resumeLocalVault: (password: string) => invoke<void>('resume_local_vault', { password }),
+  backupLocalVault: () => invoke<string>('backup_local_vault'),
   lockVault: () => invoke<void>('lock_vault'),
   getHardwareProfile: () => invoke<HardwareProfile>('get_hardware_profile'),
   getVaultStatus: () => invoke<VaultStatus>('get_vault_status'),
@@ -622,6 +651,9 @@ export const tauriApi = {
     conversationId: string | null,
     allowWorkspaceGoal: boolean,
     images?: string[] | null,
+    personalMode = false,
+    personalTask?: { task_id: string; expected_revision: number } | null,
+    personalUserMessage?: string | null,
   ) =>
     invoke<HarnessChatResult>('harness_chat', {
       message,
@@ -629,6 +661,9 @@ export const tauriApi = {
       conversation_id: conversationId,
       allow_workspace_goal: allowWorkspaceGoal,
       images: images ?? null,
+      personal_mode: personalMode,
+      personal_task: personalTask ?? null,
+      personal_user_message: personalUserMessage ?? null,
     }),
   // Stop control: cancels the in-flight run for this conversation. The run
   // unwinds at the next loop step boundary and returns a cancellation error

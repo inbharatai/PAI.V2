@@ -33,7 +33,7 @@ interface SkillDao {
     suspend fun allOnce(): List<SkillEntity>
 
     /** Rows not yet mirrored to the vault (created while detached/locked). */
-    @Query("SELECT * FROM skills WHERE vaultRecordId IS NULL ORDER BY id ASC")
+    @Query("SELECT * FROM skills WHERE (vaultRecordId IS NULL OR id IN (SELECT localId FROM pending_writes WHERE recordKind IN ('SKILL'))) ORDER BY id ASC")
     suspend fun notSynced(): List<SkillEntity>
 
     /** Link a cache row to the vault record + revision it last wrote. */

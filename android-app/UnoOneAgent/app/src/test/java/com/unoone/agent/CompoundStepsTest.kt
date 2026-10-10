@@ -41,6 +41,7 @@ class CompoundStepsTest {
             memoryDao = db.memoryDao(),
             skillDao = db.skillDao()
         )
+        runBlocking { orchestrator.ensureTaskScopesReady() }
     }
 
     @After
@@ -77,6 +78,19 @@ class CompoundStepsTest {
         assertTrue(notes.contains("p1"))
         assertTrue(notes.contains("p2"))
         assertTrue(notes.contains("p3"))
+    }
+
+    @Test
+    fun failedDependencyStopsBeforeLaterMutationAndPersistsPartial() = runBlocking {
+        // Real admitted command: an unresolvable app fails, preventing the final write.
+        orchestrator.processCommand(
+            "create note prefix and open definitely_missing_app and create note must-not-run", InputType.TEXT)
+        assertEquals(listOf("prefix"), db.noteDao().recent(100).map { it.title })
+        assertFalse(orchestrator.timelineSteps.value.any { it.detail == "Compound complete" })
+        val logs = db.actionLogDao().getRecentSync().filter { it.selectedTool == "compound" }
+        assertEquals(1, logs.size)
+        assertEquals("partial", logs.single().status)
+        assertTrue(logs.single().errorMessage.orEmpty().contains("Remaining steps were not run"))
     }
 
     @Test

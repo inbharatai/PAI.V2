@@ -1,6 +1,9 @@
 package com.unoone.agent.ui.navigation
 
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.List
@@ -107,21 +110,56 @@ fun UnoOneNavHost(
             composable(Screen.Agent.route) {
                 val voiceLanguage by settingsViewModel.voiceLanguage.collectAsState()
                 val skills by skillsViewModel.skills.collectAsState()
+                Column(Modifier.fillMaxSize()) {
+                    androidx.compose.material3.TextButton(onClick = { navController.navigate("personal-agent") }) {
+                        Text("Personal agent · persona and encrypted tasks")
+                    }
+                    androidx.compose.material3.TextButton(onClick = { navController.navigate("peer-sync") }) { Text("Local peer pairing · inert review preview") }
+                    Box(Modifier.weight(1f)) {
                 AgentScreen(
                     viewModel = agentViewModel,
                     voiceLanguage = voiceLanguage,
                     onVoiceLanguageSelected = settingsViewModel::setVoiceLanguage,
                     onNavigateToSecureBrowser = { navController.navigate(Screen.SecureBrowser.route) },
                     skillCount = skills.size,
-                    onNavigateToSkills = { navController.navigate(Screen.Skills.route) }
+                    onNavigateToSkills = { navController.navigate(Screen.Skills.route) },
+                    onNavigateToTasks = { navController.navigate("tasks") }
                 )
+                    }
+                }
+            }
+            composable("peer-sync") {
+                com.unoone.agent.peersync.PeerSyncScreen(onBack = { navController.popBackStack() })
+            }
+            composable("personal-agent") {
+                com.unoone.agent.personal.PersonalAgentScreen(onBack = { navController.popBackStack() })
             }
             composable(Screen.Notes.route) { NotesScreen(viewModel = notesViewModel) }
-            composable(Screen.Skills.route) { SkillsScreen(viewModel = skillsViewModel) }
+            composable(Screen.Skills.route) {
+                SkillsScreen(viewModel = skillsViewModel, onReviewedWorkflows = { navController.navigate("skills-v2") })
+            }
+            composable("tasks") {
+                val application = androidx.compose.ui.platform.LocalContext.current.applicationContext as com.unoone.agent.UnoOneApplication
+                com.unoone.agent.ui.screens.TaskBoardScreen(
+                    onBack = { navController.popBackStack() }, agentViewModel = agentViewModel,
+                    onPrepareResearchDraft = { query, prompt -> application.taskRuntime.submitPreparation(query, prompt) },
+                    onOwlTask = { navController.navigate("owl-task") }
+                )
+            }
+            composable("owl-task") {
+                com.unoone.agent.owl.OwlTaskScreen(onBack = { navController.popBackStack() })
+            }
+            composable("skills-v2") {
+                com.unoone.agent.ui.screens.SkillsV2Screen(onBack = { navController.popBackStack() })
+            }
             composable(Screen.Logs.route) { LogsScreen(viewModel = logsViewModel) }
+            composable("latency-diagnostics") {
+                com.unoone.agent.ui.screens.LatencyDiagnosticsScreen(onBack = { navController.popBackStack() })
+            }
             composable(Screen.Settings.route) {
                 SettingsScreen(
                     viewModel = settingsViewModel,
+                    onNavigateToLatency = { navController.navigate("latency-diagnostics") },
                     onNavigateToPrivacy = { navController.navigate(Screen.PrivacySettings.route) },
                     onNavigateToModels = { navController.navigate(Screen.Models.route) },
                     onNavigateToLanguagePacks = { navController.navigate(Screen.LanguagePacks.route) },

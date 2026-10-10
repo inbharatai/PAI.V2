@@ -48,7 +48,6 @@ import com.unoone.agent.accessibilitycontrol.UnoOneAccessibilityService
 import com.unoone.agent.core.runtime.AgentRuntimeGate
 import androidx.lifecycle.lifecycleScope
 import com.unoone.agent.di.DatabaseProvider
-import com.unoone.agent.storage.cache.VaultCacheLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import com.unoone.agent.ui.navigation.UnoOneNavHost
@@ -82,35 +81,19 @@ class MainActivity : ComponentActivity() {
     private val mutableVaultUnlockUi = MutableStateFlow(VaultUnlockUi())
     private val vaultUnlockUi = mutableVaultUnlockUi.asStateFlow()
 
-    /**
-     * Unlock the shared vault with the user's password. Argon2id at spec
-     * params is slow, so the work runs on IO; success drains the offline
-     * backlog (notes/memories/skills written while locked reach the drive)
-     * and then pulls records authored on other hosts into the cache.
-     */
+    /** Optional read-only legacy proposal. Never drains Room work or hydrates grants. */
     private fun requestVaultUnlock(password: String) {
-        if (password.isEmpty()) {
-            mutableVaultUnlockUi.value = VaultUnlockUi(error = "Enter the vault password.")
-            return
-        }
+        if (password.isEmpty() || mutableVaultUnlockUi.value.busy) return
         mutableVaultUnlockUi.value = VaultUnlockUi(busy = true)
+        val bytes = password.toByteArray(Charsets.UTF_8)
         lifecycleScope.launch(Dispatchers.IO) {
-            val ok = VaultConnection.unlock(password.toByteArray(Charsets.UTF_8))
-            if (ok) {
-                val app = application as UnoOneApplication
-                app.vaultMirror.drainBacklog()
-                val hydrated = app.vaultHydrator.hydrateFromVault()
-                if (hydrated.total > 0) {
-                    android.util.Log.i(
-                        "UnoOneMain",
-                        "Vault hydration: ${hydrated.memoriesAdded}+${hydrated.memoriesUpdated} memory, " +
-                            "${hydrated.skillsAdded}+${hydrated.skillsUpdated} skill change(s) pulled"
-                    )
-                }
-            }
-            mutableVaultUnlockUi.value =
-                if (ok) VaultUnlockUi(unlocked = true)
-                else VaultUnlockUi(error = "Unlock failed — wrong password or unreadable vault header.")
+            try {
+                val (records, tombstones) = VaultConnection.inspectLegacy(bytes)
+                mutableVaultUnlockUi.value = VaultUnlockUi(unlocked = true,
+                    error = "Read-only review: $records authenticated readable records, $tombstones tombstones. No import performed. Backup and migration validation are still required.")
+            } catch (_: Exception) {
+                mutableVaultUnlockUi.value = VaultUnlockUi(error = "Legacy review failed or uses an unsupported record cipher. Original files were not modified; no import performed.")
+            } finally { bytes.fill(0) }
         }
     }
 
@@ -128,39 +111,20 @@ class MainActivity : ComponentActivity() {
     ) { uri ->
         if (uri == null) {
             mutablePocketUsbStatus.value = PocketUsbStatus.AccessRequired(
-                "Pocket AI access was not granted. Select the UNOONE drive to continue."
+                "Legacy review cancelled. Local phone storage is unchanged; no drive is required."
             )
             return@registerForActivityResult
         }
         try {
-            // The shared vault is read-write: Android owns shared records it
-            // must be able to create and tombstone (MobileVaultRepository).
-            contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
+            // Legacy drive is only an explicit read-only source, never live authority.
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         } catch (_: SecurityException) {
-            // Write grants are unsupported by providers for volumes that the
-            // user picked read-only; attempt read-only so validation remains
-            // truthful, and record that the vault is read-only this session.
-            try {
-                contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: SecurityException) {
-                // Both unsupported: session-only access, documented fallback.
-                // (Previously a comment noted some providers only grant session
-                // access — that case lands here, truthfully.)
-            }
+            // Some providers only offer session access; no write grant is requested.
         }
         mutablePocketUsbStatus.value = PocketUsbStatus.Validating
         mutablePocketUsbStatus.value = when (val result = PocketVaultAccess.validateTree(this, uri)) {
             is PocketVaultResult.Valid -> {
-                // Bind the vault repository to the granted tree. Unlock (and
-                // thus write-through) happens separately once the user enters
-                // the password; until then VaultConnection.writer() is null and
-                // note/memory writes stay in the local cache.
+                // Separate read-only legacy source. Does not replace the local session.
                 VaultConnection.attach(this, uri)
                 mutableVaultUnlockUi.value = VaultUnlockUi() // fresh tree, locked
                 PocketUsbStatus.Connected(result.vaultId, result.paiVersion)
@@ -208,6 +172,23 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val recovery = (application as UnoOneApplication).databaseRecoveryMessage
+        if (recovery != null) {
+            setContent {
+                UnoOneTheme {
+                    Surface(modifier = Modifier.fillMaxSize()) {
+                        Column(modifier = Modifier.padding(24.dp)) {
+                            Text("Local data recovery required", style = MaterialTheme.typography.headlineSmall)
+                            Text(recovery)
+                            Text("Do not uninstall, clear storage, replace keys, or downgrade. Keep this installation and its database sidecars. Supported standalone databases can be encrypted through the approval dialog while retaining recovery copies. Ambiguous or damaged files need assisted recovery. After a successful upgrade, force stop and reopen the app.")
+                            Button(onClick = { finish() }) { Text("Close safely") }
+                        }
+                    }
+                }
+            }
+            return
+        }
+
         enableEdgeToEdge()
 
         val app = application as UnoOneApplication
@@ -285,22 +266,27 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    UnoOneApp(
-                        agentViewModel = agentViewModel,
-                        notesViewModel = notesViewModel,
-                        logsViewModel = logsViewModel,
-                        skillsViewModel = skillsViewModel,
-                        settingsViewModel = settingsViewModel,
-                        privacySettingsViewModel = privacySettingsViewModel,
-                        modelStatusViewModel = modelStatusViewModel,
-                        languagePacksViewModel = languagePacksViewModel,
-                        voiceTestViewModel = voiceTestViewModel,
-                        auditViewerViewModel = auditViewerViewModel,
-                        secureBrowserViewModel = secureBrowserViewModel,
-                        pocketUsbStatus = usbStatus,
-                        vaultUnlock = unlockUi,
-                        onVaultUnlock = ::requestVaultUnlock
-                    )
+                    Column {
+                        com.unoone.agent.vaultbridge.LocalVaultPanel(onLegacySelect = { pocketTreePicker.launch(null) })
+                        Box(Modifier.weight(1f)) {
+                            UnoOneApp(
+                                agentViewModel = agentViewModel,
+                                notesViewModel = notesViewModel,
+                                logsViewModel = logsViewModel,
+                                skillsViewModel = skillsViewModel,
+                                settingsViewModel = settingsViewModel,
+                                privacySettingsViewModel = privacySettingsViewModel,
+                                modelStatusViewModel = modelStatusViewModel,
+                                languagePacksViewModel = languagePacksViewModel,
+                                voiceTestViewModel = voiceTestViewModel,
+                                auditViewerViewModel = auditViewerViewModel,
+                                secureBrowserViewModel = secureBrowserViewModel,
+                                pocketUsbStatus = usbStatus,
+                                vaultUnlock = unlockUi,
+                                onVaultUnlock = ::requestVaultUnlock
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -317,8 +303,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        if ((application as UnoOneApplication).databaseRecoveryMessage != null) return
         setIntent(intent)
         handlePocketUsbIntent(intent)
+    }
+
+    override fun onStop() {
+        com.unoone.agent.vaultbridge.LocalVaultSetup.backgrounded()
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -339,28 +331,19 @@ class MainActivity : ComponentActivity() {
                     )
                     true
                 } else {
-                    requestPocketUsbAccess(device)
+                    mutablePocketUsbStatus.value = PocketUsbStatus.AccessRequired(
+                        "Optional legacy drive detected. Use Local vault → Review a legacy drive for a read-only proposal."
+                    )
                     true
                 }
             }
             UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                 mutablePocketUsbStatus.value = PocketUsbStatus.Disconnected
-                // Drop the vault session and zeroize the master key immediately
-                // — the drive is gone, so no write can reach it and no key
-                // should linger in memory.
+                // Discard only the read-only legacy source; local vault remains independent.
                 VaultConnection.detach()
                 mutableVaultUnlockUi.value = VaultUnlockUi()
-                // The USB vault is authoritative; Room holds an encrypted-cache
-                // mirror of vault data. When the vault goes away, the cache must
-                // not keep a copy behind.
-                lifecycleScope.launch(Dispatchers.IO) {
-                    val cleared = VaultCacheLifecycle.clearOnVaultDisconnect(
-                        DatabaseProvider.getDatabase(applicationContext)
-                    )
-                    if (cleared > 0) {
-                        android.util.Log.i("UnoOneMain", "Vault cache cleared on USB detach: " + cleared + " row(s)")
-                    }
-                }
+                // Detach only the optional legacy drive session. The independent local store,
+                // including pending writes, tombstones and audit history, remains authoritative here.
                 true
             }
             else -> false
@@ -463,6 +446,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if ((application as UnoOneApplication).databaseRecoveryMessage != null) return
+        if (AgentRuntimeGate.isEnabled()) {
+            runCatching { com.unoone.agent.voice.VoiceService.start(this) }
+                .onFailure { com.unoone.agent.core.util.Logger.e("MainActivity: failed to resume voice activation", it) }
+        }
         if (AgentRuntimeGate.isEnabled() && Settings.canDrawOverlays(this)) {
             startService(Intent(this, FloatingAgentService::class.java))
         }
@@ -561,18 +549,24 @@ private fun PocketUsbBanner(
         Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
             Text(
                 text = if (status is PocketUsbStatus.Connected && vaultUnlock.unlocked) {
-                    "$message · vault unlocked"
+                    "$message · read-only review finished"
                 } else {
                     message
                 },
                 color = textColor,
                 style = MaterialTheme.typography.bodyMedium
             )
-            // The drive is attached and identity-valid but the vault is still
-            // locked: offer the password step right here. Unlock enables
-            // write-through and drains the offline backlog.
+            // Explicit legacy review only. Password never enables write-through/hydration.
             if (status is PocketUsbStatus.Connected && !vaultUnlock.unlocked) {
                 var password by remember { mutableStateOf("") }
+                val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+                androidx.compose.runtime.DisposableEffect(lifecycle) {
+                    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) password = ""
+                    }
+                    lifecycle.addObserver(observer)
+                    onDispose { lifecycle.removeObserver(observer) }
+                }
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(top = 8.dp)
@@ -582,16 +576,17 @@ private fun PocketUsbBanner(
                         onValueChange = { password = it },
                         label = { Text("Vault password") },
                         visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Password),
                         singleLine = true,
                         enabled = !vaultUnlock.busy,
                         modifier = Modifier.weight(1f)
                     )
                     Button(
-                        onClick = { onVaultUnlock(password) },
+                        onClick = { onVaultUnlock(password); password = "" },
                         enabled = !vaultUnlock.busy && password.isNotEmpty(),
                         modifier = Modifier.padding(start = 8.dp)
                     ) {
-                        Text(if (vaultUnlock.busy) "Unlocking…" else "Unlock")
+                        Text(if (vaultUnlock.busy) "Reviewing…" else "Review only")
                     }
                 }
                 vaultUnlock.error?.let { error ->
@@ -603,11 +598,12 @@ private fun PocketUsbBanner(
                     )
                 }
             }
+            if (vaultUnlock.unlocked) vaultUnlock.error?.let { Text(it) }
         }
     }
 }
 
-/** UI state for the in-banner vault unlock step. */
+/** UI state for the optional legacy review step. */
 data class VaultUnlockUi(
     val unlocked: Boolean = false,
     val busy: Boolean = false,
@@ -628,7 +624,7 @@ sealed interface PocketUsbStatus {
     }
 
     data class Connected(val vaultId: String, val version: String) : PocketUsbStatus {
-        override val message = "Pocket AI connected — $vaultId · $version"
+        override val message = "Legacy source selected (read-only) — $vaultId · $version"
     }
 
     data class Invalid(val reason: String) : PocketUsbStatus {

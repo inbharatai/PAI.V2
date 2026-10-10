@@ -10,13 +10,14 @@ plugins {
 android {
     namespace = "com.unoone.agent"
     compileSdk = 35
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.unoone.agent"
         minSdk = 28
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.4.0-alpha-v2"
+        versionCode = 10
+        versionName = "0.9.0-alpha-integrated"
         // Required so instrumented androidTest classes (JUnit4 @Test, ApplicationProvider,
         // androidx.test.ext.junit) are discovered on-device. Without this AGP falls back to the
         // legacy android.test.InstrumentationTestRunner, which cannot load the androidx test
@@ -97,7 +98,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.activity:activity-compose:1.9.0")
+    // Supported Google on-device authorization; desktop loopback/custom-scheme OAuth is not supported on Android.
+    // Exact new product dependency; provenance/SDK licence documented in personal-provider-adapters/README.md.
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
     implementation("androidx.navigation:navigation-compose:2.7.7")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
@@ -151,4 +156,12 @@ dependencies {
     }
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+}
+
+// Host-only lifecycle tests execute the unchanged 256 MiB Argon2id Java fallback.
+// The arm64 JNI packaged in the APK cannot load into an x86 host test worker.
+// Match the vault module's real-crypto test budget; do not relax production admission.
+tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
+    maxHeapSize = "1400m"
+    maxParallelForks = 1
 }

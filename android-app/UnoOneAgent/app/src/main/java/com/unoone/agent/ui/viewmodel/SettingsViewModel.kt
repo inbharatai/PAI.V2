@@ -1,5 +1,6 @@
 package com.unoone.agent.ui.viewmodel
 
+import com.unoone.agent.autostart.AutoStartPolicy
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Environment
@@ -8,7 +9,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.UnoOneApplication
-import com.unoone.agent.autostart.AutoStartPolicy
 import com.unoone.agent.core.runtime.AgentRuntimeGate
 import com.unoone.agent.core.util.Logger
 import com.unoone.agent.modelmanager.ModelManager
@@ -64,11 +64,6 @@ class SettingsViewModel(context: Context) : ViewModel() {
     private val _securityLevel = MutableStateFlow(SecurityLevel.current(context))
     val securityLevel: StateFlow<SecurityLevel> = _securityLevel.asStateFlow()
 
-    // P2-A auto-launch: start the wake-word service on boot. Default OFF — the
-    // boot receiver only fires when the user explicitly opted in here.
-    private val _autoStartEnabled = MutableStateFlow(prefs.getBoolean(AutoStartPolicy.PREF_KEY, false))
-    val autoStartEnabled: StateFlow<Boolean> = _autoStartEnabled.asStateFlow()
-
     init {
         // Voice commands and the Offline Languages screen can both change this preference outside
         // SettingsViewModel. Observing the source of truth keeps the landing-page language chip in
@@ -120,30 +115,24 @@ class SettingsViewModel(context: Context) : ViewModel() {
     }
 
     /**
-     * P2-A: toggle "Start automatically when the phone starts" and persist it.
-     * Default OFF; the boot receiver honours the persisted value plus the
-     * agent-enabled switch, so a disabled agent never wakes itself.
+     * Select the offline reply/TTS language. Input recognition remains bilingual; the shared
+     * VoiceModule reuses its existing STT engine and replaces TTS only.
      */
+    private val _autoStartEnabled = MutableStateFlow(prefs.getBoolean(AutoStartPolicy.PREF_KEY, false))
+    val autoStartEnabled: StateFlow<Boolean> = _autoStartEnabled.asStateFlow()
+
     fun setAutoStart(enabled: Boolean) {
         _autoStartEnabled.value = enabled
         prefs.edit { putBoolean(AutoStartPolicy.PREF_KEY, enabled) }
-        Logger.i("SettingsViewModel: auto-start on boot set to $enabled")
     }
 
-    /**
-     * Select the offline voice language (English or Hindi), persist it, and ask the live
-     * VoiceService + shared VoiceModule to rebuild their STT/TTS engines for the new language so
-     * the change takes effect without an app restart. Unsupported codes are normalized to English.
-     */
     fun setVoiceLanguage(code: String) {
         val normalized = VoiceLanguage.normalize(code)
         _voiceLanguage.value = normalized
         prefs.edit { putString(VoiceLanguage.PREF_KEY, normalized) }
         Logger.i("SettingsViewModel: voice language set to '$normalized'")
-        // Rebuild engines for the new language. VoiceService owns the wake-word loop path; the
-        // shared VoiceModule owns the mic-button / VoiceTest path. Both read the pref we just wrote.
-        // reinitForLanguage is heavy blocking model I/O — it MUST NOT run on viewModelScope's default
-        // Main dispatcher, or switching to a larger Indic/Whisper language freezes the UI (ANR).
+        // Refresh the reply voice. VoiceService owns the wake-word loop path; the shared VoiceModule
+        // owns the mic-button / VoiceTest path. The bilingual STT engine is retained.
         VoiceService.reinitLanguage(appContext)
         val shared = (appContext as? com.unoone.agent.UnoOneApplication)?.sharedVoiceModule
         if (shared != null) {
@@ -163,15 +152,15 @@ class SettingsViewModel(context: Context) : ViewModel() {
             // Use the shared VoiceModule (already initialized for the active language at startup);
             // fall back to a fresh module if the app instance isn't available.
             val voiceModule = (context.applicationContext as? com.unoone.agent.UnoOneApplication)?.sharedVoiceModule
-                ?: VoiceModule(context).also {
-                    val base = context.getExternalFilesDir(null)?.absolutePath + "/models"
-                    it.reinitForLanguage(base)
+                ?: VoiceModule(context.applicationContext)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                if (!voiceModule.isSttInitialized()) {
+                    val base = (context.getExternalFilesDir("models")
+                        ?: java.io.File(context.filesDir, "models")).absolutePath
+                    voiceModule.reinitForLanguage(base)
                 }
-            if (!voiceModule.isSttInitialized()) {
-                val base = context.getExternalFilesDir(null)?.absolutePath + "/models"
-                voiceModule.reinitForLanguage(base)
             }
-            val startResult = voiceModule.startRecording(context, viewModelScope)
+            val startResult = voiceModule.recordOwned(context, 3_000)
             if (startResult is Result.Error) {
                 Logger.w("SettingsViewModel: STT test start failed: ${startResult.message}")
             }

@@ -1,6 +1,5 @@
 package com.unoone.agent.core.model
 
-import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Process-wide ownership marker for the single on-device Gemma allocation.
@@ -11,13 +10,8 @@ import java.util.concurrent.atomic.AtomicReference
  */
 object ExclusiveBrainLeaseState {
 
-    private val owner = AtomicReference<String?>(null)
-
-    fun acquire(ownerId: String): Boolean = owner.compareAndSet(null, ownerId)
-
-    fun release(ownerId: String): Boolean = owner.compareAndSet(ownerId, null)
-
-    fun isActive(): Boolean = owner.get() != null
-
-    fun currentOwner(): String? = owner.get()
+    suspend fun acquire(ownerId: String): Boolean = E4bRuntimeCoordinator.reserve(ownerId)
+    suspend fun release(ownerId: String): Boolean = E4bRuntimeCoordinator.releaseReservation(ownerId)
+    fun isActive(): Boolean = currentOwner() != null
+    fun currentOwner(): String? = E4bRuntimeCoordinator.reservedOwner()
 }

@@ -17,8 +17,8 @@ import com.unoone.agent.voice.VoiceService
  * so boot is the reliable plane.
  *
  * Honest failure: Android 15 restricts starting a microphone foreground
- * service from BOOT_COMPLETED unless the user has excluded the app from
- * battery optimization / OEM autostart management. If the OS refuses, the
+ * service from BOOT_COMPLETED under platform privacy policy; battery exclusions do not grant microphone permission.
+ * If the OS refuses, the
  * failure is logged and surfaced — never retried in a loop, never a silent
  * pretend-success. On-device behaviour is a physical gate to verify.
  */
@@ -38,7 +38,9 @@ class BootCompletedReceiver : BroadcastReceiver() {
         }
         // This may be a fresh process — the static gate starts at its default,
         // so sync it with the persisted pref before the service reads it.
-        AgentRuntimeGate.setEnabled(true)
+        // Application owns admission, including database recovery. Boot must never re-enable it.
+        if (!AgentRuntimeGate.isEnabled() ||
+            (context.applicationContext as? UnoOneApplication)?.databaseRecoveryMessage != null) return
         try {
             VoiceService.start(context)
             Logger.i("AutoStart: voice service started on boot")

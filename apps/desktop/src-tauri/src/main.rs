@@ -44,6 +44,15 @@ mod harness_bridge;
 // TaskLearning. Nothing is promoted without an explicit main-window UI event.
 mod knowledge_commands;
 mod llama;
+mod local_install;
+mod local_vault;
+mod peer_sync;
+mod personal_agent;
+mod personal_execution;
+mod providers;
+mod provisioning;
+mod provisioning_download;
+mod provisioning_probe;
 // Live website preview (web.preview): a bounded mirror of the agent's site
 // under $TEMP (asset-protocol scoped), a frontend-created preview window,
 // and a heartbeat poll that re-stages + reloads — no web server anywhere.
@@ -64,7 +73,7 @@ mod voice;
 
 use base64::Engine;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, Manager};
@@ -80,6 +89,7 @@ pub struct DesktopVaultState {
     /// There is intentionally no second memory store: Harness memory writes go
     /// through `PaiVaultMemoryProvider` against this same encrypted Vault.
     vault: Arc<Mutex<Option<Vault>>>,
+    lock_epoch: AtomicU64,
     /// Fast metadata mirrors (for reads without locking the vault mutex).
     unlocked: Mutex<bool>,
     vault_id: Mutex<String>,
@@ -88,12 +98,14 @@ pub struct DesktopVaultState {
 
 impl DesktopVaultState {
     fn emergency_lock(&self) {
-        if let Ok(mut vault) = self.vault.lock() {
-            if let Some(open_vault) = vault.as_mut() {
-                let _ = open_vault.lock();
-            }
-            *vault = None;
+        self.lock_epoch.fetch_add(1, Ordering::SeqCst);
+        // Retain the authority lock until all mirrors are cleared. Even a
+        // poisoned mutex must not leave the master key resident after lock.
+        let mut vault = self.vault.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(open_vault) = vault.as_mut() {
+            let _ = open_vault.lock();
         }
+        *vault = None;
         if let Ok(mut unlocked) = self.unlocked.lock() {
             *unlocked = false;
         }
@@ -145,6 +157,7 @@ fn main() {
     let startup_state = startup::StartupCoordinator::from_process_args();
     let vault_state = DesktopVaultState {
         vault: Arc::new(Mutex::new(None)),
+        lock_epoch: AtomicU64::new(0),
         unlocked: Mutex::new(false),
         vault_id: Mutex::new(String::new()),
         vault_root: Mutex::new(String::new()),
@@ -214,18 +227,31 @@ fn main() {
         .manage(coding_task_state)
         .manage(knowledge_state)
         .invoke_handler(tauri::generate_handler![
+            personal_execution::personal_prepare_provider_draft,
+            personal_execution::personal_coding_check,
+            personal_agent::personal_agent_view,
+            personal_agent::personal_agent_mutate,
+            providers::provider_request,
+            peer_sync::peer_sync_command,
+            peer_sync::peer_sync_cancel,
             // Vault commands
             detect_vault,
             startup::get_startup_status,
             startup::set_startup_limited,
             unlock_vault,
             setup_vault,
+            recover_local_vault,
+            resume_local_vault,
+            backup_local_vault,
             #[cfg(feature = "dev-bypass")]
             dev_bypass_unlock,
             lock_vault,
             get_vault_status,
             // Hardware profile
             get_hardware_profile,
+            get_model_setup_assessment,
+            begin_local_model_setup,
+            revoke_local_model_download_policy,
             // Model management
             llama::list_models,
             llama::select_desktop_model,
@@ -382,6 +408,14 @@ struct VaultInfo {
     vault_id: String,
     startup_state: startup::StartupPhase,
     validation_failures: Vec<unoone_usb_manifest::ValidationFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    storage_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    install_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_vault_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assets_ready: Option<bool>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -630,12 +664,61 @@ fn detect_vault(
     app_handle: tauri::AppHandle,
     startup_state: tauri::State<'_, startup::StartupCoordinator>,
 ) -> Result<VaultInfo, String> {
+    if startup_state.is_local() {
+        let _operation = local_vault::OPERATIONS
+            .lock()
+            .map_err(|_| "Vault operation unavailable")?;
+        let (root, pending) = local_roots(&app_handle)?;
+        let (state, id) = local_vault::inspect(&root, &pending).map_err(|e| {
+            startup_state.set_phase(startup::StartupPhase::Error);
+            e
+        })?;
+        let phase = match state {
+            local_vault::State::New => startup::StartupPhase::LocalSetup,
+            local_vault::State::Interrupted => startup::StartupPhase::LocalRecovery,
+            local_vault::State::Locked => {
+                if *app_handle
+                    .state::<DesktopVaultState>()
+                    .unlocked
+                    .lock()
+                    .map_err(|_| "Vault state unavailable")?
+                {
+                    startup::StartupPhase::LimitedMode
+                } else {
+                    startup::StartupPhase::WaitingForUnlock
+                }
+            }
+        };
+        startup_state.connect_local(&root, &id, phase);
+        return Ok(VaultInfo {
+            detected: true,
+            vault_root: root.display().to_string(),
+            vault_id: id,
+            startup_state: phase,
+            validation_failures: Vec::new(),
+            storage_kind: Some("local".into()),
+            install_root: Some(root.display().to_string()),
+            local_vault_state: Some(
+                match state {
+                    local_vault::State::New => "new",
+                    local_vault::State::Locked => "locked",
+                    local_vault::State::Interrupted => "interrupted",
+                }
+                .into(),
+            ),
+            assets_ready: Some(false),
+        });
+    }
     // An already-connected, identity-validated Pocket AI is reported directly
     // without re-scanning drives (and without blocking on the background
     // asset sweep, whose progress the UI observes via get_startup_status).
     if let Some(status) = startup_state.connected_status() {
         boot_trace::mark("detect_vault: short-circuit (already connected)");
         return Ok(VaultInfo {
+            storage_kind: Some("legacy_drive".into()),
+            install_root: None,
+            local_vault_state: None,
+            assets_ready: None,
             detected: true,
             vault_root: status.vault_root.unwrap_or_default(),
             vault_id: status.vault_id.unwrap_or_default(),
@@ -661,6 +744,10 @@ fn detect_vault(
             startup_state.set_phase(startup::StartupPhase::CheckingAssets);
             start_background_asset_validation(app_handle, &package.root);
             return Ok(VaultInfo {
+                storage_kind: Some("legacy_drive".into()),
+                install_root: None,
+                local_vault_state: None,
+                assets_ready: None,
                 detected: true,
                 vault_root: package.root.to_string_lossy().to_string(),
                 vault_id: package.vault_id,
@@ -670,6 +757,10 @@ fn detect_vault(
         }
         startup_state.reject(report.failures.clone());
         return Ok(VaultInfo {
+            storage_kind: Some("legacy_drive".into()),
+            install_root: None,
+            local_vault_state: None,
+            assets_ready: None,
             detected: false,
             vault_root: supplied_root.to_string_lossy().to_string(),
             vault_id: String::new(),
@@ -678,81 +769,12 @@ fn detect_vault(
         });
     }
 
-    // Scan removable drives for a valid UnoOne vault
-    // using the same strict schema and hashes as Dock and Start UnoOne.
-    boot_trace::mark("detect_vault: full path (not yet connected)");
-    let drives = scan_removable_drives();
-    boot_trace::mark_detail("detect_vault: drives scanned", &format!("{drives:?}"));
-
-    for drive_root in drives {
-        let Some(candidate) = startup::normalize_candidate_root(std::path::Path::new(&drive_root))
-        else {
-            continue;
-        };
-        // Identity-only here as well: fast launch, background full sweep.
-        let report = unoone_usb_manifest::validate_package(
-            &candidate,
-            unoone_usb_manifest::ValidationScope::PackageIdentity,
-        );
-        if let Some(package) = report.package {
-            startup_state.connect(&package);
-            startup_state.set_phase(startup::StartupPhase::CheckingAssets);
-            start_background_asset_validation(app_handle, &package.root);
-            return Ok(VaultInfo {
-                detected: true,
-                vault_root: package.root.to_string_lossy().to_string(),
-                vault_id: package.vault_id,
-                startup_state: startup::StartupPhase::CheckingAssets,
-                validation_failures: Vec::new(),
-            });
-        }
-        if !report.failures.is_empty() {
-            startup_state.reject(report.failures.clone());
-            return Ok(VaultInfo {
-                detected: false,
-                vault_root: candidate.to_string_lossy().to_string(),
-                vault_id: String::new(),
-                startup_state: startup::StartupPhase::PaiInvalid,
-                validation_failures: report.failures,
-            });
-        }
-    }
-
-    // NOTE: Production builds MUST NOT fall back to local/development paths.
-    // The C:\UNOONE and /tmp/UNOONE fallbacks are gated behind a compile-time
-    // feature flag "dev-local-vault" to prevent accidental use in production.
-    // Only removable, validated USB volumes are accepted in production builds.
-    #[cfg(feature = "dev-local-vault")]
-    {
-        let fallback_paths = if cfg!(target_os = "windows") {
-            vec!["C:\\UNOONE"]
-        } else if cfg!(target_os = "macos") {
-            vec!["/tmp/UNOONE"]
-        } else {
-            vec!["/tmp/UNOONE"]
-        };
-
-        for path in fallback_paths {
-            if let Ok((vault_root, vault_id)) = validate_vault_root(path) {
-                return Ok(VaultInfo {
-                    detected: true,
-                    vault_root,
-                    vault_id,
-                    startup_state: startup::StartupPhase::PaiConnected,
-                    validation_failures: Vec::new(),
-                });
-            }
-        }
-    }
-
-    startup_state.set_phase(startup::StartupPhase::WaitingForPai);
-    Ok(VaultInfo {
-        detected: false,
-        vault_root: String::new(),
-        vault_id: String::new(),
-        startup_state: startup::StartupPhase::WaitingForPai,
-        validation_failures: Vec::new(),
-    })
+    // Ordinary launches always select the OS app-data installation. Removable
+    // discovery/import is deliberately not an activation path.
+    Err(
+        "Explicit legacy root is unavailable; restart without --vault-root for local storage"
+            .into(),
+    )
 }
 
 /// Check whether a file exists on disk.
@@ -772,9 +794,21 @@ fn unlock_vault(
     state: tauri::State<'_, DesktopVaultState>,
     startup_state: tauri::State<'_, startup::StartupCoordinator>,
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
 ) -> Result<VaultUnlockResult, String> {
+    require_main(&window)?;
+    let epoch = state.lock_epoch.load(Ordering::SeqCst);
+    let password = local_vault::Secret::from(password);
+    let _operation = local_vault::OPERATIONS
+        .lock()
+        .map_err(|_| "Vault operation unavailable")?;
+    startup_state.require_selected_root(std::path::Path::new(&vault_root))?;
     startup_state.set_phase(startup::StartupPhase::Unlocking);
-    if password.is_empty() {
+    if password.0.len() > 4096 {
+        startup_state.set_phase(startup::StartupPhase::WaitingForUnlock);
+        return Err("Password exceeds 4096-byte input limit".into());
+    }
+    if password.0.is_empty() {
         startup_state.set_phase(startup::StartupPhase::WaitingForUnlock);
         return Ok(VaultUnlockResult {
             success: false,
@@ -797,31 +831,24 @@ fn unlock_vault(
     // D7: The Vault object is stored in Tauri managed state so it persists
     // after unlock — the decrypted master key remains in memory for vault operations.
     let vault_path = PathBuf::from(&vault_root);
-    let mut vault = unoone_vault_core::Vault::open(&vault_path)
-        .map_err(|e| format!("Failed to open vault: {}", e))?;
+    let mut vault = if startup_state.is_local() {
+        local_vault::open(&vault_path)?
+    } else {
+        unoone_vault_core::Vault::open(&vault_path)
+            .map_err(|e| format!("Failed to open vault: {e}"))?
+    };
 
-    match vault.unlock(password.as_bytes()) {
+    match vault.unlock(&password.0) {
         Ok(result) => {
-            // Store the live Vault in managed state (not dropped!)
-            *state
-                .vault
-                .lock()
-                .map_err(|e| format!("State lock error: {}", e))? = Some(vault);
-            *state
-                .unlocked
-                .lock()
-                .map_err(|e| format!("State lock error: {}", e))? = true;
-            *state
-                .vault_id
-                .lock()
-                .map_err(|e| format!("State lock error: {}", e))? = result.vault_id.clone();
-            *state
-                .vault_root
-                .lock()
-                .map_err(|e| format!("State lock error: {}", e))? = vault_root.clone();
-            app.state::<llama::ModelManagerState>().resume();
-            app.state::<preview::PreviewState>().resume();
-            startup_state.set_phase(startup::StartupPhase::ScanningHost);
+            install_unlocked(
+                &app,
+                &state,
+                &startup_state,
+                vault,
+                &vault_root,
+                &result.vault_id,
+                epoch,
+            )?;
 
             // Security-baseline bootstrap: verify_vault (and the Settings
             // security check) verify against the stored baseline, but the
@@ -866,6 +893,159 @@ fn unlock_vault(
             })
         }
     }
+}
+
+fn local_roots(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    let app_data = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Cannot resolve OS app-data directory: {e}"))?;
+    local_install::roots(&app_data)
+}
+
+fn require_main(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("Vault lifecycle is available only in the main window".into());
+    }
+    Ok(())
+}
+
+fn install_unlocked(
+    app: &tauri::AppHandle,
+    state: &DesktopVaultState,
+    startup: &startup::StartupCoordinator,
+    vault: Vault,
+    root: &str,
+    id: &str,
+    epoch: u64,
+) -> Result<(), String> {
+    let mut live = state.vault.lock().map_err(|_| "Vault state unavailable")?;
+    if epoch != state.lock_epoch.load(Ordering::SeqCst) {
+        return Err("Unlock cancelled by a lock event".into());
+    }
+    let mut unlocked = state
+        .unlocked
+        .lock()
+        .map_err(|_| "Vault state unavailable")?;
+    let mut vault_id = state
+        .vault_id
+        .lock()
+        .map_err(|_| "Vault state unavailable")?;
+    let mut vault_root = state
+        .vault_root
+        .lock()
+        .map_err(|_| "Vault state unavailable")?;
+    // Acquire every mirror before publishing anything: poison is fail-closed.
+    *live = Some(vault);
+    *unlocked = true;
+    *vault_id = id.into();
+    *vault_root = root.into();
+    app.state::<llama::ModelManagerState>().resume();
+    app.state::<preview::PreviewState>().resume();
+    startup.set_phase(if startup.is_local() {
+        startup::StartupPhase::LimitedMode
+    } else {
+        startup::StartupPhase::ScanningHost
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn recover_local_vault(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    recovery_phrase: String,
+) -> Result<VaultUnlockResult, String> {
+    require_main(&window)?;
+    let secret = local_vault::Secret::from(recovery_phrase);
+    let state = app.state::<DesktopVaultState>();
+    let epoch = state.lock_epoch.load(Ordering::SeqCst);
+    let startup = app.state::<startup::StartupCoordinator>();
+    if !startup.is_local() {
+        return Err("Recovery command is local-only".into());
+    }
+    let _operation = local_vault::OPERATIONS
+        .lock()
+        .map_err(|_| "Vault operation unavailable")?;
+    if secret.0.len() > 4096 {
+        return Err("Recovery phrase exceeds limit".into());
+    }
+    let (root, _) = local_roots(&app)?;
+    let mut vault = local_vault::open(&root)?;
+    let mut words: Vec<String> = std::str::from_utf8(&secret.0)
+        .map_err(|_| "Invalid recovery phrase")?
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    let result = vault.unlock_with_recovery(&words);
+    for word in &mut words {
+        let bytes = std::mem::take(word).into_bytes();
+        drop(local_vault::Secret(bytes));
+    }
+    let result = result.map_err(|_| "Recovery phrase could not authenticate this vault")?;
+    install_unlocked(
+        &app,
+        &state,
+        &startup,
+        vault,
+        &root.display().to_string(),
+        &result.vault_id,
+        epoch,
+    )?;
+    Ok(VaultUnlockResult {
+        success: true,
+        vault_id: result.vault_id,
+        error: String::new(),
+    })
+}
+
+#[tauri::command]
+fn resume_local_vault(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    password: String,
+) -> Result<(), String> {
+    require_main(&window)?;
+    let password = local_vault::Secret::from(password);
+    if !app.state::<startup::StartupCoordinator>().is_local() {
+        return Err("Resume is local-only".into());
+    }
+    let _operation = local_vault::OPERATIONS
+        .lock()
+        .map_err(|_| "Vault operation unavailable")?;
+    let (root, pending) = local_roots(&app)?;
+    local_vault::resume(&root, &pending, &password.0)
+}
+
+#[tauri::command]
+fn backup_local_vault(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<String, String> {
+    require_main(&window)?;
+    if !app.state::<startup::StartupCoordinator>().is_local() {
+        return Err("Backup is local-only".into());
+    }
+    let _operation = local_vault::OPERATIONS
+        .lock()
+        .map_err(|_| "Vault operation unavailable")?;
+    if *app
+        .state::<DesktopVaultState>()
+        .unlocked
+        .lock()
+        .map_err(|_| "Vault state unavailable")?
+    {
+        return Err("Lock the vault before creating an encrypted backup".into());
+    }
+    let (root, _) = local_roots(&app)?;
+    let backup_root = root
+        .parent()
+        .ok_or("Missing app-data parent")?
+        .join("local-backups");
+    local_install::private_dir(&backup_root)?;
+    let destination = backup_root.join(uuid::Uuid::new_v4().to_string());
+    local_vault::backup(&root, &destination)?;
+    Ok(destination.display().to_string())
 }
 
 /// PROTOTYPE ONLY — auto-setup/unlock bypass for developer testing.
@@ -997,11 +1177,35 @@ fn setup_vault(
     password: String,
     profile_name: Option<String>,
     vault_root: String,
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    startup_state: tauri::State<'_, startup::StartupCoordinator>,
 ) -> Result<VaultSetupResult, String> {
+    require_main(&window)?;
+    let password = local_vault::Secret::from(password);
+    let _operation = local_vault::OPERATIONS
+        .lock()
+        .map_err(|_| "Vault operation unavailable")?;
+    startup_state.require_selected_root(std::path::Path::new(&vault_root))?;
+    if startup_state.is_local() {
+        let (root, pending) = local_roots(&app)?;
+        let result = local_vault::create(&root, &pending, &password.0)?;
+        startup_state.connect_local(
+            &root,
+            &result.vault_id,
+            startup::StartupPhase::WaitingForUnlock,
+        );
+        return Ok(VaultSetupResult {
+            success: true,
+            vault_id: result.vault_id,
+            recovery_key: result.recovery_phrase.join(" "),
+            error: String::new(),
+        });
+    }
     // Profile name is accepted for forward compatibility; the vault header
     // does not store it yet.
     let _ = &profile_name;
-    if password.len() < 8 {
+    if password.0.len() < 8 {
         return Ok(VaultSetupResult {
             success: false,
             vault_id: String::new(),
@@ -1023,7 +1227,17 @@ fn setup_vault(
     // and XChaCha20-Poly1305 authenticated encryption
     let vault_path = PathBuf::from(&vault_root);
 
-    match unoone_vault_core::Vault::create(&vault_path, password.as_bytes()) {
+    let package = unoone_usb_manifest::validate_package(
+        &vault_path,
+        unoone_usb_manifest::ValidationScope::PackageIdentity,
+    )
+    .package
+    .ok_or("Legacy package identity must validate before setup")?;
+    match unoone_vault_core::Vault::create_with_vault_id(
+        &vault_path,
+        &password.0,
+        &package.vault_id,
+    ) {
         Ok(result) => Ok(VaultSetupResult {
             success: true,
             vault_id: result.vault_id,
@@ -1071,6 +1285,10 @@ fn stop_desktop_work(app: &tauri::AppHandle) {
 #[tauri::command]
 async fn lock_vault(app: tauri::AppHandle) -> Result<(), String> {
     stop_desktop_work(&app);
+    let startup = app.state::<startup::StartupCoordinator>();
+    if startup.is_local() {
+        startup.set_phase(startup::StartupPhase::WaitingForUnlock);
+    }
     app.state::<recording::RecordingStateHolder>()
         .emergency_discard();
     app.state::<llama::ModelManagerState>()
@@ -1266,6 +1484,51 @@ fn recall_chat_memory(
     Ok(serde_json::json!({
         "turns": turns,
     }))
+}
+
+/// Device check is available before unlock/download, but only in our main UI.
+/// The installer root comes from Hearth's existing native resolver, not IPC.
+#[tauri::command]
+async fn get_model_setup_assessment(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<provisioning::SetupAssessment, String> {
+    require_main(&window)?;
+    let (root, _) = local_roots(&app)?;
+    Ok(provisioning::assessment(&root).await)
+}
+
+#[tauri::command]
+fn begin_local_model_setup(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, DesktopVaultState>,
+    startup: tauri::State<'_, startup::StartupCoordinator>,
+) -> Result<(), String> {
+    require_main(&window)?;
+    let live = state.vault.lock().map_err(|_| "Vault state unavailable")?;
+    if live.is_none() || !startup.is_local() {
+        return Err("Unlock the selected local vault before model setup".into());
+    }
+    // No renderer policy/URL/approved bool is accepted. Without a reviewed signed
+    // catalog there is no policy to approve and no transfer or loader to launch.
+    provisioning::require_shipping_admission()
+}
+
+#[tauri::command]
+fn revoke_local_model_download_policy(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DesktopVaultState>,
+    startup: tauri::State<'_, startup::StartupCoordinator>,
+) -> Result<(), String> {
+    require_main(&window)?;
+    let live = state.vault.lock().map_err(|_| "Vault state unavailable")?;
+    if live.is_none() || !startup.is_local() {
+        return Err("Unlock the selected local vault before changing download policy".into());
+    }
+    let (root, _) = local_roots(&app)?;
+    startup.require_selected_root(&root)?;
+    provisioning::LocalConsentStore::open(&root)?.revoke()
 }
 
 #[tauri::command]
@@ -1464,10 +1727,13 @@ fn detect_usb_speed() -> String {
 
 #[tauri::command]
 fn get_vault_status(state: tauri::State<'_, DesktopVaultState>) -> Result<VaultStatus, String> {
+    // Snapshot mirrors without holding them across filesystem work or another
+    // mirror lock (unlock publishes them under the authority mutex).
     let vault_root = state
         .vault_root
         .lock()
-        .map_err(|e| format!("State lock error: {}", e))?;
+        .map_err(|e| format!("State lock error: {}", e))?
+        .clone();
     let unlocked = *state
         .unlocked
         .lock()
@@ -1475,7 +1741,8 @@ fn get_vault_status(state: tauri::State<'_, DesktopVaultState>) -> Result<VaultS
     let vault_id = state
         .vault_id
         .lock()
-        .map_err(|e| format!("State lock error: {}", e))?;
+        .map_err(|e| format!("State lock error: {}", e))?
+        .clone();
 
     if vault_root.is_empty() {
         return Ok(VaultStatus {

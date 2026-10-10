@@ -14,68 +14,78 @@ interface PassphraseCipher {
     fun decrypt(blob: ByteArray): ByteArray
 }
 
-/** How the passphrase was obtained. Callers act on [RESET] by deleting the old DB. */
-enum class KeyOutcome {
-    /** No wrapped key existed; a fresh passphrase was generated and persisted. */
-    CREATED,
-
-    /** The persisted wrapped key unwrapped cleanly — the normal steady state. */
-    UNWRAPPED,
-
-    /**
-     * A wrapped key existed but could not be unwrapped (Keystore key lost or
-     * blob corrupted). A fresh passphrase replaced it; any database encrypted
-     * under the old key is unreadable by construction and must be reset.
-     */
-    RESET,
-}
+/** RESET is retained for historical API compatibility, but is never produced automatically. */
+enum class KeyOutcome { CREATED, UNWRAPPED, RESET }
 
 class PassphraseResult(val passphrase: ByteArray, val outcome: KeyOutcome)
 
-/**
- * Owns the lifecycle of the SQLCipher passphrase for the Room cache:
- * generate once, persist Keystore-wrapped, unwrap on every start.
- *
- * Decision logic only — no Android APIs — so the entire lifecycle is
- * JVM-unit-tested (the portable-logic rule). The vault on the drive is the
- * authoritative store; the cache is rebuildable, so key loss degrades to a
- * cache reset, never to data-recovery heroics.
- */
+/** Creates a key only for a new store. Unwrap failures never overwrite recovery material. */
 class CacheKeyManager(
     private val cipher: PassphraseCipher,
     private val wrappedKeyFile: File,
     private val random: SecureRandom = SecureRandom(),
+    private val syncDirectory: (File) -> Unit = { directory ->
+        java.nio.channels.FileChannel.open(directory.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+    },
 ) {
 
-    fun getOrCreate(): PassphraseResult {
-        if (!wrappedKeyFile.exists()) {
-            return PassphraseResult(generateAndPersist(), KeyOutcome.CREATED)
-        }
-        return try {
-            PassphraseResult(cipher.decrypt(wrappedKeyFile.readBytes()), KeyOutcome.UNWRAPPED)
+    private val temporary get() = File(wrappedKeyFile.parentFile, wrappedKeyFile.name + ".tmp")
+    fun hasPersistedKeyMaterial(): Boolean = hasPersistedKeyMaterial(wrappedKeyFile)
+
+    fun getOrCreate(): PassphraseResult = synchronized(keyLock) {
+        var plaintext: ByteArray? = null
+        try {
+            val finalExists = java.nio.file.Files.exists(wrappedKeyFile.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            val tempExists = java.nio.file.Files.exists(temporary.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            require(!(finalExists && tempExists)) { "Ambiguous wrapped keys; retain both" }
+            if (!finalExists && !tempExists) {
+                return@synchronized PassphraseResult(generateAndPersist(), KeyOutcome.CREATED)
+            }
+            val source = if (finalExists) wrappedKeyFile else temporary
+            require(java.nio.file.Files.isRegularFile(source.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS) && source.length() in 1..4096)
+            plaintext = cipher.decrypt(source.readBytes())
+            require(plaintext.size == PASSPHRASE_LEN)
+            if (tempExists) {
+                // Authenticate BEFORE adopting the interrupted key. Never replace either blob.
+                java.io.FileOutputStream(source, true).use { it.fd.sync() }
+                require(!java.nio.file.Files.exists(wrappedKeyFile.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                require(source.renameTo(wrappedKeyFile)) { "Cannot adopt interrupted key" }
+            }
+            syncDirectory(wrappedKeyFile.parentFile!!)
+            PassphraseResult(plaintext, KeyOutcome.UNWRAPPED)
         } catch (_: Exception) {
-            // The blob is unreadable, so the DB key is gone with it. Replace
-            // the key and signal RESET so the caller deletes the old database.
-            wrappedKeyFile.delete()
-            PassphraseResult(generateAndPersist(), KeyOutcome.RESET)
+            plaintext?.fill(0)
+            throw DatabaseRecoveryRequired("Database key unavailable or ambiguous. Keep all wrapped key files and this installation; do not reset or uninstall. Assisted recovery may be required.")
         }
     }
 
     private fun generateAndPersist(): ByteArray {
         val passphrase = ByteArray(PASSPHRASE_LEN).also { random.nextBytes(it) }
-        val blob = cipher.encrypt(passphrase)
-        // Atomic write (tmp + rename): a crash mid-write must never leave a
-        // truncated blob that silently RESETs the cache on the next start.
-        val tmp = File(wrappedKeyFile.parentFile, wrappedKeyFile.name + ".tmp")
-        tmp.writeBytes(blob)
-        if (!tmp.renameTo(wrappedKeyFile)) {
-            wrappedKeyFile.delete()
-            check(tmp.renameTo(wrappedKeyFile)) { "cannot persist wrapped cache key" }
+        try {
+            val blob = cipher.encrypt(passphrase)
+            // Crash mid-write leaves recovery material, never permission to RESET the store.
+            val tmp = temporary
+            if (java.nio.file.Files.exists(tmp.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                throw DatabaseRecoveryRequired("Interrupted key write exists; preserve it for recovery")
+            require(blob.size in 1..4096)
+            check(tmp.createNewFile()) { "Concurrent key persistence" }
+            java.io.FileOutputStream(tmp).use { it.write(blob); it.fd.sync() }
+            check(!java.nio.file.Files.exists(wrappedKeyFile.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) { "Refusing to replace an existing wrapped key" }
+            check(tmp.renameTo(wrappedKeyFile)) { "cannot persist wrapped cache key; original data retained" }
+            syncDirectory(wrappedKeyFile.parentFile!!)
+            return passphrase
+        } catch (error: Exception) {
+            passphrase.fill(0)
+            throw error
         }
-        return passphrase
     }
 
     companion object {
+        private val keyLock = Any()
         const val PASSPHRASE_LEN: Int = 32
+        /** Presence is not authentication; ambiguous/invalid material is rejected by getOrCreate. */
+        fun hasPersistedKeyMaterial(file: File): Boolean =
+            java.nio.file.Files.exists(file.toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS) ||
+                java.nio.file.Files.exists(File(file.parentFile, file.name + ".tmp").toPath(), java.nio.file.LinkOption.NOFOLLOW_LINKS)
     }
 }

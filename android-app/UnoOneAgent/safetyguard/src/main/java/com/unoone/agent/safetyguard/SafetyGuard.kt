@@ -17,30 +17,19 @@ class SafetyGuard {
         "prepare_document_fill" to RiskLevel.DIRECT,
         "check_calendar" to RiskLevel.DIRECT,
         "open_calendar" to RiskLevel.DIRECT,
-        // Atomic accessibility — navigation actions are direct (safe, reversible)
-        "go_home" to RiskLevel.DIRECT,
-        "go_back" to RiskLevel.DIRECT,
-        "scroll" to RiskLevel.DIRECT,
-        "open_notifications" to RiskLevel.DIRECT,
-        "open_recents" to RiskLevel.DIRECT,
-        // Contact resolution is direct (read-only lookup)
-        "resolve_contact" to RiskLevel.DIRECT,
-        // Calendar conflict check is direct (read-only)
-        "check_calendar_conflict" to RiskLevel.DIRECT,
 
         // Risk 1 — Single confirmation
         "open_url" to RiskLevel.CONFIRM,
         "open_calendar_insert" to RiskLevel.CONFIRM,
-        "create_calendar_event" to RiskLevel.CONFIRM,
         "open_dialer" to RiskLevel.CONFIRM,
         "share_text" to RiskLevel.CONFIRM,
         "read_screen" to RiskLevel.STRONG_CONFIRM,
         "ocr_screen" to RiskLevel.STRONG_CONFIRM,
         "open_camera" to RiskLevel.CONFIRM,
         "create_skill" to RiskLevel.CONFIRM,
-        "click_accessibility_node" to RiskLevel.CONFIRM,
-        "type_into_accessibility_node" to RiskLevel.CONFIRM,
-        "long_press_accessibility_node" to RiskLevel.CONFIRM,
+        "long_press" to RiskLevel.CONFIRM,
+        "click" to RiskLevel.CONFIRM,
+        "type" to RiskLevel.CONFIRM,
         // Mic capture + online lookup both touch privacy-sensitive surfaces → single confirmation.
         "voice_recording" to RiskLevel.CONFIRM,
         "web_search" to RiskLevel.CONFIRM,
@@ -49,8 +38,6 @@ class SafetyGuard {
         // BrowserSafetyPolicy per-action confirm/takeover inside the session; this tier only authorizes
         // opening the automated browser session.
         "secure_browser_task" to RiskLevel.CONFIRM,
-        // WhatsApp draft — user reviews before send
-        "draft_whatsapp_message" to RiskLevel.STRONG_CONFIRM,
 
         // Risk 2 — Strong confirmation (must type "confirm")
         "delete_notes" to RiskLevel.STRONG_CONFIRM,
@@ -59,9 +46,23 @@ class SafetyGuard {
         "detect_objects" to RiskLevel.STRONG_CONFIRM,
         "draft_email" to RiskLevel.STRONG_CONFIRM,
         "send_whatsapp" to RiskLevel.STRONG_CONFIRM,
-        "send_prepared_whatsapp" to RiskLevel.STRONG_CONFIRM,
-        // system_control actions are all classified as STRONG_CONFIRM at the tool level. Atomic tools have their own entries above.
         "system_control" to RiskLevel.STRONG_CONFIRM,
+        "go_home" to RiskLevel.DIRECT,
+        "go_back" to RiskLevel.DIRECT,
+        "scroll" to RiskLevel.DIRECT,
+        "open_notifications" to RiskLevel.DIRECT,
+        "open_recents" to RiskLevel.DIRECT,
+        "click_accessibility_node" to RiskLevel.CONFIRM,
+        "type_into_accessibility_node" to RiskLevel.CONFIRM,
+        "long_press_accessibility_node" to RiskLevel.CONFIRM,
+        "resolve_contact" to RiskLevel.DIRECT,
+        "draft_whatsapp_message" to RiskLevel.STRONG_CONFIRM,
+        "send_prepared_whatsapp" to RiskLevel.STRONG_CONFIRM,
+        "check_calendar_conflict" to RiskLevel.DIRECT,
+        "create_calendar_event" to RiskLevel.CONFIRM,
+
+        "find_and_click" to RiskLevel.STRONG_CONFIRM,
+        "fill" to RiskLevel.STRONG_CONFIRM,
         // Captures + analyzes the whole screen, which can read sensitive content (passwords, OTP,
         // banking) → strong confirmation, never silent.
         "describe_scene" to RiskLevel.STRONG_CONFIRM,
@@ -75,7 +76,9 @@ class SafetyGuard {
     )
 
     fun classify(toolName: String): RiskLevel {
-        val level = riskRules[toolName] ?: RiskLevel.STRONG_CONFIRM
+        // Canonical metadata stays stable; compatibility must never lower native execution guards.
+        val level = if (toolName in com.unoone.agent.core.model.CanonicalToolRegistry.ATOMIC_ACCESSIBILITY_TOOLS)
+            RiskLevel.STRONG_CONFIRM else riskRules[toolName] ?: RiskLevel.STRONG_CONFIRM
         Logger.d("SafetyGuard classified $toolName as ${level.name}")
         return level
     }
@@ -117,23 +120,10 @@ class SafetyGuard {
             // 2. Draft paths — allow with strong confirmation (the user still reviews + presses send).
             lowered.contains("draft") -> RiskLevel.STRONG_CONFIRM
             (lowered.contains("whatsapp") || lowered.contains("email")) &&
-                (lowered.contains("send") || lowered.contains("message")) &&
-                !lowered.contains("read") && !lowered.contains("check") &&
-                !lowered.contains("search") && !lowered.contains("show") &&
-                !lowered.contains("look") -> RiskLevel.STRONG_CONFIRM
+                (lowered.contains("send") || lowered.contains("message")) -> RiskLevel.STRONG_CONFIRM
 
             // 3. Generic send/message with no draft/app context — block the auto-send intent.
-            // "message" alone is too broad (blocks "read the message on screen" etc.),
-            // so require compound phrases like "send message" or "message to <contact>".
-            // Exempt read-only contexts: read, search, check, show, look, "what does".
-            lowered.contains("send ") ||
-                (lowered.contains("message") &&
-                    !lowered.contains("read") &&
-                    !lowered.contains("search") &&
-                    !lowered.contains("check") &&
-                    !lowered.contains("show") &&
-                    !lowered.contains("look") &&
-                    !lowered.contains("what ")) -> RiskLevel.BLOCK
+            lowered.contains("send ") || lowered.contains("message") -> RiskLevel.BLOCK
 
             // 4. Destructive-but-recoverable.
             lowered.contains("delete all") -> RiskLevel.STRONG_CONFIRM

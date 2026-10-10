@@ -17,10 +17,10 @@ import kotlinx.coroutines.flow.Flow
  * not a vault dependency — keeps this module free of vault coupling. Planner
  * telemetry (storeOutcome) deliberately never fires it: that is device-local
  * cache, not canonical user memory.
- * @param onUserMemoryDeleted invoked with the full entity being deleted, so
- * the app layer can tombstone the vault record (if the row ever reached the
- * vault). Same decoupling as [onUserMemoryChanged]: the vault side decides
- * what a null `vaultRecordId` means (nothing to tombstone).
+ * @param onUserMemoryDeleted invoked with the entity AFTER its row is deleted.
+ * Deletion intent (linked and pending vault identities) is captured durably by
+ * the storage layer inside the delete transaction; this callback only wakes
+ * the vault drain. Same decoupling as [onUserMemoryChanged].
  */
 class MemoryModule(
     private val memoryDao: MemoryDao,
@@ -159,17 +159,23 @@ class MemoryModule(
     }
 
     suspend fun storePattern(trigger: String, action: String) {
-        memoryDao.insert(
+        val rowId = memoryDao.insert(
             MemoryEntity(
                 key = "pattern_${trigger.hashCode()}",
                 value = action,
                 type = "pattern"
             )
         )
+        // Patterns are user-meaningful memory; the outbox row was committed with the insert,
+        // this only wakes the drain (unlock-time drainBacklog covers a missed wake-up).
+        onUserMemoryChanged(rowId)
     }
 
     suspend fun deleteMemory(memory: MemoryEntity) {
-        onUserMemoryDeleted(memory)
+        // The storage layer's BEFORE DELETE trigger captures the linked AND any pending vault
+        // identity as durable tombstones inside this delete transaction. The callback runs
+        // AFTER commit and only wakes the drain; it is not where deletion intent is recorded.
         memoryDao.delete(memory)
+        onUserMemoryDeleted(memory)
     }
 }

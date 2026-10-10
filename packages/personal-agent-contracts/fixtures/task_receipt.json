@@ -1,0 +1,26 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "TASK_RECEIPT",
+  "payload": {
+    "operation_id": "op-1",
+    "task_id": "task-1",
+    "attempt_id": "attempt-1",
+    "actor_id": "agent-1",
+    "replica_id": "phone-1",
+    "before_evidence_refs": [],
+    "after_evidence_refs": [
+      "evidence-1"
+    ],
+    "dispatch_intent": "OPEN_COMPOSER",
+    "observed_effect": "Composer opened only",
+    "outcome": "ACTION_VERIFIED",
+    "reason": "No send observed",
+    "source": "NATIVE",
+    "timestamp_ms": 2000,
+    "external_object_id": null
+  }
+}

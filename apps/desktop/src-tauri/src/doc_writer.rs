@@ -2,29 +2,12 @@
 //! cycle). Pure Rust, zero new dependencies: PDF via the already-vendored
 //! `lopdf`, DOCX via the already-vendored `zip` crate, MD/TXT as plain text.
 //!
-//! **Round-trip contract.** Every binary renderer is written against the
-//! REAL parsers that power document attachments (`documents.rs`):
-//! `extract_pdf_text` scans the raw page content stream LINE BY LINE for a
-//! `(text) Tj` shape (first `(` .. last `)` on the line), and
-//! `extract_docx_text` reads `word/document.xml` and joins every `<w:t>`
-//! body with single spaces. The renderers therefore emit exactly those
-//! shapes — and the module's tests round-trip renderer output through those
-//! same parsers, so a writer bug cannot pass the reader gate.
-//!
-//! **Why the PDF content stream is hand-encoded.** `lopdf`'s own
-//! `Content::encode` escapes parentheses and backslashes inside literal
-//! strings (correct PDF, but `extract_pdf_text` performs no unescaping, so
-//! real text would corrupt on re-read). The stream below is emitted as raw
-//! bytes instead — one operator per line, strings unescaped. The desktop
-//! reader's first-`(`-to-last-`)` scan recovers any single-line text from
-//! that form, including text containing parentheses. `lopdf` is still used
-//! for the document OBJECT structure (catalog, pages tree, fonts, stream
-//! objects, xref), which is what makes the file a valid loadable PDF.
-//!
-//! Honest limits, on the record: rendering is text-only (no images or
-//! tables), the base-14 Helvetica fonts carry Latin glyphs only — non-Latin
-//! text (Hindi, Bengali, …) still extracts perfectly through the reader but
-//! will not display as glyphs in a PDF viewer.
+//! **Round-trip contract.** The PDF renderer emits escaped WinAnsi literal
+//! strings for lopdf text extraction; DOCX uses ZIP/XML. Tests round-trip
+//! both formats through the desktop readers. Text-only PDF uses base-14
+//! Helvetica fonts, without font embedding. Text outside WinAnsi is rejected
+//! with guidance to use DOCX/TXT instead of writing a visually broken PDF.
+//! Existing files are never rewritten by this renderer.
 
 use lopdf::dictionary;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
@@ -49,11 +32,13 @@ pub(crate) fn render_pdf_bytes(title: &str, lines: &[String]) -> Result<Vec<u8>,
         "Type" => "Font",
         "Subtype" => "Type1",
         "BaseFont" => "Helvetica",
+        "Encoding" => "WinAnsiEncoding",
     });
     let bold_font_id = doc.add_object(dictionary! {
         "Type" => "Font",
         "Subtype" => "Type1",
         "BaseFont" => "Helvetica-Bold",
+        "Encoding" => "WinAnsiEncoding",
     });
     let resources_id = doc.add_object(dictionary! {
         "Font" => dictionary! {
@@ -75,7 +60,7 @@ pub(crate) fn render_pdf_bytes(title: &str, lines: &[String]) -> Result<Vec<u8>,
     let pages_id = doc.new_object_id();
     let mut page_ids: Vec<ObjectId> = Vec::new();
     for (index, page_lines) in pages.iter().enumerate() {
-        let content = pdf_page_content(title, page_lines, index == 0);
+        let content = pdf_page_content(title, page_lines, index == 0)?;
         let content_id =
             doc.add_object(Stream::new(Dictionary::new(), content.as_bytes().to_vec()));
         let page_id = doc.add_object(dictionary! {
@@ -107,10 +92,8 @@ pub(crate) fn render_pdf_bytes(title: &str, lines: &[String]) -> Result<Vec<u8>,
     Ok(bytes)
 }
 
-/// One page's content stream, hand-encoded (see module docs): one operator
-/// per line, every text line exactly `(text) Tj`, so the desktop reader's
-/// line scanner recovers the text verbatim.
-fn pdf_page_content(title: &str, lines: &[&str], with_title: bool) -> String {
+/// One page of text operators, with escaped and encoded literal operands.
+fn pdf_page_content(title: &str, lines: &[&str], with_title: bool) -> Result<String, String> {
     let mut content = String::new();
     if with_title {
         content.push_str("BT\n");
@@ -119,7 +102,7 @@ fn pdf_page_content(title: &str, lines: &[&str], with_title: bool) -> String {
             "{MARGIN} {} Td\n",
             PAGE_HEIGHT - MARGIN - TITLE_SIZE
         ));
-        content.push_str(&pdf_text_line(title));
+        content.push_str(&pdf_text_line(title)?);
         content.push_str(" Tj\n");
         content.push_str("ET\n");
     }
@@ -136,22 +119,34 @@ fn pdf_page_content(title: &str, lines: &[&str], with_title: bool) -> String {
             content.push_str(&format!("0 -{BODY_LEADING} Td\n"));
         }
         if !line.is_empty() {
-            content.push_str(&pdf_text_line(line));
+            content.push_str(&pdf_text_line(line)?);
             content.push_str(" Tj\n");
         }
     }
     content.push_str("ET\n");
-    content
+    Ok(content)
 }
 
-/// The `(text) Tj` operand for one text line. The bytes are emitted raw —
-/// no escaping — because the reader takes everything from the first `(` to
-/// the last `)` on the line; a caller-controlled string containing either
-/// paren still round-trips. A literal newline inside the text would break
-/// the one-line-per-operator shape, so `\r`/`\n` are folded to spaces here.
-fn pdf_text_line(text: &str) -> String {
+/// Encode PDF literals, never interpolate caller text as content operators.
+fn pdf_text_line(text: &str) -> Result<String, String> {
     let folded = text.replace(['\r', '\n'], " ");
-    format!("({folded})")
+    let bytes = Document::encode_text(Some("WinAnsiEncoding"), &folded);
+    if Document::decode_text(Some("WinAnsiEncoding"), &bytes) != folded {
+        return Err("PDF export supports WinAnsi text only with its built-in fonts. Use DOCX or TXT to preserve this Unicode text.".into());
+    }
+    let mut literal = String::from("(");
+    for byte in bytes {
+        match byte {
+            b'(' | b')' | b'\\' => {
+                literal.push('\\');
+                literal.push(char::from(byte));
+            }
+            32..=126 => literal.push(char::from(byte)),
+            _ => literal.push_str(&format!("\\{byte:03o}")),
+        }
+    }
+    literal.push(')');
+    Ok(literal)
 }
 
 /// Renders `lines` into a minimal, valid OOXML package (DOCX). One `<w:p>`
@@ -289,10 +284,8 @@ mod tests {
     }
 
     #[test]
-    fn pdf_text_with_parens_and_backslashes_survives_the_naive_reader() {
-        // The reader scans first-'('-to-last-')' per line with no
-        // unescaping; hand-encoded streams must therefore recover text
-        // containing parens, backslashes and a ") Tj (" adversarial tail.
+    fn pdf_text_with_parens_and_backslashes_survives_the_real_reader() {
+        // Literal escaping must preserve text without injecting PDF operators.
         let nasty = vec![
             "Parens (balanced) and \\backslash survive.".to_owned(),
             "Adversarial tail: ) Tj ( injected mid-line.".to_owned(),
@@ -312,6 +305,13 @@ mod tests {
     }
 
     #[test]
+    fn pdf_rejects_unsupported_unicode_without_silent_text_loss() {
+        assert!(render_pdf_bytes("नमस्ते", &[])
+            .unwrap_err()
+            .contains("Use DOCX or TXT"));
+    }
+
+    #[test]
     fn docx_escapes_xml_so_entities_unescape_back() {
         let nasty = vec!["Amp & lt < gt > together: <not-a-tag> &amp;".to_owned()];
         let bytes = render_docx_bytes(&nasty).expect("render docx");
@@ -327,9 +327,7 @@ mod tests {
     #[test]
     fn empty_pdf_and_docx_still_open() {
         // No body lines at all: the renderers must still produce files the
-        // readers can load. The PDF reader needs ≥3 words on the page, so
-        // the title alone must carry them (an under-3-word PDF is rejected
-        // by the reader and that is the reader's rule, not ours).
+        // readers can load; the PDF carries a readable title even without a body.
         let pdf = render_pdf_bytes("UnoOne Field Report", &[]).expect("empty render");
         let path = temp_file("empty.pdf", &pdf);
         assert!(extract_pdf_text(&path).is_ok(), "empty-body PDF must load");

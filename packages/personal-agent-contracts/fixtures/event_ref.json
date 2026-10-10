@@ -1,0 +1,23 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "EVENT_REF",
+  "payload": {
+    "calendar": {
+      "account_id": "mail-1",
+      "calendar_id": "cal-1",
+      "display_name": "Personal",
+      "time_zone": "Asia/Kolkata"
+    },
+    "event_id": "event-provider-1",
+    "start_ms": 100000,
+    "end_ms": 200000,
+    "time_zone": "Asia/Kolkata",
+    "attendees": [
+      "person@example.invalid"
+    ]
+  }
+}

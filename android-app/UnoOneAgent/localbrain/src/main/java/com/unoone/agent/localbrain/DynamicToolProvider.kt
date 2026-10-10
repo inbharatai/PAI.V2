@@ -42,7 +42,7 @@ object DynamicToolProvider {
                 return@mapNotNull null
             }
             try {
-                tool(CanonicalOpenApiTool(schema))
+                tool(DynamicCanonicalOpenApiTool(schema))
             } catch (e: Exception) {
                 Logger.e("DynamicToolProvider: failed to create tool provider for '$name'", e)
                 null
@@ -68,7 +68,7 @@ object DynamicToolProvider {
  * (`automaticToolCalling = false`): the model proposes tool calls as JSON, and the app parses
  * and executes them through [com.unoone.agent.execution.ActionExecutor] after safety validation.
  */
-private class CanonicalOpenApiTool(
+private class DynamicCanonicalOpenApiTool(
     private val schema: ToolSchema
 ) : OpenApiTool {
 

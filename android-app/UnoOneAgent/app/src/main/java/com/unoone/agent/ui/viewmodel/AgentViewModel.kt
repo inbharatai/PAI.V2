@@ -1,5 +1,9 @@
 package com.unoone.agent.ui.viewmodel
 
+import com.unoone.agent.core.latency.*
+import com.unoone.agent.voice.VoiceLatency
+
+import com.unoone.agent.core.runtime.GlobalTaskCancellation
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -9,7 +13,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unoone.agent.AgentOrchestrator
 import com.unoone.agent.UnoOneApplication
-import com.unoone.agent.core.model.AgentStatus
 import com.unoone.agent.core.model.InputType
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.model.TimelineStep
@@ -56,13 +59,6 @@ class AgentViewModel(
         private val STOP_PHRASES = setOf(
             "stop listening", "stop listening now", "that's all", "that's all for now",
             "done listening", "stop the session", "exit listening"
-        )
-        // C6: voice phrases that route to the in-app MediaProjection Read Screen path (C4) instead of
-        // the Accessibility-based read_screen tool (which bounces to MIUI settings when Accessibility
-        // is off). Intercepted in the hands-free loop before the orchestrator sees them.
-        private val READ_SCREEN_PHRASES = setOf(
-            "read screen", "read the screen", "read this screen", "read this page",
-            "read the page", "what's on screen", "what is on screen", "read aloud"
         )
     }
 
@@ -130,42 +126,91 @@ class AgentViewModel(
         }
     }
 
+    private val voiceRoutes = com.unoone.agent.CaptureRoutingLifetime(viewModelScope)
+    private var captureHandle: VoiceModule.CaptureHandle? = null
+    private var captureStarting: Any? = null
+    private val captureStopRegistration = GlobalTaskCancellation.register(this) { vm ->
+        android.os.Handler(android.os.Looper.getMainLooper()).post { vm.stopHandsFreeSession(announce = false) }
+    }
+    private var recordingGeneration: Long? = null
+    private var captureTrace: LatencyToken? = null
+    private var captureIngress: com.unoone.agent.core.voice.VoiceIngress? = null
+
     fun startListening(context: Context) {
         if (!AgentRuntimeGate.isEnabled()) return
-        if (_isListening.value || isProcessing.value) return
+        if (captureStarting != null || captureHandle != null || _isListening.value) return
+        val startOwner = Any()
+        captureStarting = startOwner
         listeningJob?.cancel()
         VoiceService.foregroundSessionActive = true
+        val generation = GlobalTaskCancellation.generation
+        recordingGeneration = generation
         listeningJob = viewModelScope.launch {
-            val result = voiceModuleInstance.startRecording(context, viewModelScope)
+            try {
+            if (generation != GlobalTaskCancellation.generation) return@launch
+            if (voiceModuleInstance.isSpeechBusy()) { VoiceService.foregroundSessionActive = false; return@launch }
+            captureIngress = orchestrator.unifiedVoice.capture()
+            captureTrace = captureIngress?.let { VoiceLatency.recorder.forRequest(it.requestId) }
+            VoiceLatency.recorder.mark(captureTrace, LatencyStage.MIC_REQUEST)
+            if (captureStarting !== startOwner || generation != GlobalTaskCancellation.generation) return@launch
+            val result = voiceModuleInstance.startForegroundCapture(context, viewModelScope, captureTrace) {
+                if (com.unoone.agent.voice.ListeningCuePolicy.selected(context) == com.unoone.agent.voice.ListeningCue.SPOKEN) {
+                    VoiceLatency.recorder.mark(captureTrace, LatencyStage.CUE_REQUEST)
+                    check(voiceModuleInstance.speakAwait("Listening. Say one command.", trace = captureTrace) !is Result.Error)
+                }
+                check(captureStarting === startOwner && generation == GlobalTaskCancellation.generation)
+            }
             if (result is Result.Success) {
+                captureHandle = result.data
                 _isListening.value = true
             } else if (result is Result.Error) {
                 VoiceService.foregroundSessionActive = _isHandsFree.value
+                VoiceLatency.recorder.closeCapture(captureTrace, LatencyOutcome.FAILED)
                 Logger.w("Failed to start recording: ${result.message}")
             }
+            } finally { if (captureStarting === startOwner) captureStarting = null }
         }
     }
 
     fun stopListening() {
+        val owner = captureHandle ?: return
+        val captured = captureIngress ?: return
+        val trace = captureTrace
+        val generation = captured.captureGlobalGeneration
         if (!_isListening.value) return
         _isListening.value = false
         _amplitude.value = 0f
         listeningJob?.cancel()
         listeningJob = viewModelScope.launch {
             var shouldRetry = false
+            var routed = false
             try {
-                val result = voiceModuleInstance.stopAndTranscribe()
+                VoiceLatency.recorder.mark(trace, LatencyStage.ENDPOINT_DECISION, reason = LatencyReason.MANUAL)
+                val result = voiceModuleInstance.stopAndTranscribe(owner, trace)
+                voiceRoutes.retire(owner, captureHandle) {
+                    captureHandle = null
+                    captureStarting = null
+                    listeningJob = null
+                    VoiceService.foregroundSessionActive = false
+                }
+                if (result is Result.Success && com.unoone.agent.voice.VoiceControlPolicy.isStop(result.data)) { routed = true; routeVoiceInput(result.data, captured, trace); return@launch }
+                if (generation != GlobalTaskCancellation.generation || !AgentRuntimeGate.isEnabled()) return@launch
                 if (result is Result.Success && result.data.isNotBlank()) {
                     val confidence = voiceModuleInstance.lastSttConfidence
                     // Low-confidence retry: ask the user to repeat once, then re-listen. Don't loop.
                     if (confidence < LOW_CONFIDENCE_THRESHOLD && !retryArmed) {
                         retryArmed = true
-                        voiceModuleInstance.speakAwait("Sorry, I didn't catch that clearly. Could you please repeat?")
+                        voiceModuleInstance.speakAwait(
+                            com.unoone.agent.voice.VoiceLanguage.retryCue(
+                                voiceModuleInstance.currentLanguage()
+                            )
+                        )
                         Logger.i("AgentViewModel: Low STT confidence (${"%.2f".format(confidence)}); re-listening once.")
                         shouldRetry = true
                     } else {
                         retryArmed = false
-                        orchestrator.processCommand(result.data, InputType.VOICE)
+                        routed = true
+                        routeVoiceInput(result.data, captured, trace)
                     }
                 } else if (result is Result.Error) {
                     retryArmed = false
@@ -174,9 +219,15 @@ class AgentViewModel(
                     retryArmed = false
                 }
             } finally {
-                VoiceService.foregroundSessionActive = _isHandsFree.value
+                if (!routed) VoiceLatency.recorder.closeCapture(trace)
+                voiceRoutes.retire(owner, captureHandle) {
+                    voiceModuleInstance.discardCapture(owner)
+                    captureHandle = null
+                    VoiceService.foregroundSessionActive = false
+                }
+
             }
-            if (shouldRetry && AgentRuntimeGate.isEnabled()) {
+            if (shouldRetry && generation == GlobalTaskCancellation.generation && AgentRuntimeGate.isEnabled()) {
                 startListening(com.unoone.agent.UnoOneApplication.appContext)
             }
         }
@@ -188,6 +239,12 @@ class AgentViewModel(
      * state. Delegates to the orchestrator which cancels the run, clears the pending command, and
      * speaks "Stopped."
      */
+    private fun routeVoiceInput(text: String, captured: com.unoone.agent.core.voice.VoiceIngress, trace: LatencyToken? = null): Job = voiceRoutes.route {
+        try {
+            kotlinx.coroutines.withContext(CurrentLatencyContext(trace)) { orchestrator.unifiedVoice.accept(captured.copy(transcript = text), trace) }
+        } finally { VoiceLatency.recorder.closeCapture(trace) }
+    }
+
     fun cancelCommand() {
         orchestrator.cancelCurrentCommand()
     }
@@ -215,7 +272,8 @@ class AgentViewModel(
         // into ScreenshotCapture.mediaProjection and fires this callback on grant/deny.
         com.unoone.agent.phonecontrol.ScreenshotCapture.permissionListener = { granted ->
             if (granted) {
-                runOcrAndSpeak()
+                orchestrator.unifiedVoice.clear()
+                viewModelScope.launch { voiceModuleInstance.speakAwait("Permission granted. Make a new screen request to continue.") }
             } else {
                 viewModelScope.launch {
                     runCatching {
@@ -234,17 +292,9 @@ class AgentViewModel(
     private fun runOcrAndSpeak() {
         ocrJob?.cancel()
         ocrJob = viewModelScope.launch(Dispatchers.IO) {
-            // M15: language-aware OCR — for Indic voice languages, both Latin and Devanagari
-            // recognizers run so Hindi/Bengali/Tamil/etc. text on screen is captured.
-            val lang = com.unoone.agent.voice.VoiceLanguage.normalize(
-                com.unoone.agent.UnoOneApplication.appContext
-                    .getSharedPreferences(com.unoone.agent.voice.VoiceLanguage.PREF_NAME, android.content.Context.MODE_PRIVATE)
-                    .getString(com.unoone.agent.voice.VoiceLanguage.PREF_KEY, com.unoone.agent.voice.VoiceLanguage.DEFAULT)
-                    ?: com.unoone.agent.voice.VoiceLanguage.DEFAULT
-            )
             // recognizeScreen() calls the blocking ScreenshotCapture.captureScreen() (~500ms poll),
             // so it must run off the main thread.
-            val result = ocrControl.recognizeScreen(lang)
+            val result = ocrControl.recognizeScreen()
             val spoken = when (result) {
                 is Result.Success -> result.data.trim().ifBlank { "I couldn't see any text on the screen." }
                 is Result.Error -> "I couldn't read the screen. ${result.message}"
@@ -474,7 +524,7 @@ class AgentViewModel(
 
     fun startHandsFreeSession(context: Context) {
         if (!AgentRuntimeGate.isEnabled()) return
-        if (_isHandsFree.value) return
+        if (_isHandsFree.value || captureStarting != null || captureHandle != null) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
@@ -485,16 +535,24 @@ class AgentViewModel(
         // AudioRecord instances don't fight for the mic (the prior "listen is slow/erratic" cause).
         VoiceService.foregroundSessionActive = true
         _isHandsFree.value = true
-        _isListening.value = true
+        _isListening.value = false
         sessionJob = viewModelScope.launch {
             try {
                 // Finish the cue before opening the mic. Running these concurrently let UnoOne
                 // transcribe its own "I'm listening" prompt as the user's command.
-                runCatching { voiceModuleInstance.speakAwait("I'm listening. Say a command.") }
+                if (com.unoone.agent.voice.ListeningCuePolicy.selected(context) == com.unoone.agent.voice.ListeningCue.SPOKEN)
+                    voiceModuleInstance.speakAwait("I'm listening. Say a command.")
                 while (isActive && _isHandsFree.value) {
-                    val utterance = captureUtterance(context)
+                    val generation = GlobalTaskCancellation.generation
+                    val captured = orchestrator.unifiedVoice.capture()
+                    val trace = VoiceLatency.recorder.forRequest(captured.requestId)
+                    VoiceLatency.recorder.mark(trace, LatencyStage.MIC_REQUEST)
+                    val utterance = captureUtterance(context, trace)
+                    if (utterance != null && com.unoone.agent.voice.VoiceControlPolicy.isStop(utterance)) { routeVoiceInput(utterance, captured, trace); break }
+                    if (generation != GlobalTaskCancellation.generation || !AgentRuntimeGate.isEnabled()) break
                     if (!_isHandsFree.value) break
                     if (utterance.isNullOrBlank()) {
+                        VoiceLatency.recorder.closeCapture(trace)
                         // No speech captured this round — brief pause then re-arm (no spam).
                         delay(300)
                         continue
@@ -503,19 +561,11 @@ class AgentViewModel(
                         stopHandsFreeSession()
                         break
                     }
-                    // C6: route "read screen" to the in-app MediaProjection path (no settings bounce).
-                    if (utterance.lowercase().trim() in READ_SCREEN_PHRASES) {
-                        runCatching { voiceModuleInstance.stopSpeaking() }
-                        readScreenViaMediaProjection(context)
-                        try {
-                            // The MediaProjection read is a short spoken flow; brief settle before re-arming.
-                            delay(1200)
-                        } catch (_: kotlinx.coroutines.CancellationException) { break }
-                        continue
-                    }
                     // Stop any TTS still playing so we don't talk over the user, then run the command.
-                    runCatching { voiceModuleInstance.stopSpeaking() }
-                    orchestrator.processCommand(utterance, InputType.VOICE)
+                    // Do not mistake a stop request for a native speech-completion ACK.
+                    VoiceService.foregroundSessionActive = false
+                    try { routeVoiceInput(utterance, captured, trace).join() }
+                    finally { VoiceLatency.recorder.closeCapture(trace) }
                     // Wait for the command (incl. its spoken reply) to finish before re-listening,
                     // so the mic never captures the agent's own voice.
                     try {
@@ -532,11 +582,16 @@ class AgentViewModel(
     }
 
     fun stopHandsFreeSession(announce: Boolean = true) {
+        voiceRoutes.stop()
+        orchestrator.unifiedVoice.clear()
         val wasActive = _isHandsFree.value
         _isHandsFree.value = false
         sessionJob?.cancel()
         sessionJob = null
-        runCatching { voiceModuleInstance.stopRecording() }
+        listeningJob?.cancel()
+        captureStarting = null
+        captureHandle?.let { voiceModuleInstance.discardCapture(it) }
+        captureHandle = null
         _isListening.value = false
         _amplitude.value = 0f
         // Release the mic back to the background KWS loop.
@@ -553,13 +608,19 @@ class AgentViewModel(
      * the transcript (trimmed) or null/blank when nothing was captured. Uses [amplitude] (fed by the
      * recorder's amplitude callback) to detect speech start, then ~1.5s of trailing silence to end.
      */
-    private suspend fun captureUtterance(context: Context): String? {
-        val start = voiceModuleInstance.startRecording(context, viewModelScope)
+    private suspend fun captureUtterance(context: Context, trace: LatencyToken?): String? {
+        if (captureHandle != null || captureStarting != null) return null
+        VoiceService.foregroundSessionActive = true
+        val start = voiceModuleInstance.startForegroundCapture(context, viewModelScope, trace)
         if (start is Result.Error) {
+            VoiceService.foregroundSessionActive = false
             Logger.w("AgentViewModel: hands-free record start failed: ${start.message}")
             return null
         }
+        val owner = (start as Result.Success).data
+        captureHandle = owner
         _isListening.value = true
+        var completed = false
         var speechStarted = false
         var silenceSince = 0L
         val loopStart = System.currentTimeMillis()
@@ -579,14 +640,29 @@ class AgentViewModel(
                     if (
                         System.currentTimeMillis() - silenceSince >=
                         com.unoone.agent.voice.VoiceActivityPolicy.TRAILING_SILENCE_MS
-                    ) break
+                    ) { completed = true; break }
                 }
             }
-        } finally {
-            _isListening.value = false
+        VoiceLatency.recorder.mark(trace, LatencyStage.ENDPOINT_DECISION)
+        val res = voiceModuleInstance.stopAndTranscribe(owner, trace)
+        val transcript = (res as? Result.Success)?.data?.trim()
+        // Preserve exact emergency Stop and existing explicit hands-free exit controls.
+        if (transcript != null && (com.unoone.agent.voice.VoiceControlPolicy.isStop(transcript) || transcript.lowercase() in STOP_PHRASES)) return transcript
+        val reason = if (completed) com.unoone.agent.voice.UtteranceCompletionPolicy.TerminalReason.SILENCE
+            else com.unoone.agent.voice.UtteranceCompletionPolicy.TerminalReason.DURATION_CUTOFF
+        if (!com.unoone.agent.voice.UtteranceCompletionPolicy.eligible(reason, transcript)) {
+            if (!completed && !transcript.isNullOrBlank()) voiceModuleInstance.speakAwait(com.unoone.agent.voice.UtteranceCompletionPolicy.SHORTER_CUE)
+            return null
         }
-        val res = voiceModuleInstance.stopAndTranscribe()
-        return (res as? Result.Success)?.data?.trim()?.takeIf { it.isNotBlank() }
+        return transcript
+        } finally {
+            voiceRoutes.retire(owner, captureHandle) {
+                voiceModuleInstance.discardCapture(owner)
+                captureHandle = null
+                _isListening.value = false
+                VoiceService.foregroundSessionActive = false
+            }
+        }
     }
 
     fun setBlindAidActive(active: Boolean) {
@@ -596,6 +672,30 @@ class AgentViewModel(
         // Voice/text commands like "activate blind aid" still go through the full
         // safety pipeline via processCommand.
         orchestrator.setBlindAidActive(active)
+    }
+
+    private val personalConversationId = java.util.UUID.randomUUID().toString()
+    private val _personalResponse = MutableStateFlow("")
+    val personalResponse: StateFlow<String> = _personalResponse.asStateFlow()
+    private val _personalProcessing = MutableStateFlow(false)
+    val personalProcessing: StateFlow<Boolean> = _personalProcessing.asStateFlow()
+    fun clearPersonalResponse() {
+        if (_personalProcessing.value) commandJob?.cancel()
+        _personalResponse.value = ""
+    }
+    fun onPersonalTextCommand(context: Context, text: String, reviewed: com.unoone.agent.personal.ReviewedPersonalDraft? = null) {
+        if (!AgentRuntimeGate.isEnabled() || _personalProcessing.value) return
+        _personalProcessing.value = true
+        _personalResponse.value = ""
+        commandJob = viewModelScope.launch {
+            try {
+                val response = com.unoone.agent.personal.PersonalExecutionAdapter(context.applicationContext, orchestrator.taskRuntime)
+                    .respond(text, personalConversationId, reviewed)
+                _personalResponse.value = "RESPONDED · ${response.binding.agentId} · persona revision ${response.binding.personaRevision}\n${response.text}"
+            } catch (cancel: kotlinx.coroutines.CancellationException) { throw cancel }
+            catch (_: Exception) { _personalResponse.value = "Personal run unavailable or revoked. Unlock/review and explicitly retry. No command fallback or automatic replay." }
+            finally { _personalProcessing.value = false }
+        }
     }
 
     fun onTextCommand(text: String) {
@@ -613,8 +713,9 @@ class AgentViewModel(
      */
     fun onVoiceCommand(text: String) {
         if (!AgentRuntimeGate.isEnabled()) return
+        val captured = orchestrator.unifiedVoice.capture()
         commandJob = viewModelScope.launch {
-            orchestrator.processCommand(text, InputType.VOICE)
+            orchestrator.unifiedVoice.accept(captured.copy(transcript = text))
         }
     }
 
@@ -692,6 +793,8 @@ class AgentViewModel(
     }
 
     override fun onCleared() {
+        captureStopRegistration.close()
+        stopHandsFreeSession(announce = false)
         super.onCleared()
         // Do NOT release voiceModuleInstance here — it is the application-scoped shared
         // instance owned by UnoOneApplication. Releasing it would destroy the VoiceModule
