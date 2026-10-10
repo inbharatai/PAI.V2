@@ -13,6 +13,10 @@ description = "Pocket AI product adapters for the reusable InBharat Harness"
 # product tree; product-specific code stays here, universal code stays there.
 inbharat-harness-core = { path = "../../vendor/inbharat-harness/crates/core" }
 unoone-vault-core = { path = "../vault-core" }
+unoone-personal-agent-contracts = { path = "../personal-agent-contracts" }
+unoone-personal-agent-runtime = { path = "../personal-agent-runtime" }
+# §3.6 guardian: child-spawn gate and untrusted-content wrapping at the personal lane boundary.
+unoone-privacy-guardian = { path = "../privacy-guardian" }
 unoone-capability-contracts = { path = "../capability-contracts" }
 unoone-runtime-select = { path = "../runtime-select" }
 serde = { version = "1", features = ["derive"] }
@@ -34,3 +38,5 @@ rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Existing locked UUID crate, solely for the imported production granted-folder tests.
+uuid = { version = "1", features = ["v4"] }

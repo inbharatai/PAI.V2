@@ -12,6 +12,11 @@ pub mod knowledge_distiller;
 pub mod knowledge_retrieval;
 pub mod knowledge_service;
 pub mod knowledge_verification;
+pub mod personal_children;
+pub mod personal_coding;
+pub mod personal_execution;
+#[cfg(test)]
+mod personal_scoped_tests;
 pub mod task_diff;
 pub mod task_learning;
 pub mod task_ledger;

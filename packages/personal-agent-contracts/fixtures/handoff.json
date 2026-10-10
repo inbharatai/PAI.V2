@@ -1,0 +1,23 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "HANDOFF",
+  "payload": {
+    "handoff_id": "handoff-1",
+    "task_id": "task-1",
+    "from_replica_id": "phone-1",
+    "target_replica_id": "power-1",
+    "encrypted_goal": "ciphertext-placeholder",
+    "receipt_operation_ids": [
+      "op-1"
+    ],
+    "host_requirements": [
+      "DESKTOP"
+    ],
+    "approval": "PENDING",
+    "expires_at_ms": 61000
+  }
+}

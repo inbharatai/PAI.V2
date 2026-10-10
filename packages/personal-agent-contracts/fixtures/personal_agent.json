@@ -1,0 +1,21 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "PERSONAL_AGENT",
+  "payload": {
+    "agent_id": "agent-1",
+    "person_id": "person-1",
+    "profile_revision": 1,
+    "display_name": "UnoOne",
+    "persona_revision": 1,
+    "conversation_refs": [
+      "thread-1"
+    ],
+    "capability_preferences": [
+      "mail.read"
+    ]
+  }
+}

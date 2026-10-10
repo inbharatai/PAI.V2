@@ -1,0 +1,15 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "MAIL_ACCOUNT",
+  "payload": {
+    "account_id": "mail-1",
+    "person_id": "person-1",
+    "provider": "LOCAL",
+    "display_name": "Synthetic mailbox",
+    "address": "person@example.invalid"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "MESSAGE_REF",
+  "payload": {
+    "account_id": "mail-1",
+    "message_id": "message-1",
+    "thread_id": "mail-thread-1",
+    "folder_id": "folder-1"
+  }
+}

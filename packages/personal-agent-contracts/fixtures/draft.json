@@ -1,0 +1,22 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "DRAFT",
+  "payload": {
+    "draft_id": "draft-1",
+    "task_id": "task-1",
+    "account_id": "mail-1",
+    "reply_to": null,
+    "recipients": [
+      "person@example.invalid"
+    ],
+    "subject": "Proposed meeting",
+    "body": "Draft only",
+    "attachment_refs": [],
+    "revision": 1,
+    "approval": "PENDING"
+  }
+}

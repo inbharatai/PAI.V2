@@ -1,0 +1,61 @@
+{
+  "schema": "inbharat.pai.personal-agent",
+  "version": {
+    "major": 1,
+    "minor": 0
+  },
+  "kind": "TASK_SPEC",
+  "payload": {
+    "task_id": "task-1",
+    "agent_id": "agent-1",
+    "person_id": "person-1",
+    "idempotency_key": "request-1",
+    "goal": "Summarize permitted locally cached mail",
+    "origin_replica_id": "phone-1",
+    "target_replica_id": "phone-1",
+    "host_requirements": [
+      "ANDROID"
+    ],
+    "scopes": {
+      "capabilities": [
+        "mail.read"
+      ],
+      "tools": [
+        "draft_email"
+      ],
+      "data": [
+        {
+          "kind": "ACCOUNT",
+          "resource_id": "mail-1",
+          "operations": [
+            "READ"
+          ]
+        }
+      ],
+      "recipients": [],
+      "hosts": [
+        "phone-1"
+      ],
+      "operations": [
+        "READ",
+        "SUGGEST"
+      ],
+      "delegation": "READ_AND_SUGGEST",
+      "network": "OFFLINE_ONLY"
+    },
+    "budget": {
+      "max_steps": 8,
+      "max_tool_calls": 8,
+      "max_duration_ms": 60000,
+      "max_bytes": 8192,
+      "max_network_calls": 0,
+      "max_depth": 2,
+      "max_children": 2
+    },
+    "created_at_ms": 1000,
+    "deadline_ms": 61000,
+    "expected_postcondition": "Summary references permitted messages",
+    "user_visible_policy": "Read and suggest only",
+    "sensitivity": "PRIVATE"
+  }
+}
