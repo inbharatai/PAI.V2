@@ -2,110 +2,151 @@ package com.unoone.agent.vaultbridge
 
 import android.content.Context
 import android.net.Uri
-import com.unoone.agent.vault.MobileVaultRepository
-import com.unoone.agent.vault.SafVaultIO
-import com.unoone.agent.vault.VaultRecordReader
-import com.unoone.agent.vault.VaultRecordWriter
-import com.unoone.agent.vault.VaultSession
+import android.system.Os
+import android.system.OsConstants
+import com.unoone.agent.vault.*
+import java.io.File
 
-/**
- * App-wide holder for the live shared-vault session.
- *
- * Lifecycle: [attach] after the SAF tree is granted and validated
- * (MainActivity), [unlock] with the user password to open a [VaultSession]
- * (Argon2id is slow — call OFF the main thread), [detach] on USB disconnect to
- * zeroize the master key. The drive vault is authoritative; this object is the
- * single point that knows whether writes can currently reach it.
- *
- * [writer] returns null whenever the vault is not attached+unlocked, so the
- * [VaultMirror] coordinator naturally falls back to cache-only writes that are
- * flushed on the next unlock.
+/** Default writable destination is this installation's private file vault, never SAF/Power.
+ * All session-bound calls serialize with lock/replace. Previously handed-out handles fail
+ * after lock instead of encrypting with a zeroized key. Password byte arrays are consumed.
+ * Room remains independently encrypted and usable while this extra file vault is locked.
  */
 object VaultConnection {
+    private val revocation = java.util.concurrent.atomic.AtomicLong()
+    private var sessionGeneration = -1L
+    fun revoke(): Long = revocation.incrementAndGet()
+    /** Read-only epoch for user-invoked socket sessions; lock/unlock invalidates old work. */
+    fun sessionEpoch(): Long = revocation.get()
+    @Synchronized fun closeRevoked(ticket: Long) { if (revocation.get() == ticket) lock() }
 
     private var repository: MobileVaultRepository? = null
     private var session: VaultSession? = null
+    private var privateIO: PrivateFileVaultIO? = null
+    private var bridgeAllowed = false
+    @Volatile private var legacyRepository: MobileVaultRepository? = null
 
-    @Synchronized
-    fun attach(context: Context, tree: Uri) {
-        clearSession() // a new tree invalidates any prior session
-        repository = MobileVaultRepository(SafVaultIO(context.applicationContext, tree))
+    @Synchronized fun prepareLocal(context: Context): Boolean {
+        if (privateIO == null) {
+            val io = PrivateFileVaultIO(File(context.noBackupFilesDir.canonicalFile, "local-file-vault"), ::syncDirectory)
+            privateIO = io
+            repository = MobileVaultRepository(io)
+        }
+        return privateIO!!.exists("VAULT/header/header_a.json") || privateIO!!.exists("VAULT/header/header_b.json")
     }
 
-    /**
-     * Open a session from the attached tree. Returns true on success, false on
-     * a wrong password or corrupt header (no throw), so callers can surface a
-     * retry without crashing. MUST run off the main thread (Argon2id).
-     */
-    @Synchronized
-    fun unlock(password: ByteArray): Boolean {
-        val repo = repository ?: return false
+    /** Only after checking historical Room links/pending operations, without modifying them. */
+    @Synchronized fun createLocal(password: ByteArray, historicalLinksOrPending: Boolean) {
+        var opened: VaultSession? = null
+        val ticket = revocation.incrementAndGet()
+        try {
+            check(session == null)
+            opened = checkNotNull(repository).create(password)
+            // Durable local binding, NOT a capability grant and never accepted from peer JSON.
+            val binding = "${opened.vaultId}\n${if (historicalLinksOrPending) "migration-required" else "local"}\n"
+            privateIO!!.write("room-binding.txt", binding.toByteArray())
+            check(ticket == revocation.get()) { "Vault opening cancelled by lock" }
+            sessionGeneration = ticket
+            session = opened
+            bridgeAllowed = !historicalLinksOrPending
+        } catch (e: Exception) {
+            opened?.close()
+            throw e
+        } finally { password.fill(0) }
+    }
+
+    @Synchronized fun unlock(password: ByteArray): Boolean {
+        lock()
+        val ticket = revocation.get()
         return try {
-            session = repo.unlock(password)
+            val opened = checkNotNull(repository).unlock(password)
+            if (ticket != revocation.get()) { opened.close(); error("Vault opening cancelled by lock") }
+            sessionGeneration = ticket
+            session = opened
+            bridgeAllowed = try {
+                String(privateIO!!.read("room-binding.txt"), Charsets.UTF_8) == "${opened.vaultId}\nlocal\n"
+            } catch (_: Exception) { false } // interruption/unknown binding never drains historical work
             true
-        } catch (_: Exception) {
-            // Wrong password, tampered/corrupt header, or any I/O failure —
-            // all mean "not unlocked". Never crash the caller thread.
-            session = null
-            false
+        } finally { password.fill(0) }
+    }
+
+    @Synchronized fun isUnlocked(): Boolean = session != null && sessionGeneration == revocation.get()
+    @Synchronized fun isBridgeAllowed(): Boolean = isUnlocked() && bridgeAllowed
+    @Synchronized fun localVaultId(): String? = session?.vaultId
+
+    @Synchronized fun writer(): VaultRecordWriter? {
+        val active = session ?: return null
+        if (!isBridgeAllowed()) return null
+        val repo = repository ?: return null
+        return object : VaultRecordWriter {
+            override fun writeRecord(fields: Map<String, Any?>, content: ByteArray): String = synchronized(this@VaultConnection) {
+                check(session === active && isBridgeAllowed()) { "Vault locked or changed" }
+                repo.writeRecord(active, fields, content)
+            }
+            override fun tombstone(vaultRecordId: String, deletedAtIso: String) = synchronized(this@VaultConnection) {
+                check(session === active && isBridgeAllowed()) { "Vault locked or changed" }
+                repo.tombstoneRecord(active, vaultRecordId, deletedAtIso)
+            }
         }
     }
 
-    @Synchronized
-    fun isUnlocked(): Boolean = session != null
-
-    /** A writer bound to the current session, or null when locked/detached. */
-    @Synchronized
-    fun writer(): VaultRecordWriter? {
-        val repo = repository ?: return null
+    @Synchronized fun reader(): VaultRecordReader? {
         val active = session ?: return null
-        return SessionVaultRecordWriter(repo, active)
-    }
-
-    /** A reader bound to the current session, or null when locked/detached. */
-    @Synchronized
-    fun reader(): VaultRecordReader? {
+        if (!isBridgeAllowed()) return null
         val repo = repository ?: return null
-        val active = session ?: return null
-        return SessionVaultRecordReader(repo, active)
+        return object : VaultRecordReader {
+            override fun listRecordMetadata(): List<Map<String, Any?>> = synchronized(this@VaultConnection) {
+                check(session === active && isBridgeAllowed()) { "Vault locked or changed" }
+                repo.listRecordMetadata(active)
+            }
+            override fun readRecord(recordId: String): Pair<Map<String, Any?>, ByteArray> = synchronized(this@VaultConnection) {
+                check(session === active && isBridgeAllowed()) { "Vault locked or changed" }
+                repo.readRecord(active, recordId)
+            }
+        }
     }
 
-    /** USB detach: drop the tree and zeroize the master key. */
-    @Synchronized
-    fun detach() {
-        clearSession()
-        repository = null
-    }
-
-    private fun clearSession() {
-        session?.masterKey?.fill(0)
+    @Synchronized fun lock() {
+        revoke()
+        session?.close()
         session = null
+        bridgeAllowed = false
     }
-}
 
-/** Binds the narrow [VaultRecordWriter] surface to an unlocked session. */
-private class SessionVaultRecordWriter(
-    private val repository: MobileVaultRepository,
-    private val session: VaultSession,
-) : VaultRecordWriter {
-
-    override fun writeRecord(fields: Map<String, Any?>, content: ByteArray): String =
-        repository.writeRecord(session, fields, content)
-
-    override fun tombstone(vaultRecordId: String, deletedAtIso: String) {
-        repository.tombstoneRecord(session, vaultRecordId, deletedAtIso)
+    /** Optional legacy SOURCE only. Never replaces local writer or feeds hydration. */
+    fun attach(context: Context, tree: Uri) {
+        legacyRepository = MobileVaultRepository(SafVaultIO(context.applicationContext, tree, readOnly = true))
     }
-}
 
-/** Binds the narrow [VaultRecordReader] surface to an unlocked session. */
-private class SessionVaultRecordReader(
-    private val repository: MobileVaultRepository,
-    private val session: VaultSession,
-) : VaultRecordReader {
+    /** Authenticate records and return a proposal count only. Actual backup/transactional
+     * migration remains a separate gate; no import, grant hydration or action occurs here. */
+    fun inspectLegacy(password: ByteArray): Pair<Int, Int> {
+        try {
+            val repo = checkNotNull(legacyRepository) { "Select a legacy source first" }
+            val opened = repo.unlock(password)
+            try {
+                var records = 0
+                var tombstones = 0
+                for (metadata in repo.listRecordMetadata(opened)) {
+                    val id = metadata["record_id"] as? String ?: continue
+                    val (verified, plaintext) = repo.readRecord(opened, id)
+                    plaintext.fill(0)
+                    records++
+                    if (verified["tombstone"] == true) tombstones++
+                }
+                return records to tombstones
+            } finally { opened.close() }
+        } finally { password.fill(0) }
+    }
 
-    override fun listRecordMetadata(): List<Map<String, Any?>> =
-        repository.listRecordMetadata(session)
+    /** USB detach has no effect on independent local session/Room. */
+    fun detach() { legacyRepository = null }
 
-    override fun readRecord(recordId: String): Pair<Map<String, Any?>, ByteArray> =
-        repository.readRecord(session, recordId)
+    private fun syncDirectory(directory: File) {
+        val fd = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
+        try {
+            require(OsConstants.S_ISDIR(Os.fstat(fd).st_mode)) { "Vault sync target is not a directory" }
+            Os.fsync(fd)
+        } finally { Os.close(fd) }
+    }
 }

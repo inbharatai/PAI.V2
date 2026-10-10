@@ -76,11 +76,10 @@ class NotesViewModel(
 
     fun deleteNote(note: NoteEntity) {
         viewModelScope.launch {
-            // Capture the vault link before the row is gone, so the deletion
-            // can be tombstoned in the vault (now or on the next unlock).
-            val vaultRecordId = note.vaultRecordId
+            // SQLite atomically captures current linked AND pending IDs, not this possibly stale
+            // UI entity's link. A failed enqueue aborts deletion; the callback only wakes the drain.
             noteDao.delete(note)
-            vaultMirror?.onRowDeleted(vaultRecordId, VaultSyncPlanner.Kind.NOTE)
+            vaultMirror?.onRowDeleted(note.vaultRecordId, VaultSyncPlanner.Kind.NOTE)
         }
     }
 }

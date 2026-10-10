@@ -47,7 +47,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.unoone.agent.PermissionManager
 import com.unoone.agent.safety.SecurityLevel
 import com.unoone.agent.ui.viewmodel.SettingsViewModel
 import com.unoone.agent.voice.VoiceLanguage
@@ -55,6 +54,7 @@ import com.unoone.agent.voice.VoiceLanguage
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel,
+    onNavigateToLatency: () -> Unit = {},
     onNavigateToPrivacy: () -> Unit = {},
     onNavigateToModels: () -> Unit = {},
     onNavigateToLanguagePacks: () -> Unit = {},
@@ -68,10 +68,19 @@ fun SettingsScreen(
     val voiceLanguage by viewModel.voiceLanguage.collectAsState()
     val securityLevel by viewModel.securityLevel.collectAsState()
     val isAgentEnabled by viewModel.isAgentEnabled.collectAsState()
-    val autoStartEnabled by viewModel.autoStartEnabled.collectAsState()
     var showClearConfirmation by remember { mutableStateOf(false) }
     var showDisableConfirmation by remember { mutableStateOf(false) }
+    val autoStartEnabled by viewModel.autoStartEnabled.collectAsState()
     val context = LocalContext.current
+    var showDiagnostics by remember { mutableStateOf(false) }
+    if (showDiagnostics) {
+        DeveloperDiagnosticsScreen(viewModel, onClose = { showDiagnostics = false },
+            interpretImage = { state, envelope, question ->
+                val app = context.applicationContext as com.unoone.agent.UnoOneApplication
+                app.orchestrator.analyzeReviewedScreen(state, envelope, question)
+            })
+        return
+    }
 
     Column(
         modifier = Modifier
@@ -79,9 +88,18 @@ fun SettingsScreen(
             .padding(16.dp)
             .verticalScroll(rememberScrollState())
     ) {
+        TextButton(onClick = onNavigateToLatency) { Text("Latency diagnostics and listening cue") }
         Text("Settings", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
         Spacer(modifier = Modifier.height(16.dp))
 
+        SettingsSection(title = "Start on boot (opt-in)") {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Request voice startup on boot", modifier = Modifier.weight(1f))
+                Switch(checked = autoStartEnabled, onCheckedChange = viewModel::setAutoStart)
+            }
+            Text("Android may refuse background microphone startup. Open UnoOne to resume; this preference never bypasses Android privacy restrictions.")
+        }
         SettingsSection(title = "UnoOne status") {
             Text(
                 if (isAgentEnabled) "UnoOne is enabled" else "UnoOne is disabled",
@@ -106,43 +124,6 @@ fun SettingsScreen(
             ) {
                 Text(if (isAgentEnabled) "Disable UnoOne" else "Enable UnoOne")
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            // P2-A: auto-launch on boot — the phone-side equivalent of the
-            // laptop's dock watcher. Explicit opt-in, default off.
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("Start automatically when the phone starts")
-                Switch(
-                    checked = autoStartEnabled,
-                    onCheckedChange = { enabled -> viewModel.setAutoStart(enabled) }
-                )
-            }
-            if (autoStartEnabled) {
-                Text(
-                    "UnoOne's wake-word service starts on boot. If the phone blocks it, exclude UnoOne from battery optimization below — Android may refuse a background mic start otherwise.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Button(
-                    onClick = {
-                        context.startActivity(PermissionManager.getBatteryOptimizationIntent(context))
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        if (PermissionManager.isIgnoringBatteryOptimizations(context)) {
-                            "Battery optimization: excluded (tap to re-check)"
-                        } else {
-                            "Exclude from battery optimization"
-                        }
-                    )
-                }
-            }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -164,25 +145,34 @@ fun SettingsScreen(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+        SettingsSection(title = "Developer (opt-in)") {
+            Button(onClick = { showDiagnostics = true }, modifier = Modifier.fillMaxWidth()) {
+                Text("Open runtime and screen diagnostics")
+            }
+        }
         SettingsSection(title = "Manage") {
             ManageButton("Model Status & Install", Icons.Default.Memory, onNavigateToModels)
             ManageButton("Offline Languages", Icons.Default.Language, onNavigateToLanguagePacks)
             ManageButton("Voice Test (STT / TTS)", Icons.Default.Mic, onNavigateToVoiceTest)
             ManageButton("Secure Browser (Page Agent)", Icons.Default.Language, onNavigateToSecureBrowser)
             ManageButton("Audit Log", Icons.AutoMirrored.Filled.ReceiptLong, onNavigateToAudit)
-            // Voice language picker — sets the offline STT/TTS language live (rebuilds the Sherpa
-            // engines without a restart). Speak in the language you pick here, or STT transcribes
-            // in the wrong language (English-only transducer can't transcribe Hindi, etc.).
+            // Input recognition remains bilingual. This picker controls only the language used for
+            // local replies and TTS, and therefore never reloads the bilingual recognizer.
             val langLabel = VoiceLanguage.SUPPORTED.firstOrNull { it.code == voiceLanguage }?.display
                 ?: VoiceLanguage.displayName(voiceLanguage)
             DropdownPicker(
-                label = "Voice language",
+                label = "Reply voice",
                 selectedLabel = langLabel,
                 options = VoiceLanguage.SUPPORTED.map { it.code to it.display },
                 onSelect = { code -> viewModel.setVoiceLanguage(code) }
             )
             Text(
-                "Secure Browser reserves Gemma 4 exclusively, automates approved HTTPS pages through the local Page Agent, and requires manual control for credentials, OTP, CAPTCHA, payments and legal declarations.",
+                "Speech input recognizes English and Hindi automatically. This setting changes only the language UnoOne uses to reply.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+            )
+            Text(
+                "Secure Browser reserves the selected local planning profile exclusively, automates approved HTTPS pages through the local Page Agent, and requires manual control for credentials, OTP, CAPTCHA, payments and legal declarations.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 modifier = Modifier.padding(top = 4.dp)
@@ -255,7 +245,7 @@ fun SettingsScreen(
                 Text("Privacy Settings")
             }
             Text(
-                "Control optional online tools and data sharing. Gemma, installed speech packs and PageAgent planning run locally.",
+                "Control optional online tools and data sharing. The selected local planning profile, installed speech packs and Page Agent planning run locally.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f),
                 modifier = Modifier.padding(top = 4.dp)
@@ -285,7 +275,7 @@ fun SettingsScreen(
 
         Spacer(modifier = Modifier.height(24.dp))
         Text(
-            "UnoOne v0.4.0-alpha-v2 · Gemma 4 E2B candidate",
+            "UnoOne V3 development alpha · Not device-qualified",
             style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
         )
@@ -348,10 +338,7 @@ private fun ManageButton(
     Spacer(modifier = Modifier.height(8.dp))
 }
 
-/**
- * Compact label + dropdown picker used by the Security Level and Voice Language settings. Tapping
- * the right-hand value opens a [DropdownMenu] of [options]; selecting one calls [onSelect].
- */
+/** Compact label and dropdown picker used by security-level and voice-language settings. */
 @Composable
 private fun <T> DropdownPicker(
     label: String,
@@ -378,7 +365,10 @@ private fun <T> DropdownPicker(
                 options.forEach { (value, display) ->
                     DropdownMenuItem(
                         text = { Text(display) },
-                        onClick = { onSelect(value); expanded = false }
+                        onClick = {
+                            onSelect(value)
+                            expanded = false
+                        }
                     )
                 }
             }

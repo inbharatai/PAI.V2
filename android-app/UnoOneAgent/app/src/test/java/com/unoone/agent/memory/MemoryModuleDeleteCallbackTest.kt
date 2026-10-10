@@ -16,14 +16,13 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * The deletion half of the vault-notification seam: `deleteMemory` must fire
- * [MemoryModule]'s `onUserMemoryDeleted` callback with the FULL entity (the
- * row's `vaultRecordId` included) so the app layer can tombstone the vault
- * record — BEFORE the local row is deleted, because after it the link is
- * unrecoverable. The orchestrator wires this callback to
- * `VaultMirror.onRowDeleted(kind = MEMORY)`; without it, deleting a memory on
- * the phone leaves an orphaned live record in the shared vault that the
- * desktop would resurrect.
+ * The deletion half of the vault-notification seam: `deleteMemory` deletes the
+ * row — SQLite captures its vault link as a durable `pending_tombstones` row
+ * inside that same transaction — and THEN fires [MemoryModule]'s
+ * `onUserMemoryDeleted` callback with the entity so the app layer can wake the
+ * drain. The orchestrator wires this callback to
+ * `VaultMirror.onRowDeleted(kind = MEMORY)`; the callback is a wake-up, the
+ * tombstone row is the durability.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -43,9 +42,13 @@ class MemoryModuleDeleteCallbackTest {
     @After
     fun tearDown() = db.close()
 
+    private val tombstonesAtCallback = mutableListOf<String>()
     private fun module() = MemoryModule(
         db.memoryDao(),
-        onUserMemoryDeleted = { deleted.add(it) },
+        onUserMemoryDeleted = { entity ->
+            deleted.add(entity)
+            tombstonesAtCallback += db.pendingTombstoneDao().getAll().map { it.vaultRecordId }
+        },
     )
 
     @Test
@@ -59,6 +62,7 @@ class MemoryModuleDeleteCallbackTest {
         assertEquals(1, deleted.size)
         assertEquals("rec-7", deleted.single().vaultRecordId)
         assertNull("local row is deleted", db.memoryDao().getByKey("wake_word"))
+        assertEquals("deletion intent was already durable when the wake-up ran", listOf("rec-7"), tombstonesAtCallback)
     }
 
     @Test
