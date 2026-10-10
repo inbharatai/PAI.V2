@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { tauriApi, type VaultStatus } from '../lib/tauri';
 
-export type ViewId = 'chat' | 'recordings' | 'memory' | 'vault' | 'model' | 'browser' | 'coding' | 'knowledge' | 'documents' | 'accessibility' | 'settings' | 'hardware' | 'capability';
+export type ViewId = 'personal' | 'chat' | 'recordings' | 'memory' | 'vault' | 'model' | 'browser' | 'coding' | 'knowledge' | 'documents' | 'accessibility' | 'settings' | 'hardware' | 'capability';
 
 interface SidebarProps {
   currentView: ViewId;
@@ -25,6 +25,7 @@ export function Sidebar({ currentView, onNavigate, onLock }: SidebarProps) {
   }, []);
 
   const navItems: { id: ViewId; label: string; icon: React.ReactElement }[] = [
+    { id: 'personal', label: 'Personal agent', icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="7" r="4" /><path d="M4 22v-3a8 8 0 0 1 16 0v3" /></svg> },
     {
       id: 'chat',
       label: 'Chat',

@@ -95,7 +95,7 @@ const globalNames = [
   'FileReader', 'IS_REACT_ACT_ENVIRONMENT',
 ];
 
-export async function mountChat(t, { turns = archive, recall, harness, legacy, commands = {}, fullAccess = true, strict = false } = {}) {
+export async function mountChat(t, { turns = archive, recall, harness, legacy, commands = {}, fullAccess = true, personalMode = false, strict = false } = {}) {
   const dom = new JSDOM('<!doctype html><html><body><div id="mount"></div></body></html>', { url: 'https://chat-view.test.invalid/' });
   const oldGlobals = new Map(globalNames.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const key of globalNames) {
@@ -112,6 +112,8 @@ export async function mountChat(t, { turns = archive, recall, harness, legacy, c
     calls.push({ command, args: args === undefined ? undefined : structuredClone(args) });
     if (Object.hasOwn(commands, command)) return commands[command](args);
     switch (command) {
+      case 'personal_agent_view': return { revision: 2, replica_id: 'test-replica', agent: { agent_id: 'test-agent', person_id: 'test-person', display_name: 'UnoOne', conversation_refs: [] }, persona: { revision: 1, deleted: false, preferences: [], provenance: { source: 'USER' } }, tasks: [], pending_mutations: 2, conflicts: [] };
+      case 'peer_sync_cancel': return null;
       case 'check_model_health': return { status: 'ok' }; // Explicit health double; no model claim.
       case 'detect_vault': return { detected: false, vault_root: '', validation_failures: [] };
       case 'get_workspace_root': return '/mock/granted-workspace';
@@ -153,6 +155,12 @@ export async function mountChat(t, { turns = archive, recall, harness, legacy, c
     root.render(strict ? React.createElement(React.StrictMode, null, React.createElement(ChatView)) : React.createElement(ChatView));
   });
   await flush();
+  // Existing regression suite exercises the preserved manual lane explicitly.
+  if (!personalMode) {
+    const toggle = [...container.querySelectorAll('input[type="checkbox"]')].find(e => e.parentElement.textContent.includes('Personal agent (off'));
+    await act(async () => toggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })));
+    await flush();
+  }
   const textarea = () => container.querySelector('textarea.chat-input');
   const sendButton = () => container.querySelector('.chat-input-row .btn-primary');
   async function type(text) {

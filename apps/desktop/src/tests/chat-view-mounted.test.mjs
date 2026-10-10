@@ -56,7 +56,7 @@ test('standalone greeting sends no archive and preserves displayed pairs and can
   validSession(args.conversationId);
   assert.deepEqual(args, {
     message: 'hello', conversationHistory: [], conversationId: args.conversationId,
-    allowWorkspaceGoal: true, images: [],
+    allowWorkspaceGoal: true, images: [], personalMode: false, personalTask: null, personalUserMessage: null,
   });
   assert.deepEqual(ui.ipc('save_chat_turn'), [{
     sessionId: args.conversationId, userMessage: 'hello', assistantMessage: 'Hello from explicit IPC double.',
@@ -112,7 +112,7 @@ test('read-only fallback uses identical selected context and explicit camelCase 
     harness: () => { throw new Error('mock harness unavailable'); },
     legacy: () => ({ final_text: 'Read-only fallback result.', steps: [], context_note: 'Backend mock context note.' }),
   });
-  await ui.click(ui.container.querySelector('input[type="checkbox"]'));
+  await ui.click(ui.container.querySelector('input[aria-label="Manual agent tools"]'));
   assert.equal(ui.dom.window.localStorage.getItem('unoone.fullAccess'), 'off');
   await ui.send(prompt);
   const [harness] = ui.ipc('harness_chat');

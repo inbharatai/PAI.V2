@@ -573,9 +573,21 @@ pub fn recover_from_crash(vault_root: String) -> Result<CrashRecoveryResult, Str
 }
 
 #[tauri::command]
-pub fn emergency_lock(vault_root: String) -> EmergencyLockResult {
-    let manager = SecurityManager::new(&vault_root);
-    manager.emergency_lock()
+pub async fn emergency_lock(
+    app: tauri::AppHandle,
+    vault_root: String,
+) -> Result<EmergencyLockResult, String> {
+    // The old command wrote a marker and claimed keys were cleared without
+    // touching the live Vault. Use the same real stop/zero-key path for local
+    // and explicit legacy sessions; never trust a webview-supplied write path.
+    let _ = vault_root; // Kept for existing IPC callers.
+    crate::lock_vault(app).await?;
+    Ok(EmergencyLockResult {
+        success: true,
+        keys_cleared: true,
+        vault_locked: true,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    })
 }
 
 #[cfg(test)]

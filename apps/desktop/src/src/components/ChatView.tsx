@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { tauriApi } from '../lib/tauri';
 import type { ConversationTurn as TauriConversationTurn } from '../lib/tauri';
+import { TRUSTED_HOST_DISCLOSURE, CODING_ISOLATION_DISCLOSURE } from '../lib/readiness';
+import { PersonalChatControls, type ReviewedDraft } from './PersonalChatControls';
 import { selectChatContext } from '../lib/chatContext';
 import type { ActiveChatTask, ChatContextMetadata } from '../lib/chatContext';
 
@@ -78,6 +80,8 @@ const TEXT_FILE_EXTS = [
 const extOf = (name: string) => name.split('.').pop()?.toLowerCase() || '';
 
 export function ChatView() {
+  const [personalMode, setPersonalMode] = useState(true);
+  const [personalDraft, setPersonalDraft] = useState<ReviewedDraft | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -703,7 +707,11 @@ export function ChatView() {
           conversationIdRef.current,
           fullAccess,
           images,
+          personalMode,
+          personalMode ? personalDraft : null,
+          personalMode ? saidText : null,
         );
+        if (personalMode) persistTurn = false; // Native-bound MESSAGE already saved atomically under the vault session guard.
         // Harness returns counts, not structured per-tool steps — but the
         // live-progress stream recorded the real tool activity. Fold it into
         // the message's step pill (expandable), with the route + counts as
@@ -757,6 +765,9 @@ export function ChatView() {
             context: { ...turnContext, cancelled: true },
             steps: progressSteps.length > 0 ? progressSteps : undefined,
           };
+        } else if (personalMode) {
+          persistTurn = false;
+          throw new Error(`Personal run stopped: ${harnessMsg}. No fallback or automatic retry. Review the task ledger before retrying.`);
         } else if (fullAccess) {
           // Defect #32 (live-caught 2026-09-14): with full access on, the
           // silent fallback to the read-only legacy agent made the model
@@ -1262,6 +1273,8 @@ export function ChatView() {
       )}
 
       <div className="chat-input-area">
+        <label><input type="checkbox" checked={personalMode} disabled={isGenerating} onChange={e => { setPersonalMode(e.target.checked); setPersonalDraft(null); }} />Personal agent (off = separate manual legacy mode)</label>
+        {personalMode && <PersonalChatControls busy={isGenerating} onDraft={setPersonalDraft} />}
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -1273,12 +1286,13 @@ export function ChatView() {
           <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', userSelect: 'none' }}>
             <input
               type="checkbox"
-              checked={fullAccess}
+              aria-label="Manual agent tools"
+              checked={!personalMode && fullAccess}
               onChange={e => toggleFullAccess(e.target.checked)}
-              disabled={isGenerating}
+              disabled={isGenerating || personalMode}
             />
             <span>
-              Agent tools — granted files and browser; commands need Settings permission
+              Manual mode tools — granted files and browser; commands need Settings permission
               <span style={{ color: 'var(--text-muted, #666)' }}>
                 {' '}(workspace: {workspaceRoot} · audited + budgeted)
               </span>
@@ -1324,6 +1338,11 @@ export function ChatView() {
             </select>
           </label>
         </div>
+        <details style={{ fontSize: '12px', marginBottom: '8px', color: 'var(--text-secondary)' }}>
+          <summary>Agent tools: trusted host vs isolated Coding Tasks</summary>
+          <p>{TRUSTED_HOST_DISCLOSURE}</p>
+          <p>{CODING_ISOLATION_DISCLOSURE}</p>
+        </details>
         {(micError || attachError) && (
           <div style={{
             padding: '6px 12px',
