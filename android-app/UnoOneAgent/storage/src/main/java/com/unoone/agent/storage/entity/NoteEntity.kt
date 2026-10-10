@@ -27,5 +27,7 @@ data class NoteEntity(
      * pending flush on the next unlock). The vault is authoritative; this
      * column is the cache→vault link, not a second identity.
      */
-    val vaultRecordId: String? = null
+    val vaultRecordId: String? = null,
+    @androidx.room.ColumnInfo(defaultValue = "1")
+    val vaultRevision: Int = 1
 )

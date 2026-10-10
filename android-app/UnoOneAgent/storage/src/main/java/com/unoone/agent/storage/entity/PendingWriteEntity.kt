@@ -23,5 +23,11 @@ data class PendingWriteEntity(
     val recordKind: String, // VaultSyncPlanner.Kind name
     val localId: Long,
     val recordId: String,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** Captured vault revision. Zero identifies pre-v7 legacy tombstones. */
+    @androidx.room.ColumnInfo(defaultValue = "1")
+    val revision: Int = 1,
+    /** FRESH means minted by this Room outbox, not evidence of a previous vault. */
+    @androidx.room.ColumnInfo(defaultValue = "'HISTORICAL'")
+    val origin: String = "HISTORICAL"
 )

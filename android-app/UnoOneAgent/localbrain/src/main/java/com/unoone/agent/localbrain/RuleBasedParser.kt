@@ -23,6 +23,28 @@ object RuleBasedParser {
                 .containsMatchIn(value)
         }
 
+    /**
+     * Conservative speech-recognition aliases for Chrome. The final consonant and vowel are often
+     * lost by the small offline English transducer ("crome", "crohm", "crope"). Require an
+     * explicit launch verb, so an unrelated mention of a crop never opens a browser.
+     */
+    private fun isSpokenChromeLaunch(value: String): Boolean =
+        Regex(
+            "\\b(?:open|launch|start)\\s+(?:google\\s+)?(?:chrome|crome|crohm|crope)\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(value)
+
+    /**
+     * Conservative recovery for common offline-ASR renderings such as "open blinded" and
+     * "open blind it". An explicit activation verb is required, so ordinary mentions of a blind
+     * person or accessibility never start the camera.
+     */
+    private fun isSpokenBlindAidStart(value: String): Boolean =
+        Regex(
+            "\\b(?:open|launch|start|activate|enable|turn\\s+on)\\s+(?:the\\s+)?(?:blind|blinded)(?:\\s+(?:aid|aide|it|mode|view))?\\b",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(value)
+
     private fun explicitWebTarget(value: String): String? =
         Regex(
             "(?<![@\\w])(?:https?://)?(?:www\\.)?[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+(?:/[^\\s]*)?",
@@ -64,12 +86,96 @@ object RuleBasedParser {
         "in bharat" to "https://inbharat.ai"
     )
 
+    // Only the command envelope grants authority; dictated bodies are opaque data.
+    private val notePrefix = Regex(
+        """^(?:(?:create|add|new|write|take)\s+(?:a\s+)?note\b|note\b|remember\b)\s*:?[ ]*(?:to\s+)?""",
+        RegexOption.IGNORE_CASE
+    )
+    private val compoundSeparator = Regex("""\s+(?:and(?:\s+then)?|then|और|फिर|aur|phir)\s+|\s*;\s*""", RegexOption.IGNORE_CASE)
+    private val unsafeEnvelope = Regex(
+        """(?:^|[\s,])(?:don't|don’t|dont|do\s+not|never|not|मत|नहीं|नही|mat|nahi|nahin)(?=[\s,.!?।]|$)|\b(?:said|says|told|asked|quoted|kehna|kaha|bola)\b|(?:कहा|बोला|कहते|कहती)|^[\s]*["'“‘]""",
+        RegexOption.IGNORE_CASE
+    )
+
     fun parse(command: String): ToolCall? {
+        val text = command.trim()
+        // Exact envelopes only: shared text is data, never a second executable command.
+        Regex("""^(?:share text|open share sheet with text)\s*:\s*(.+)$""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+            .matchEntire(text)?.let { match ->
+                return ToolCall("share_text", JsonObject(mapOf("text" to JsonPrimitive(match.groupValues[1]))))
+            }
+        Regex("""^(?:record|start) (?:a )?voice (?:memo|note)(?: for ([1-9]|[12][0-9]|30) seconds?)?$""", RegexOption.IGNORE_CASE)
+            .matchEntire(text)?.let { match ->
+                return ToolCall("voice_recording", JsonObject(mapOf("duration_seconds" to JsonPrimitive(match.groupValues[1].toIntOrNull() ?: 5))))
+            }
+        Regex("""^open (?:the )?dialer(?: (?:with|for) ([+]?\d[\d -]{2,19}))?$""", RegexOption.IGNORE_CASE)
+            .matchEntire(text)?.let { match ->
+                val number = match.groupValues[1].filter { it.isDigit() || it == '+' }
+                return ToolCall("open_dialer", JsonObject(if (number.isEmpty()) emptyMap() else mapOf("number" to JsonPrimitive(number))))
+            }
+        val note = notePrefix.find(text)
+        val draft = Regex("""^(?:please\s+)?(?:draft|compose|write|send|prepare)\b""", RegexOption.IGNORE_CASE)
+            .containsMatchIn(text) && hasAnyWord(text, "email", "e-mail", "mail", "whatsapp")
+        val localizedDraft = (text.contains("ईमेल") || text.contains("मेल") ||
+            text.contains("व्हाट्सऐप") || text.contains("व्हाट्सएप")) &&
+            listOf("ड्राफ्ट", "लिखो", "मैसेज", "संदेश").any(text::contains)
+        val bodyMarker = if (draft || localizedDraft) Regex(
+            """\b(?:body|message|text|saying|say)\b\s+|(?:^|\s)कि\s+""", RegexOption.IGNORE_CASE
+        ).find(text) else null
+        val envelope = when {
+            note != null -> text.substring(0, note.range.last + 1)
+            bodyMarker != null -> text.substring(0, bodyMarker.range.first)
+            else -> text
+        }
+        if (unsafeEnvelope.containsMatchIn(envelope)) return null
+        // Preserve the established explicit create-note command chain without treating arbitrary
+        // dictated note bodies (or quoted text) as executable commands.
+        if (text.startsWith("create note ", ignoreCase = true) &&
+            text.none { it == '"' || it == '“' || it == '”' } && compoundSeparator.containsMatchIn(text)) {
+            val parts = compoundSeparator.split(text)
+            val imperative = Regex("""^(?:create note|delete note|open|launch|go|scroll|read|start|stop|find|search)\b""", RegexOption.IGNORE_CASE)
+            if (parts.drop(1).any { imperative.containsMatchIn(it.trim()) }) {
+                if (parts.size !in 2..3 || parts.any { it.isBlank() }) return null
+                val calls = parts.map { parse(it) ?: return null }
+                return ToolCall("compound", JsonObject(mapOf("steps" to kotlinx.serialization.json.JsonArray(
+                    calls.map { JsonObject(mapOf("tool" to JsonPrimitive(it.tool), "args" to it.args)) }
+                ))))
+            }
+        }
+        if (note != null) {
+            val content = text.substring(note.range.last + 1).trim()
+            if (content.isEmpty()) return null
+            return ToolCall("create_note", JsonObject(mapOf(
+                "title" to JsonPrimitive(content.take(40)),
+                "content" to JsonPrimitive(content), "tags" to JsonPrimitive("expert")
+            )))
+        }
+        // Draft bodies and explicit delegated browser/skill tasks own their conjunctions.
+        val lowered = text.lowercase()
+        val ownsPayload = draft || localizedDraft ||
+            lowered.startsWith("remind me ") ||
+            Regex("""^(?:create skill|new skill|teach you|schedule|add .*calendar|create .*calendar)\b""").containsMatchIn(lowered) ||
+            ((lowered.startsWith("open ") || lowered.startsWith("launch ") || lowered.startsWith("use ")) &&
+                (explicitWebTarget(text) != null || SECURE_ORIGIN_FRIENDLY.any { lowered.contains(it.first) })) ||
+            lowered.startsWith("secure browser ") ||
+            Regex("""^find (?:and|then) (?:click|tap)\b""").containsMatchIn(lowered)
+        if (!ownsPayload && compoundSeparator.containsMatchIn(text)) {
+            val parts = compoundSeparator.split(text)
+            if (parts.size !in 2..3 || parts.any { it.isBlank() }) return null
+            val parsed = parts.map { parse(it) ?: return null }
+            return ToolCall("compound", JsonObject(mapOf("steps" to kotlinx.serialization.json.JsonArray(
+                parsed.map { JsonObject(mapOf("tool" to JsonPrimitive(it.tool), "args" to it.args)) }
+            ))))
+        }
+        return parseSingle(text, draft)
+    }
+
+    private fun parseSingle(command: String, englishDraft: Boolean = false): ToolCall? {
         val lowered = command.lowercase().trim()
         val explicitTarget = explicitWebTarget(lowered)
         val startsWithOpenVerb = lowered.startsWith("open ") || lowered.startsWith("launch ") ||
             lowered.startsWith("start ") || lowered.startsWith("use ")
-        parseLocalizedCoreCommand(lowered)?.let { return it }
+        if (!englishDraft) parseLocalizedCoreCommand(command.trim())?.let { return it }
 
         return when {
             // === DOMAIN-SPECIFIC RULES (use "and" internally — must be checked FIRST) ===
@@ -82,7 +188,7 @@ object RuleBasedParser {
                     "create_skill",
                     JsonObject(mapOf(
                         "name" to JsonPrimitive(name),
-                        "steps" to kotlinx.serialization.json.JsonArray(steps.map { JsonPrimitive(it) })
+                        "steps" to JsonPrimitive(steps.joinToString("|"))
                     ))
                 )
             }
@@ -140,14 +246,12 @@ object RuleBasedParser {
                 ))
             )
 
-            // WhatsApp Integration — resolve contact + draft message (prefer over send_whatsapp).
-            // Without a spoken phone number, use the contact name for WhatsApp's recipient picker.
+            // WhatsApp Integration — prepare a draft only; the user presses Send in WhatsApp.
+            // Without a spoken phone number, WhatsApp's own recipient picker is opened instead of
+            // inventing or learning a contact mapping.
             lowered.contains("whatsapp") &&
                 hasAnyWord(lowered, "message", "text", "write", "draft", "send", "saying", "say") -> {
                 val number = Regex("(?:to|at) ([+]?[\\d]{8,15})").find(lowered)?.groupValues?.get(1) ?: ""
-                val contactName = Regex("(?:to|at) ([\\p{L}\\s]+?)(?:\\s+(?:saying|message|text|say|that)\\b)", RegexOption.IGNORE_CASE)
-                    .find(command)?.groupValues?.get(1)?.trim()?.ifBlank { null }
-                    ?: ""
                 val message = Regex(
                     "\\b(?:saying|message|text|say)\\b\\s*(.+)$",
                     RegexOption.IGNORE_CASE
@@ -156,9 +260,9 @@ object RuleBasedParser {
                     ?.let { Regex("^[+\\d][\\d\\s-]{7,}\\s*").replace(it, "").trim() }
                     .orEmpty()
                 ToolCall(
-                    "draft_whatsapp_message",
+                    "send_whatsapp",
                     JsonObject(mapOf(
-                        "contact_name" to JsonPrimitive(contactName.ifBlank { number.ifBlank { "" } }),
+                        "number" to JsonPrimitive(number),
                         "message" to JsonPrimitive(message)
                     ))
                 )
@@ -174,55 +278,23 @@ object RuleBasedParser {
                 "show calendar app", "show the calendar app"
             ) -> ToolCall("open_calendar", JsonObject(emptyMap()))
 
-            // Calendar Intelligence — use atomic tools (prefer over open_calendar_insert)
+            // Calendar Intelligence
             lowered.contains("calendar") || lowered.contains("schedule") || lowered.contains("events") ||
                 lowered.startsWith("remind me ") -> {
-                if (lowered.contains("check") || lowered.contains("what") || lowered.contains("show") || lowered.contains("read") || lowered.contains("conflict") || lowered.contains("free") || lowered.contains("busy")) {
-                    ToolCall("check_calendar_conflict", JsonObject(mapOf(
-                        "date" to JsonPrimitive(""),
-                        "start_time" to JsonPrimitive(""),
-                        "end_time" to JsonPrimitive("")
-                    )))
+                if (lowered.contains("check") || lowered.contains("what") || lowered.contains("show") || lowered.contains("read")) {
+                    ToolCall("check_calendar", JsonObject(emptyMap()))
                 } else if (
                     lowered.contains("add") || lowered.contains("book") || lowered.contains("create") ||
                     lowered.contains("insert") || lowered.contains("schedule") ||
                     lowered.startsWith("remind me ")
                 ) {
                     val details = CalendarCommandParser.parse(command)
-                    ToolCall("create_calendar_event", JsonObject(mapOf(
+                    ToolCall("open_calendar_insert", JsonObject(mapOf(
                         "title" to JsonPrimitive(details.title),
-                        "date" to JsonPrimitive(""),
                         "start_time" to JsonPrimitive(details.startTimeIso.orEmpty()),
                         "end_time" to JsonPrimitive(details.endTimeIso.orEmpty())
                     )))
                 } else null
-            }
-
-            // === COMPOUND COMMANDS (after domain-specific rules, before simple rules) ===
-            // Splits on " and " into up to 3 ordered steps, each parsed independently and embedded
-            // as a {tool, args} object in a single "steps" JSON array. (Previously the 3rd part was
-            // parsed and discarded; it is now included.) If only one half parses, that half is
-            // returned directly — the "and" was not a command separator.
-            lowered.contains(" and ") &&
-                domainSpecificKeywords.none { lowered.contains(it) } &&
-                !(startsWithOpenVerb && explicitTarget != null) -> {
-                val parts = lowered.split(" and ").map { it.trim() }.filter { it.isNotBlank() }
-                val parsed = parts.mapNotNull { parse(it) }
-                when {
-                    parsed.size >= 2 -> {
-                        val stepsArray = kotlinx.serialization.json.JsonArray(
-                            parsed.take(3).map { tc ->
-                                JsonObject(mapOf(
-                                    "tool" to JsonPrimitive(tc.tool),
-                                    "args" to tc.args
-                                ))
-                            }
-                        )
-                        ToolCall("compound", JsonObject(mapOf("steps" to stepsArray)))
-                    }
-                    parsed.size == 1 -> parsed.first()
-                    else -> null
-                }
             }
 
             // === SIMPLE RULES (no internal "and" usage) ===
@@ -299,6 +371,9 @@ object RuleBasedParser {
 
             // Blind Aid Activation — requires positive context like "detect" or "start"
             lowered.contains("start blind aid") || lowered.contains("activate blind aid") ||
+            lowered.contains("open blind aid") || lowered.contains("launch blind aid") ||
+            lowered.contains("turn on blind aid") || lowered.contains("blind aid on") ||
+            isSpokenBlindAidStart(lowered) ||
             lowered in setOf(
                 "start blind", "start blind mode", "start blind view",
                 "enable blind mode", "enable blind view", "blind mode on", "blind view on",
@@ -321,24 +396,24 @@ object RuleBasedParser {
                 ToolCall("read_screen", JsonObject(emptyMap()))
             }
 
-            // Navigation & Gestures — atomic tools (prefer over system_control)
+            // Navigation & Gestures
             lowered.contains("scroll down") || lowered.contains("page down") -> {
-                ToolCall("scroll", JsonObject(mapOf("direction" to JsonPrimitive("down"))))
+                ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("scroll_down"), "target" to JsonPrimitive(""))))
             }
             lowered.contains("scroll up") || lowered.contains("page up") -> {
-                ToolCall("scroll", JsonObject(mapOf("direction" to JsonPrimitive("up"))))
+                ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("scroll_up"), "target" to JsonPrimitive(""))))
             }
             lowered.contains("go back") || lowered.contains("press back") || lowered.contains("navigate back") -> {
-                ToolCall("go_back", JsonObject(emptyMap()))
+                ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("go_back"), "target" to JsonPrimitive(""))))
             }
-            lowered.contains("go home") || lowered.contains("press home") || lowered.contains("go to home") -> {
-                ToolCall("go_home", JsonObject(emptyMap()))
+            lowered in setOf("go home", "press home", "go to home") -> {
+                ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("go_home"), "target" to JsonPrimitive(""))))
             }
-            lowered.contains("open notification") || lowered.contains("show notification") -> {
-                ToolCall("open_notifications", JsonObject(emptyMap()))
+            lowered in setOf("open notification", "open notifications", "show notification", "show notifications") -> {
+                ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("open_notifications"), "target" to JsonPrimitive(""))))
             }
-            lowered.contains("open recent") || lowered.contains("show recent") -> {
-                ToolCall("open_recents", JsonObject(emptyMap()))
+            lowered in setOf("open recent", "open recents", "open recent apps", "show recent", "show recents", "show recent apps") -> {
+                ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("open_recents"), "target" to JsonPrimitive(""))))
             }
             lowered.contains("swipe left") -> {
                 ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("swipe"), "target" to JsonPrimitive("left"))))
@@ -347,12 +422,10 @@ object RuleBasedParser {
                 ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("swipe"), "target" to JsonPrimitive("right"))))
             }
             lowered.contains("swipe up") -> {
-                // Use the atomic scroll tool for vertical swipes (prefer over system_control)
-                ToolCall("scroll", JsonObject(mapOf("direction" to JsonPrimitive("up"))))
+                ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("swipe"), "target" to JsonPrimitive("up"))))
             }
             lowered.contains("swipe down") -> {
-                // Use the atomic scroll tool for vertical swipes (prefer over system_control)
-                ToolCall("scroll", JsonObject(mapOf("direction" to JsonPrimitive("down"))))
+                ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive("swipe"), "target" to JsonPrimitive("down"))))
             }
             // Long press on a text element — extract the target text, not coordinates
             lowered.contains("long press") || lowered.contains("long tap") -> {
@@ -381,7 +454,6 @@ object RuleBasedParser {
             // Note deletion — checked BEFORE create_note so negation verbs route to delete,
             // and delete_all_notes / delete_notes become reachable offline (not only via LLM).
             (lowered.contains("delete") || lowered.contains("remove") ||
-                lowered.contains("cancel") || lowered.contains("close") ||
                 lowered.contains("clear") || lowered.contains("erase")) &&
                 (lowered.contains("note") || lowered.contains("notes")) -> {
                 if (lowered.contains("all")) {
@@ -417,7 +489,8 @@ object RuleBasedParser {
             }
 
             // Browser & Search
-            lowered.contains("open chrome") || lowered.contains("launch browser") -> {
+            lowered.contains("open chrome") || lowered.contains("launch browser") ||
+            isSpokenChromeLaunch(lowered) -> {
                 ToolCall("open_chrome", JsonObject(emptyMap()))
             }
 
@@ -429,9 +502,9 @@ object RuleBasedParser {
             // "search for cats", "search cats", and "google cats". Excludes anything mentioning
             // "note" so "search my notes for X" is not hijacked into a browser open (note search
             // is handled by the LLM/web_search path). URL-encodes the query.
-            (lowered.contains("search for") && !lowered.contains("note")) ||
+            (lowered.contains("search for") ||
                 (lowered.startsWith("search ") && !lowered.contains("note")) ||
-                (lowered.startsWith("google ") && !lowered.contains("note")) -> {
+                lowered.startsWith("google ")) && !lowered.contains("note") -> {
                 val query = lowered
                     .substringAfter("search for")
                     .substringAfter("search")
@@ -467,6 +540,7 @@ object RuleBasedParser {
      */
     private fun parseLocalizedCoreCommand(command: String): ToolCall? {
         fun hasAny(vararg phrases: String) = phrases.any(command::contains)
+        fun isPhrase(vararg phrases: String) = phrases.any { command.trim().trimEnd('.', '!', '?', '।').equals(it, ignoreCase = true) }
         fun openApp(name: String, packageName: String) = ToolCall(
             "open_app",
             JsonObject(mapOf(
@@ -476,13 +550,13 @@ object RuleBasedParser {
         )
 
         return when {
-            hasAny(
+            isPhrase(
                 "ब्लाइंड एड बंद करो", "ब्लाइंड मोड बंद करो", "दृष्टि सहायता बंद करो",
                 "ব্লাইন্ড এইড বন্ধ করো", "பிளைண்ட் எய்டை நிறுத்து",
                 "బ్లైండ్ ఎయిడ్ ఆపు", "ಬ್ಲೈಂಡ್ ಏಡ್ ನಿಲ್ಲಿಸು", "ബ്ലൈൻഡ് എയ്ഡ് നിർത്തുക"
             ) -> ToolCall("deactivate_blind_aid", JsonObject(emptyMap()))
 
-            hasAny(
+            isPhrase(
                 "ब्लाइंड एड चालू करो", "ब्लाइंड मोड शुरू करो", "ब्लाइंड मोड चालू करो",
                 "ब्लाइंड व्यू चालू करो", "नेत्रहीन मोड चालू करो",
                 "दृष्टि सहायता चालू करो", "सामने क्या है", "वस्तुओं का पता लगाओ",
@@ -493,18 +567,18 @@ object RuleBasedParser {
                 "ബ്ലൈൻഡ് എയ്ഡ് തുടങ്ങുക", "എന്റെ മുന്നിൽ എന്താണ്"
             ) -> ToolCall("detect_objects", JsonObject(emptyMap()))
 
-            hasAny(
+            isPhrase(
                 "स्क्रीन पढ़ो", "स्क्रीन का टेक्स्ट पढ़ो", "স্ক্রিন পড়ো",
                 "திரையை படி", "ஸ்கிரீனை படி", "స్క్రీన్ చదువు", "ಪರದೆಯನ್ನು ಓದು",
                 "ಸ್ಕ್ರೀನ್ ಓದು", "സ്ക്രീൻ വായിക്കുക"
             ) -> ToolCall("read_screen", JsonObject(emptyMap()))
 
-            hasAny(
+            isPhrase(
                 "कैमरा खोलो", "ক্যামেরা খোলো", "கேமராவை திற", "కెమెరా తెరువు",
                 "ಕ್ಯಾಮೆರಾ ತೆರೆಯಿರಿ", "ക്യാമറ തുറക്കുക"
             ) -> ToolCall("open_camera", JsonObject(emptyMap()))
 
-            hasAny(
+            isPhrase(
                 "कैलेंडर खोलो", "ক্যালেন্ডার খোলো", "காலெண்டரை திற", "క్యాలెండర్ తెరువు",
                 "ಕ್ಯಾಲೆಂಡರ್ ತೆರೆಯಿರಿ", "കലണ്ടർ തുറക്കുക"
             ) -> ToolCall("open_calendar", JsonObject(emptyMap()))
@@ -512,15 +586,14 @@ object RuleBasedParser {
             command.contains("कैलेंडर") &&
                 hasAny("जोड़ो", "बनाओ", "लगाओ", "रिमाइंडर") -> {
                 val details = CalendarCommandParser.parse(command)
-                ToolCall("create_calendar_event", JsonObject(mapOf(
+                ToolCall("open_calendar_insert", JsonObject(mapOf(
                     "title" to JsonPrimitive(details.title),
-                    "date" to JsonPrimitive(""),
                     "start_time" to JsonPrimitive(details.startTimeIso.orEmpty()),
                     "end_time" to JsonPrimitive(details.endTimeIso.orEmpty())
                 )))
             }
 
-            hasAny("जीमेल खोलो", "ईमेल खोलो", "इनबॉक्स खोलो", "मेल खोलो") ->
+            isPhrase("जीमेल खोलो", "ईमेल खोलो", "इनबॉक्स खोलो", "मेल खोलो") ->
                 openApp("gmail", "com.google.android.gm")
 
             (command.contains("ईमेल") || command.contains("मेल")) &&
@@ -546,24 +619,24 @@ object RuleBasedParser {
                     .ifBlank { command.substringAfter("मैसेज", "") }
                     .ifBlank { command.substringAfter("संदेश", "") }
                     .trim()
-                ToolCall("draft_whatsapp_message", JsonObject(mapOf(
-                    "contact_name" to JsonPrimitive(number.ifBlank { "" }),
+                ToolCall("send_whatsapp", JsonObject(mapOf(
+                    "number" to JsonPrimitive(number),
                     "message" to JsonPrimitive(message)
                 )))
             }
 
-            hasAny(
+            isPhrase(
                 "व्हाट्सऐप खोलो", "व्हाट्सएप खोलो", "হোয়াটসঅ্যাপ খোলো",
                 "வாட்ஸ்அப்பை திற", "వాట్సాప్ తెరువు", "ವಾಟ್ಸಾಪ್ ತೆರೆಯಿರಿ",
                 "വാട്സ്ആപ്പ് തുറക്കുക"
             ) -> openApp("whatsapp", "com.whatsapp")
 
-            hasAny(
+            isPhrase(
                 "क्रोम खोलो", "ক্রোম খোলো", "குரோமை திற", "క్రోమ్ తెరువు",
                 "ಕ್ರೋಮ್ ತೆರೆಯಿರಿ", "ക്രോം തുറക്കുക"
             ) -> ToolCall("open_chrome", JsonObject(emptyMap()))
 
-            hasAny(
+            isPhrase(
                 "सिक्योर ब्राउज़र खोलो", "সিকিউর ব্রাউজার খোলো",
                 "பாதுகாப்பான உலாவியை திற", "సెక్యూర్ బ్రౌజర్ తెరువు",
                 "ಸುರಕ್ಷಿತ ಬ್ರೌಸರ್ ತೆರೆಯಿರಿ", "സുരക്ഷിത ബ്രൗസർ തുറക്കുക"

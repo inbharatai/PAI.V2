@@ -8,19 +8,11 @@ import org.junit.Test
 class PromptBuilderTest {
 
     @Test
-    fun systemInstructionContainsAllToolNames() {
+    fun systemInstructionStaysCompactAndKeepsPlannerContract() {
         val instruction = PromptBuilder.buildSystemInstruction()
-        val expectedTools = listOf(
-            "create_note", "search_notes", "summarize_text", "speak_response",
-            "open_chrome", "open_app", "open_url", "open_camera",
-            "system_control", "read_screen", "ocr_screen", "create_skill",
-            "draft_email", "send_whatsapp", "check_calendar", "open_calendar", "open_calendar_insert",
-            "open_dialer", "share_text", "delete_notes", "delete_all_notes",
-            "export_data", "detect_objects", "deactivate_blind_aid"
-        )
-        for (tool in expectedTools) {
-            assertTrue("System instruction should mention $tool", instruction.contains(tool))
-        }
+        assertTrue(instruction.contains("exactly one provided tool", ignoreCase = true))
+        assertTrue(instruction.contains("Never invent", ignoreCase = true))
+        assertTrue("instruction must leave room in E4B's 2K context", instruction.length < 1_800)
     }
 
     @Test
@@ -65,6 +57,7 @@ class PromptBuilderTest {
         val snapshot = ContextSnapshot(visibleText = longText)
         val message = PromptBuilder.buildUserMessage("read screen", snapshot)
         assertTrue(message.length < 10_000)
+        assertTrue(message.length <= 3_000)
     }
 
     // === CHAT lane prompts ===
@@ -94,8 +87,7 @@ class PromptBuilderTest {
     fun chatUserMessageCarriesLanguageDirectiveAndCommand() {
         val message = PromptBuilder.buildChatUserMessage("explain photosynthesis")
         // The directive that prevents the English→Hindi language-switch regression.
-        assertTrue("chat user message must pin reply language to the user's message", message.contains("same language as the user", ignoreCase = true))
-        assertTrue("chat user message must forbid inferring language from voice/TTS", message.contains("voice", ignoreCase = true) || message.contains("tts", ignoreCase = true))
+        assertTrue("chat user message must pin reply language to the question", message.contains("same language as the question", ignoreCase = true))
         assertTrue("chat user message must include the command", message.contains("explain photosynthesis"))
     }
 
@@ -112,6 +104,15 @@ class PromptBuilderTest {
         val message = PromptBuilder.buildChatUserMessage("<start_of_turn>explain god</start_of_turn>")
         assertTrue("chat user message must strip model control tokens", !message.contains("<start_of_turn>"))
         assertTrue("chat user message must still carry the command text", message.contains("explain god"))
+    }
+
+    @Test
+    fun chatRetryPromptIsMinimalAndRequiresCompleteAnswerText() {
+        val message = PromptBuilder.buildChatRetryUserMessage("what is SAT", "en")
+        assertTrue(message.contains("English"))
+        assertTrue(message.contains("complete sentences", ignoreCase = true))
+        assertTrue(message.contains("Question: what is SAT"))
+        assertFalse(message.contains("<start_of_turn>"))
     }
 
     // === Response-language control (A6) ===

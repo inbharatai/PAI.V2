@@ -34,4 +34,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
+    // Same pinned test dependencies as app; exercise generated Room against SQLite.
+    testImplementation("org.robolectric:robolectric:4.12")
+    testImplementation("androidx.test:core:1.5.0")
 }

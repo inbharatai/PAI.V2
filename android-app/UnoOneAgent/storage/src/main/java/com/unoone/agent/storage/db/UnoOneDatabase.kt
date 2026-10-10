@@ -32,10 +32,19 @@ import com.unoone.agent.storage.entity.SkillEntity
         PendingWriteEntity::class,
         ConversationTurnEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class UnoOneDatabase : RoomDatabase() {
+    /** Install on EVERY builder (production, encrypted conversion, tests), not opt-in DI wiring.
+     * Room 2.8 configuration copy preserves factory, executors, recovery and migration policy.
+     */
+    @Suppress("RestrictedApi")
+    override fun init(configuration: androidx.room.DatabaseConfiguration) {
+        configuration.migrationContainer.addMigrations(MIGRATION_6_7)
+        super.init(configuration.copy(callbacks = configuration.callbacks.orEmpty() + OUTBOX_CALLBACK))
+    }
+
     abstract fun noteDao(): NoteDao
     abstract fun skillDao(): SkillDao
     abstract fun memoryDao(): MemoryDao
@@ -46,6 +55,25 @@ abstract class UnoOneDatabase : RoomDatabase() {
     abstract fun conversationTurnDao(): ConversationTurnDao
 
     companion object {
+        private val OUTBOX_CALLBACK = object : RoomDatabase.Callback() {
+            override fun onCreate(db: SupportSQLiteDatabase) { VaultOutboxSchema.install(db) }
+            override fun onOpen(db: SupportSQLiteDatabase) { VaultOutboxSchema.install(db) }
+        }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE notes ADD COLUMN vaultRevision INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE pending_writes ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE pending_writes ADD COLUMN origin TEXT NOT NULL DEFAULT 'HISTORICAL'")
+                db.execSQL("ALTER TABLE pending_tombstones ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE pending_tombstones ADD COLUMN origin TEXT NOT NULL DEFAULT 'HISTORICAL'")
+                // Old pending IDs may name records written before a crash. Never call them fresh.
+                db.execSQL("UPDATE pending_writes SET revision = CASE recordKind WHEN 'MEMORY' THEN COALESCE((SELECT vaultRevision + 1 FROM memories WHERE id = localId),1) WHEN 'ENVOBS' THEN COALESCE((SELECT vaultRevision + 1 FROM memories WHERE id = localId),1) WHEN 'SKILL' THEN COALESCE((SELECT vaultRevision + 1 FROM skills WHERE id = localId),1) ELSE 1 END")
+                VaultOutboxSchema.install(db)
+                VaultOutboxSchema.seedUnlinked(db)
+            }
+        }
+
         /**
          * Migration from v1 (no indexes) to v2 (indexes on title, tags, createdAt, etc.).
          * Safe to run on existing databases — CREATE INDEX IF NOT EXISTS is idempotent.

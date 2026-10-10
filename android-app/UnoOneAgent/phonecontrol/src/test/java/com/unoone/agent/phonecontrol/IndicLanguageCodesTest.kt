@@ -5,9 +5,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * JVM-unit test for the [INDIC_LANGUAGE_CODES] set that drives language-aware OCR selection.
- * M15: describe_scene missing Indic script OCR — the set determines which voice languages
- * trigger the Devanagari recognizer alongside Latin.
+ * JVM compatibility test for the retained [INDIC_LANGUAGE_CODES] metadata.
+ * Native OCR now always uses bundled Latin/Devanagari; these legacy aliases must
+ * remain available, but do not prove recognition quality for other Indic scripts.
  */
 class IndicLanguageCodesTest {
 

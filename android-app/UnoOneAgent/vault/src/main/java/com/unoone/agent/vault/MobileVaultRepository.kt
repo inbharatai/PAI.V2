@@ -2,14 +2,16 @@ package com.unoone.agent.vault
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import org.bouncycastle.crypto.generators.Argon2BytesGenerator
-import org.bouncycastle.crypto.params.Argon2Parameters
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -29,7 +31,10 @@ interface VaultIO {
 class VaultSession internal constructor(
     val vaultId: String,
     val masterKey: ByteArray,
-) {
+) : AutoCloseable {
+    @Volatile private var closed = false
+    internal fun requireOpen() { check(!closed) { "Vault session is locked" } }
+    override fun close() { closed = true; masterKey.fill(0) }
     override fun toString(): String = "VaultSession(vaultId=$vaultId)" // never the key
 }
 
@@ -74,47 +79,86 @@ class MobileVaultRepository(private val io: VaultIO) {
      *         corrupt envelope — never silently succeeds.
      */
     fun unlock(password: ByteArray): VaultSession {
+        require(password.size in 1..4096) { "Password size is invalid" }
         val (path, header) = chooseHeader()
         val obj = header.jsonObject
-
+        require(obj.getValue("version").jsonPrimitive.intOrNull == 1) { "Unsupported vault header version" }
         val kdf = obj.getValue("kdf_params").jsonObject
-        val memoryKb = kdf.getValue("memory_kib").jsonPrimitive.intOrNull
-            ?: throw VaultAccessException("header kdf_params.memory_kib missing")
-        val iterations = kdf.getValue("iterations").jsonPrimitive.intOrNull
-            ?: throw VaultAccessException("header kdf_params.iterations missing")
-        val parallelism = kdf.getValue("parallelism").jsonPrimitive.intOrNull
-            ?: throw VaultAccessException("header kdf_params.parallelism missing")
-
-        // The vault header stores salt/keys/nonces as HEX (see vault-core
-        // header.rs save format), not base64 as the code comment once said.
-        val salt = hex(obj.getValue("salt").jsonPrimitive.content)
-        val kek = deriveKek(
-            password,
-            salt = salt,
-            memoryKb = memoryKb,
-            iterations = iterations,
-            parallelism = parallelism,
-        )
-
-        // HMAC verification BEFORE the master key is ever unwrapped: a
-        // tampered header must fail here, not after keys exist in memory.
-        val storedHmac = obj.getValue("header_hmac").jsonPrimitive.content
-        val computed = hmacSha256Hex(kek, canonicalHeaderJson(obj, forHmac = true))
-        if (!constantTimeEquals(storedHmac, computed)) {
-            kek.fill(0)
-            throw VaultAccessException("header HMAC verification failed ($path) — tampered or wrong password")
+        // Untrusted headers must not control unbounded Argon2 allocation/work.
+        require(kdf.getValue("memory_kib").jsonPrimitive.intOrNull == VaultCrypto.ARGON2_MEMORY_KIB &&
+            kdf.getValue("iterations").jsonPrimitive.intOrNull == VaultCrypto.ARGON2_ITERATIONS &&
+            kdf.getValue("parallelism").jsonPrimitive.intOrNull == VaultCrypto.ARGON2_PARALLELISM &&
+            kdf.getValue("output_len").jsonPrimitive.intOrNull == VaultCrypto.KEY_LEN) {
+            "Unsupported vault KDF; original files retained"
         }
-
+        val id = obj.getValue("vault_id").jsonPrimitive.content
+        require(java.util.UUID.fromString(id).toString() == id) { "Invalid vault UUID" }
+        val salt = hex(obj.getValue("salt").jsonPrimitive.content)
         val wrapped = hex(obj.getValue("wrapped_master_key").jsonPrimitive.content)
         val wrapNonce = hex(obj.getValue("wrap_nonce").jsonPrimitive.content)
-        val master = try {
-            VaultCrypto.unwrapMasterKeyWithAad(kek, wrapped, wrapNonce)
-        } catch (e: Exception) {
-            kek.fill(0)
-            throw VaultAccessException("master key unwrap failed — wrong password or corrupt header", e)
+        require(salt.size == 32 && wrapped.size == 48 && wrapNonce.size == 24) { "Invalid header field length" }
+        val kek = deriveKek(password, salt, VaultCrypto.ARGON2_MEMORY_KIB,
+            VaultCrypto.ARGON2_ITERATIONS, VaultCrypto.ARGON2_PARALLELISM)
+        try {
+            val storedHmac = obj.getValue("header_hmac").jsonPrimitive.content
+            val computed = hmacSha256Hex(kek, canonicalHeaderJson(obj, forHmac = true))
+            if (!constantTimeEquals(storedHmac, computed))
+                throw VaultAccessException("header authentication failed ($path)")
+            val master = VaultCrypto.unwrapMasterKeyWithAad(kek, wrapped, wrapNonce)
+            require(master.size == VaultCrypto.KEY_LEN)
+            return VaultSession(id, master)
+        } finally { kek.fill(0) }
+    }
+
+    /** Create only in an EMPTY private root. Never resets, adopts, or overwrites existing material.
+     * Same Rust VaultHeader v1 format; existing spec Argon2id + wrap/HMAC, no new crypto.
+     * A password may be a user-chosen long phrase. Recovery words are NOT implemented.
+     */
+    fun create(password: ByteArray): VaultSession {
+        require(password.size in 12..4096) { "Use a password or phrase of at least 12 UTF-8 bytes" }
+        require(io.list("").isEmpty() && !io.exists(HEADER_REL) && !io.exists(HEADER_B_REL)) {
+            "Vault root is not empty; unlock or request recovery, never reset"
         }
-        kek.fill(0)
-        return VaultSession(obj.getValue("vault_id").jsonPrimitive.content, master)
+        val random = java.security.SecureRandom()
+        fun randomBytes(size: Int) = ByteArray(size).also(random::nextBytes)
+        val id = java.util.UUID.randomUUID().toString()
+        val salt = randomBytes(32)
+        val nonce = randomBytes(24)
+        val master = randomBytes(32)
+        var transferred = false
+        var kek: ByteArray? = null
+        try {
+            kek = deriveKek(password, salt, VaultCrypto.ARGON2_MEMORY_KIB,
+                VaultCrypto.ARGON2_ITERATIONS, VaultCrypto.ARGON2_PARALLELISM)
+            val wrapped = VaultCrypto.wrapMasterKeyWithAad(kek, master, nonce)
+            val now = java.time.Instant.now().toString()
+            val header = buildJsonObject {
+                put("version", 1); put("vault_id", id)
+                put("kdf_params", buildJsonObject {
+                    put("memory_kib", VaultCrypto.ARGON2_MEMORY_KIB)
+                    put("iterations", VaultCrypto.ARGON2_ITERATIONS)
+                    put("parallelism", VaultCrypto.ARGON2_PARALLELISM)
+                    put("output_len", 32)
+                })
+                put("salt", VaultCrypto.run { salt.toHex() })
+                put("wrapped_master_key", VaultCrypto.run { wrapped.toHex() })
+                put("wrap_nonce", VaultCrypto.run { nonce.toHex() })
+                put("header_hmac", ""); put("recovery_enabled", false)
+                put("wrapped_master_key_recovery", JsonNull)
+                put("recovery_wrap_nonce", JsonNull); put("recovery_salt", JsonNull)
+                put("created_at", now); put("updated_at", now)
+                put("generation", 1); put("committed", true)
+            }
+            val signed = JsonObject(header + ("header_hmac" to
+                JsonPrimitive(hmacSha256Hex(kek, canonicalHeaderJson(header, true)))))
+            // One committed atomic header is enough. Never create a second copy with a new identity.
+            io.write(HEADER_REL, canonicalHeaderJson(signed, false))
+            transferred = true
+            return VaultSession(id, master)
+        } finally {
+            kek?.fill(0)
+            if (!transferred) master.fill(0)
+        }
     }
 
     private fun chooseHeader(): Pair<String, kotlinx.serialization.json.JsonElement> {
@@ -125,7 +169,9 @@ class MobileVaultRepository(private val io: VaultIO) {
 
         fun parse(path: String): kotlinx.serialization.json.JsonElement? =
             try {
-                Json.parseToJsonElement(String(io.read(path), Charsets.UTF_8))
+                val bytes = io.read(path)
+                require(bytes.size <= 64 * 1024) { "Vault header exceeds bound" }
+                Json.parseToJsonElement(String(bytes, Charsets.UTF_8))
             } catch (_: Exception) {
                 null
             }
@@ -148,22 +194,11 @@ class MobileVaultRepository(private val io: VaultIO) {
     }
 
     private fun deriveKek(
-        password: ByteArray,
-        salt: ByteArray,
-        memoryKb: Int,
-        iterations: Int,
-        parallelism: Int,
+        password: ByteArray, salt: ByteArray, memoryKb: Int, iterations: Int, parallelism: Int,
     ): ByteArray {
-        val params = Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)
-            .withVersion(Argon2Parameters.ARGON2_VERSION_13)
-            .withIterations(iterations)
-            .withMemoryAsKB(memoryKb)
-            .withParallelism(parallelism)
-            .withSalt(salt)
-            .build()
-        val out = ByteArray(VaultCrypto.KEY_LEN)
-        Argon2BytesGenerator().apply { init(params) }.generateBytes(password, out)
-        return out
+        require(memoryKb == VaultCrypto.ARGON2_MEMORY_KIB &&
+            iterations == VaultCrypto.ARGON2_ITERATIONS && parallelism == VaultCrypto.ARGON2_PARALLELISM)
+        return VaultCrypto.deriveKek(password, salt)
     }
 
     // ------------------------------------------------------------------
@@ -178,6 +213,7 @@ class MobileVaultRepository(private val io: VaultIO) {
      * secret (the ciphertext is).
      */
     fun listRecordMetadata(session: VaultSession): List<Map<String, Any?>> {
+        session.requireOpen()
         val names = try {
             io.list(RECORDS_DIR)
         } catch (_: Exception) {
@@ -203,6 +239,8 @@ class MobileVaultRepository(private val io: VaultIO) {
 
     /** Read + decrypt a record. Verifies canonical AAD before decrypting. */
     fun readRecord(session: VaultSession, recordId: String): Pair<Map<String, Any?>, ByteArray> {
+        session.requireOpen()
+        require(java.util.UUID.fromString(recordId).toString() == recordId)
         val path = "$RECORDS_DIR/$recordId.enc.json"
         val envelope = try {
             Json.parseToJsonElement(String(io.read(path), Charsets.UTF_8)).jsonObject
@@ -214,11 +252,11 @@ class MobileVaultRepository(private val io: VaultIO) {
         val fields = metadata.entries.associate { (k, v) -> k to jsonValueToKotlin(v) }
         val aad = VaultCrypto.canonicalAad(fields)
 
-        val domainKey = VaultCrypto.deriveRecordDomainKey(session.masterKey)
         // Record envelopes use HEX for nonce/ciphertext (vault-core write_record),
         // matching associated_data. Header fields are hex too (see unlock).
         val nonce = hex(envelope.getValue("nonce").jsonPrimitive.content)
         val ciphertext = hex(envelope.getValue("encrypted_content").jsonPrimitive.content)
+        val domainKey = VaultCrypto.deriveRecordDomainKey(session.masterKey)
         val pts = try {
             when (nonce.size) {
                 // AES-256-GCM (new records) and legacy XChaCha20 remain readable.
@@ -230,7 +268,7 @@ class MobileVaultRepository(private val io: VaultIO) {
                 is VaultAccessException -> throw e
                 else -> throw VaultAccessException("record decrypt failed (aad_version=$aadVersion)", e)
             }
-        }
+        } finally { domainKey.fill(0) }
         return fields to pts
     }
 
@@ -250,16 +288,19 @@ class MobileVaultRepository(private val io: VaultIO) {
         content: ByteArray,
         nonce: ByteArray? = null,
     ): String {
+        session.requireOpen()
+        require(content.size <= 4 * 1024 * 1024) { "Record too large" }
         val recordId = fields["record_id"] as? String
             ?: throw VaultAccessException("record_id required in fields")
+        require(java.util.UUID.fromString(recordId).toString() == recordId)
         val aad = VaultCrypto.canonicalAad(fields)
-        val domainKey = VaultCrypto.deriveRecordDomainKey(session.masterKey)
         val actualNonce = nonce?.also {
             require(it.size == 12) { "injected nonce must be 12 bytes" }
         } ?: java.security.SecureRandom().let { r ->
             ByteArray(12).also { r.nextBytes(it) }
         }
-        val ciphertext = VaultCrypto.encryptRecords(domainKey, actualNonce, content, aad)
+        val domainKey = VaultCrypto.deriveRecordDomainKey(session.masterKey)
+        val ciphertext = try { VaultCrypto.encryptRecords(domainKey, actualNonce, content, aad) } finally { domainKey.fill(0) }
         val envelopeJson = buildString {
             append("{\"metadata\":").append(String(VaultCrypto.canonicalAad(fields), Charsets.UTF_8))
             append(",\"encrypted_content\":\"").append(VaultCrypto.run { ciphertext.toHex() }).append('"')
@@ -273,7 +314,8 @@ class MobileVaultRepository(private val io: VaultIO) {
 
     /** Tombstone: rewrite metadata with tombstone=true + deleted_at, revision+1. */
     fun tombstoneRecord(session: VaultSession, recordId: String, deletedAtIso: String) {
-        val (fields, _) = readRecord(session, recordId)
+        val (fields, oldContent) = readRecord(session, recordId)
+        oldContent.fill(0)
         val updated = fields.toMutableMap()
         updated["tombstone"] = true
         updated["deleted_at"] = deletedAtIso
@@ -287,10 +329,11 @@ class MobileVaultRepository(private val io: VaultIO) {
     private fun writeExistingRecord(session: VaultSession, fields: Map<String, Any?>, content: ByteArray) {
         val recordId = fields["record_id"] as? String
             ?: throw VaultAccessException("record_id required")
+        require(java.util.UUID.fromString(recordId).toString() == recordId)
         val aad = VaultCrypto.canonicalAad(fields)
         val domainKey = VaultCrypto.deriveRecordDomainKey(session.masterKey)
         val nonce = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
-        val ciphertext = VaultCrypto.encryptRecords(domainKey, nonce, content, aad)
+        val ciphertext = try { VaultCrypto.encryptRecords(domainKey, nonce, content, aad) } finally { domainKey.fill(0) }
         val envelopeJson = buildString {
             append("{\"metadata\":").append(String(VaultCrypto.canonicalAad(fields), Charsets.UTF_8))
             append(",\"encrypted_content\":\"").append(VaultCrypto.run { ciphertext.toHex() }).append('"')
@@ -391,7 +434,12 @@ class MobileVaultRepository(private val io: VaultIO) {
 
     // (Dead base64 helpers removed — every vault field is HEX on disk; see the
     // header/record format notes above. hex() below is the only codec needed.)
-    private fun hex(s: String): ByteArray = s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    private fun hex(s: String): ByteArray {
+        require(s.length % 2 == 0 && s.length <= 32 * 1024 * 1024 && s.all { it in "0123456789abcdefABCDEF" })
+        return ByteArray(s.length / 2) { index ->
+            ((s[index * 2].digitToInt(16) shl 4) or s[index * 2 + 1].digitToInt(16)).toByte()
+        }
+    }
 }
 
 /** Every vault failure mode a caller can act on — never swallowed. */

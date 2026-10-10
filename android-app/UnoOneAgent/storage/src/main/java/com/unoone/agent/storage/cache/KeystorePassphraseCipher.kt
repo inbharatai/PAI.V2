@@ -17,7 +17,7 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * Blob layout: 12-byte GCM nonce || ciphertext+tag. GCM authenticates, so a
  * tampered blob fails to decrypt (throws), which CacheKeyManager converts
- * into a cache RESET.
+ * into a recovery refusal without replacing any key.
  */
 class KeystorePassphraseCipher(
     private val alias: String = DEFAULT_ALIAS,
@@ -34,11 +34,14 @@ class KeystorePassphraseCipher(
         val cipher = Cipher.getInstance(TRANSFORM)
         cipher.init(
             Cipher.DECRYPT_MODE,
-            obtainKey(),
+            existingKey() ?: throw IllegalStateException("Original Keystore key unavailable"),
             GCMParameterSpec(TAG_BITS, blob, 0, IV_LEN),
         )
         return cipher.doFinal(blob, IV_LEN, blob.size - IV_LEN)
     }
+
+    private fun existingKey(): SecretKey? =
+        KeyStore.getInstance(KEYSTORE).apply { load(null) }.getKey(alias, null) as? SecretKey
 
     private fun obtainKey(): SecretKey {
         val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }

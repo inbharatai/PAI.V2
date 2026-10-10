@@ -8,8 +8,14 @@ import androidx.room.Update
 import com.unoone.agent.storage.entity.NoteEntity
 import kotlinx.coroutines.flow.Flow
 
+data class BoundedNoteSnippet(val title: String, val content: String)
+
 @Dao
 interface NoteDao {
+    /** Bounded projection: no full entity/body crosses the SQLite cursor boundary. Literal search. */
+    @Query("SELECT substr(title,1,256) AS title, substr(content,1,2048) AS content FROM notes WHERE length(:query) BETWEEN 1 AND 4000 AND (instr(lower(title),lower(:query)) > 0 OR instr(lower(content),lower(:query)) > 0 OR instr(lower(tags),lower(:query)) > 0) ORDER BY createdAt DESC LIMIT 50")
+    suspend fun searchBounded(query: String): List<BoundedNoteSnippet>
+
     @Insert
     suspend fun insert(note: NoteEntity): Long
 
@@ -50,7 +56,7 @@ interface NoteDao {
      * in existence and must survive the vault going away — used by
      * [com.unoone.agent.storage.cache.VaultCacheLifecycle.clearOnVaultDisconnect].
      */
-    @Query("DELETE FROM notes WHERE vaultRecordId IS NOT NULL")
+    @Query("DELETE FROM notes WHERE vaultRecordId IS NOT NULL AND id NOT IN (SELECT localId FROM pending_writes WHERE recordKind IN ('NOTE'))")
     suspend fun deleteSynced(): Int
 
     /** Cache eviction: deletes notes older than [cutoff] epoch millis. Returns rows deleted. */
@@ -63,7 +69,7 @@ interface NoteDao {
      * ONLY copy in existence and are deliberately excluded — used by
      * [com.unoone.agent.storage.cache.VaultCacheLifecycle.evictExpired].
      */
-    @Query("DELETE FROM notes WHERE createdAt < :cutoff AND vaultRecordId IS NOT NULL")
+    @Query("DELETE FROM notes WHERE createdAt < :cutoff AND vaultRecordId IS NOT NULL AND id NOT IN (SELECT localId FROM pending_writes WHERE recordKind IN ('NOTE'))")
     suspend fun deleteOlderThanSynced(cutoff: Long): Int
 
     /** Link a cache row to the vault record it was written to. */
@@ -71,7 +77,7 @@ interface NoteDao {
     suspend fun setVaultRecordId(id: Long, vaultRecordId: String): Int
 
     /** Rows not yet written to the vault (created while detached/locked). */
-    @Query("SELECT * FROM notes WHERE vaultRecordId IS NULL ORDER BY id ASC")
+    @Query("SELECT * FROM notes WHERE (vaultRecordId IS NULL OR id IN (SELECT localId FROM pending_writes WHERE recordKind IN ('NOTE'))) ORDER BY id ASC")
     suspend fun notSynced(): List<NoteEntity>
 
     /** Every note, one-shot — used to capture vault links before bulk deletes. */

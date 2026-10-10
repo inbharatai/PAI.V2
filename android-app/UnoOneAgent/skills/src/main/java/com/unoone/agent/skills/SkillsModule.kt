@@ -17,8 +17,10 @@ import kotlinx.serialization.serializer
  * this module free of vault coupling, like MemoryModule). Built-in seeding
  * and learned suggestions fire it too — a skill the user approved is user
  * data and belongs in the canonical store.
- * @param onSkillDeleted invoked before the local row is deleted (the vault
- * link is unrecoverable afterwards) so the vault record can be tombstoned.
+ * @param onSkillDeleted invoked AFTER the local row is deleted. The vault link
+ * is not lost: the storage layer's BEFORE DELETE trigger captured the linked
+ * and pending vault identities as durable tombstones inside the delete
+ * transaction, so this callback only wakes the drain.
  * @param onSuggestionCreated invoked when the usage counter crosses the
  * threshold and a DISABLED suggestion is created — the epistemic moment a
  * hypothesis comes to exist (P1-C env learning). Never fires for built-ins.
@@ -72,10 +74,16 @@ class SkillsModule(
         skillDao.getById(rowId)?.let { onSkillSaved(it) }
     }
 
-    /** Idempotently installs a minimal set of immediately useful, fully safety-routed routines. */
+    /**
+     * Idempotently installs and refreshes source-controlled built-ins. The user's enabled/disabled
+     * choice is preserved, while new bilingual triggers and corrected safe steps reach existing
+     * installations instead of only fresh installs.
+     */
     suspend fun ensureBuiltIns() {
+        val existingByName = skillDao.getAll().first().associateBy { it.name }
         BuiltInSkillCatalog.definitions.forEach { definition ->
-            if (skillDao.getAll().first().none { it.name == definition.name }) {
+            val existing = existingByName[definition.name]
+            if (existing == null) {
                 runCatching {
                     saveSkill(
                         name = definition.name,
@@ -85,6 +93,30 @@ class SkillsModule(
                         enabled = true
                     )
                 }.onFailure { Logger.w("Skills: could not seed '${definition.name}': ${it.message}") }
+            } else {
+                val legacy = LegacyBuiltInSkillCatalog.definitions.firstOrNull { it.name == existing.name }
+                // Names alone never establish ownership. Do not overwrite user-authored/edited
+                // routines or a standalone installation's newer definition; enabled choice stays.
+                if (legacy == null || existing.triggerPhrases != legacy.triggers.joinToString(",") ||
+                    getSkillSteps(existing) != legacy.steps || existing.riskLevel != legacy.riskLevel) return@forEach
+                val refreshed = existing.copy(
+                    triggerPhrases = definition.triggers.distinct().joinToString(","),
+                    stepsJson = json.encodeToString(
+                        ListSerializer(serializer<String>()),
+                        definition.steps
+                    ),
+                    riskLevel = definition.riskLevel.coerceIn(0, 3),
+                    updatedAt = System.currentTimeMillis()
+                )
+                if (
+                    refreshed.triggerPhrases != existing.triggerPhrases ||
+                    refreshed.stepsJson != existing.stepsJson ||
+                    refreshed.riskLevel != existing.riskLevel
+                ) {
+                    skillDao.update(refreshed)
+                    onSkillSaved(refreshed)
+                    Logger.i("Skills: refreshed built-in '${definition.name}'")
+                }
             }
         }
     }
@@ -119,35 +151,49 @@ class SkillsModule(
         Logger.i("Skills: created disabled learned suggestion '${suggestion.name}'")
         val created = skillDao.getAll().first().firstOrNull { it.name == suggestion.name }
         if (created != null) {
-            // P1-C: the epistemic hypothesis is recorded the moment it exists.
-            // It stays device-local and the suggestion stays disabled — only
-            // the user's enable action can ever promote it.
+            // P1-C: the epistemic hypothesis is recorded the moment it exists. It stays
+            // device-local and the suggestion stays DISABLED — saving is not approval; only
+            // the user's explicit enable action (onSkillEnabled) can ever promote it.
             onSuggestionCreated(created, tool, nextCount)
         }
         return created
     }
 
+    /**
+     * Every lifecycle mutation below commits through the DAO, whose SQLite outbox triggers
+     * atomically capture the mirror work inside the SAME transaction. The callbacks are
+     * post-commit wake-ups/semantic events, never the durability mechanism: they receive the
+     * row as committed (re-read), so a stale UI copy cannot report a wrong link or state.
+     */
     suspend fun updateSkill(skill: SkillEntity) {
         skillDao.update(skill)
-        onSkillSaved(skill)
+        onSkillSaved(skillDao.getById(skill.id) ?: skill)
     }
 
     suspend fun disableSkill(skill: SkillEntity) {
         skillDao.update(skill.copy(enabled = false))
-        onSkillSaved(skill.copy(enabled = false))
-        onSkillDisabled(skill)
+        val committed = skillDao.getById(skill.id) ?: skill.copy(enabled = false)
+        onSkillSaved(committed)
+        // Explicit user correction: demotes any environment-learning promotion that was
+        // built on the earlier approval. Local matching already ignores disabled skills.
+        onSkillDisabled(committed)
     }
 
     suspend fun enableSkill(skill: SkillEntity) {
         skillDao.update(skill.copy(enabled = true))
-        onSkillSaved(skill.copy(enabled = true))
-        onSkillEnabled(skill)
+        val committed = skillDao.getById(skill.id) ?: skill.copy(enabled = true)
+        onSkillSaved(committed)
+        // The explicit approval the promotion gate requires — the ONLY path that approves.
+        onSkillEnabled(committed)
     }
 
     suspend fun deleteSkill(skill: SkillEntity) {
         Logger.d("Deleting skill: ${skill.name}")
-        onSkillDeleted(skill) // BEFORE the row is gone — the vault link is unrecoverable after
+        // The BEFORE DELETE trigger captures the linked AND any pending vault identity into
+        // pending_tombstones within this delete transaction, so the link is never lost even
+        // though the row is gone; the callback afterwards only wakes the drain.
         skillDao.delete(skill)
+        onSkillDeleted(skill)
     }
 
     suspend fun findSkillByTrigger(text: String): SkillEntity? {

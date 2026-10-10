@@ -16,5 +16,11 @@ data class PendingTombstoneEntity(
     val vaultRecordId: String,
     val recordKind: String, // "NOTE" | "MEMORY", for diagnostics
     val deletedAtIso: String,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** Captured vault revision. Zero identifies pre-v7 legacy tombstones. */
+    @androidx.room.ColumnInfo(defaultValue = "0")
+    val revision: Int = 0,
+    /** FRESH means minted by this Room outbox, not evidence of a previous vault. */
+    @androidx.room.ColumnInfo(defaultValue = "'HISTORICAL'")
+    val origin: String = "HISTORICAL"
 )

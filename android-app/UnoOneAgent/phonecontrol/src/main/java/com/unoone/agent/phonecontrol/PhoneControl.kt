@@ -341,7 +341,7 @@ class PhoneControl(private val context: Context) {
             if (sanitized.isBlank()) return Result.Error("resolve_contact requires a query")
 
             // Check if the query is already a phone number
-            val stripped = sanitized.replace(Regex("[^\\d+]"), "")
+            val stripped = sanitized.replace(Regex("[\\s()\\-]"), "")
             if (stripped.matches(Regex("^\\+?\\d{8,15}$"))) {
                 return Result.Success(stripped)
             }
@@ -367,7 +367,7 @@ class PhoneControl(private val context: Context) {
             when {
                 matches.isEmpty() -> {
                     // No match found — return the query as-is (may be a number or unrecognized name)
-                    Result.Success(sanitized)
+                    Result.Error("No verified contact match. Provide an exact phone number or resolve the recipient manually.")
                 }
                 matches.size == 1 -> {
                     val (name, number) = matches.first()
@@ -375,11 +375,10 @@ class PhoneControl(private val context: Context) {
                     Result.Success(number)
                 }
                 else -> {
-                    // Multiple matches — pick the best one (exact name match first, then first result)
-                    val exact = matches.firstOrNull { it.first.equals(sanitized, ignoreCase = true) }
-                    val (name, number) = exact ?: matches.first()
-                    Logger.d("PhoneControl: resolved '$query' to '$number' ($name) from ${matches.size} matches")
-                    Result.Success(number)
+                    val exact = matches.filter { it.first.equals(sanitized, ignoreCase = true) }
+                    val numbers = exact.map { it.second }.distinct()
+                    if (numbers.size == 1) Result.Success(numbers.single())
+                    else Result.Error("Ambiguous contact. Review and choose the exact recipient manually.")
                 }
             }
         } catch (e: SecurityException) {
