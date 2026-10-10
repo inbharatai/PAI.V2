@@ -28,22 +28,15 @@ object VoiceResponseLocalizer {
         return when (tool) {
             "open_chrome", "open_app", "open_url", "open_camera", "open_calendar",
             "open_calendar_insert", "open_dialer", "prepare_document_fill",
-            "secure_browser_task", "send_whatsapp",
-            "go_home", "go_back", "open_notifications", "open_recents" -> phrase(lang, Kind.OPENING)
+            "secure_browser_task", "send_whatsapp" -> phrase(lang, Kind.OPENING)
 
-            "draft_email", "share_text",
-            "draft_whatsapp_message" -> phrase(lang, Kind.DRAFT_READY)
-            "create_note", "create_skill", "voice_recording", "export_data",
-            "create_calendar_event", "check_calendar_conflict" ->
+            "draft_email", "share_text" -> phrase(lang, Kind.DRAFT_READY)
+            "create_note", "create_skill", "voice_recording", "export_data" ->
                 phrase(lang, Kind.SAVED)
 
             "delete_notes", "delete_all_notes" -> phrase(lang, Kind.DELETED)
             "detect_objects" -> phrase(lang, Kind.BLIND_ON)
             "deactivate_blind_aid" -> phrase(lang, Kind.BLIND_OFF)
-            "resolve_contact" -> phrase(lang, Kind.COMPLETE)
-            "send_prepared_whatsapp", "click_accessibility_node", "type_into_accessibility_node",
-            "long_press_accessibility_node" -> phrase(lang, Kind.COMPLETE)
-            "scroll" -> phrase(lang, Kind.COMPLETE)
             else -> phrase(lang, Kind.COMPLETE)
         }
     }

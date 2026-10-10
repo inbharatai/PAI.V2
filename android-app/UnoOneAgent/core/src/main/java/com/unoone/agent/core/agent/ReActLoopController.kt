@@ -1,7 +1,5 @@
 package com.unoone.agent.core.agent
 
-import com.unoone.agent.core.model.ModelProfile
-import com.unoone.agent.core.model.ModelProfiles
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.model.ToolCall
 import kotlinx.serialization.json.JsonPrimitive
@@ -21,42 +19,33 @@ import kotlinx.serialization.json.JsonPrimitive
  * JVM. The actual LiteRT-LM multi-turn inference (feeding a `Content.ToolResponse` back into the
  * conversation) lives in [com.unoone.agent.localbrain.GemmaPlanner] and is device-time verified,
  * because `litertlm-android` ships bytecode newer than the JDK 17 test JVM can load.
- *
- * ## Per-model step limits
- *
- * The former `MAX_STEPS = 3` constant is replaced by [ModelProfile.maxAgentSteps]:
- * - E2B (Lite): 2 steps
- * - E4B (Medium): 4 steps
- *
- * Callers pass the active profile's limit to [decide]. The legacy [decide] overload defaults to
- * the E2B limit for backward compatibility.
  */
 object ReActLoopController {
 
     /**
-     * Legacy default maximum steps, kept for backward compatibility with callers that don't
-     * yet pass a [ModelProfile]. Matches E2B (Lite) profile.
+     * Maximum tool executions per single user command, **including** the first (non-continuation)
+     * call. With [MAX_STEPS] = 3 the model gets the initial call plus up to 2 follow-ups — enough
+     * for a genuine Reason→Act→Observe→Act→Observe chain without unbounded on-device inference.
      */
-    const val DEFAULT_MAX_STEPS: Int = 2
+    const val MAX_STEPS: Int = 3
 
     /**
      * Tools whose *result* the model can usefully reason over. The loop engages only when the
      * model's first proposed call is in this set; for one-shot side-effect tools (`open_app`,
      * `create_note`, `send_whatsapp`, …) the model has nothing to react to, so continuing would
      * only add a second inference's latency and risk without value. The model still decides when to
-     * stop (it emits `speak_response` or the loop hits the step ceiling); this set just gates *entry*.
+     * stop (it emits `speak_response` or the loop hits [MAX_STEPS]); this set just gates *entry*.
      */
     val observationTools: Set<String> = setOf(
         "search_notes", "summarize_text", "web_search", "read_screen", "ocr_screen",
-        "detect_objects", "voice_recording", "check_calendar", "check_calendar_conflict",
-        "resolve_contact"
+        "detect_objects", "voice_recording", "check_calendar"
     )
 
     /** True iff the loop should engage after the model's first proposed [firstTool] call. */
     fun shouldEngage(firstTool: String): Boolean = firstTool in observationTools
 
     /**
-     * Decides what to do after the model is asked for a next step, using per-model step limits.
+     * Decides what to do after the model is asked for a next step.
      *
      * @param stepsExecuted how many tool calls have already been executed (the first call counts),
      *   so this is `>= 1` when called from inside the loop.
@@ -66,14 +55,11 @@ object ReActLoopController {
      *   `null` if the planner could not be asked (e.g. brain unloaded), a [Result.Error] if the
      *   planner rejected the call (unknown tool / malformed args / inference failure), or a
      *   [Result.Success] with the next proposed [ToolCall].
-     * @param maxSteps the maximum number of tool executions for this task, from the active
-     *   [ModelProfile.maxAgentSteps]. Defaults to [DEFAULT_MAX_STEPS] (E2B) if not specified.
      */
     fun decide(
         stepsExecuted: Int,
         lastExecutedCall: ToolCall?,
-        proposal: Result<ToolCall>?,
-        maxSteps: Int = DEFAULT_MAX_STEPS
+        proposal: Result<ToolCall>?
     ): LoopDecision {
         // The planner could not be reached at all (brain unloaded mid-loop) → stop, speak last obs.
         if (proposal == null) return LoopDecision.Stop(StopReason.NO_PLAN)
@@ -100,7 +86,7 @@ object ReActLoopController {
         }
 
         // Hard ceiling on on-device inference per command.
-        if (stepsExecuted >= maxSteps) {
+        if (stepsExecuted >= MAX_STEPS) {
             return LoopDecision.Stop(StopReason.MAX_STEPS)
         }
 

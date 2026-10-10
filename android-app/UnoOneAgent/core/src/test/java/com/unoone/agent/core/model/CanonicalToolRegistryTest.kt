@@ -17,7 +17,6 @@ class CanonicalToolRegistryTest {
 
     @Test
     fun hasExactly42Tools() {
-        // 29 legacy + 13 new atomic tools = 42 total
         assertEquals(42, CanonicalToolRegistry.tools.size)
         assertEquals(42, CanonicalToolRegistry.names.size)
     }
@@ -91,7 +90,7 @@ class CanonicalToolRegistryTest {
     fun noArgToolsHaveNoRequiredParams() {
         for (name in listOf("open_chrome", "open_camera", "read_screen", "ocr_screen",
             "check_calendar", "open_calendar", "delete_all_notes", "export_data", "detect_objects",
-            "deactivate_blind_aid", "go_home", "go_back", "open_notifications", "open_recents")) {
+            "deactivate_blind_aid")) {
             val s = CanonicalToolRegistry.schemaFor(name)!!
             assertTrue("$name should have no required params", s.requiredParams.isEmpty())
             assertTrue("$name should have no params at all", s.params.isEmpty())

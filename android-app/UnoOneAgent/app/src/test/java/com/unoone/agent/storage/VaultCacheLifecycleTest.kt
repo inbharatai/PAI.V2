@@ -12,7 +12,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -24,14 +23,9 @@ import org.robolectric.annotation.Config
  * The vault cache lifecycle against a REAL in-memory Room database, so the
  * actual DAO queries run. Durability contract under test:
  *
- * 1. `clearOnVaultDisconnect` and TTL eviction may only remove rows that have
- *    actually reached the vault (`vaultRecordId != null`); an unsynced row is
- *    the ONLY copy in existence and must survive both paths.
- * 2. Skills are device-local user assets (never vault-mirrored): wiping them
- *    on disconnect/TTL would destroy the only copy — they are exempt, like
- *    model_metadata.
- * 3. Action logs are device-local audit and never mirror: they are still
- *    fully cleared on disconnect (privacy wipe) and TTL-evicted.
+ * The adopted independent-local-store contract retains all rows on legacy USB
+ * disconnect and TTL entry points, regardless of mirror status. Explicit user
+ * deletion is separate. These tests execute real DAO reads after both no-op paths.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -67,15 +61,15 @@ class VaultCacheLifecycleTest {
     }
 
     @Test
-    fun `disconnect wipes rows that already reached the vault`() = runBlocking {
+    fun `disconnect retains rows that already reached the vault`() = runBlocking {
         val noteId = db.noteDao().insert(NoteEntity(title = "Synced note", content = "copy in vault", vaultRecordId = "rec-1"))
         db.memoryDao().insert(MemoryEntity(key = "lang", value = "hi", vaultRecordId = "rec-2"))
 
         val cleared = VaultCacheLifecycle.clearOnVaultDisconnect(db)
 
-        assertEquals(2, cleared)
-        assertNull(db.noteDao().getById(noteId))
-        assertNull(db.memoryDao().getByKey("lang"))
+        assertEquals(0, cleared)
+        assertNotNull(db.noteDao().getById(noteId))
+        assertNotNull(db.memoryDao().getByKey("lang"))
     }
 
     @Test
@@ -90,7 +84,7 @@ class VaultCacheLifecycleTest {
     }
 
     @Test
-    fun `disconnect keeps unsynced conversation turns and wipes synced ones`() = runBlocking {
+    fun `disconnect keeps both unsynced and synced conversation turns`() = runBlocking {
         val unsynced = db.conversationTurnDao().insert(
             ConversationTurnEntity(sessionId = "s1", role = "user", content = "offline question", inputType = "voice"),
         )
@@ -102,8 +96,8 @@ class VaultCacheLifecycleTest {
 
         assertNotNull("unsynced turn is the only copy in existence", db.conversationTurnDao().getById(unsynced))
         assertTrue(
-            "synced turn (copy in vault) must be wiped from the plaintext cache",
-            db.conversationTurnDao().allOnce().none { it.sessionId == "s2" },
+            "synced turn must remain in the independent local store",
+            db.conversationTurnDao().allOnce().any { it.sessionId == "s2" },
         )
     }
 
@@ -124,7 +118,7 @@ class VaultCacheLifecycleTest {
     }
 
     @Test
-    fun `TTL eviction removes expired rows that already reached the vault`() = runBlocking {
+    fun `TTL entry point retains expired rows that already reached the vault`() = runBlocking {
         val stale = System.currentTimeMillis() - VaultCacheLifecycle.DEFAULT_TTL_MILLIS - 1
         val noteId = db.noteDao().insert(
             NoteEntity(title = "Old synced note", content = "vault has it", createdAt = stale, vaultRecordId = "rec-1"),
@@ -135,9 +129,9 @@ class VaultCacheLifecycleTest {
 
         val evicted = VaultCacheLifecycle.evictExpired(db)
 
-        assertTrue("at least the synced rows must be evicted", evicted >= 2)
-        assertNull(db.noteDao().getById(noteId))
-        assertNull(db.memoryDao().getByKey("old_synced"))
+        assertEquals("independent local store never auto-evicts", 0, evicted)
+        assertNotNull(db.noteDao().getById(noteId))
+        assertNotNull(db.memoryDao().getByKey("old_synced"))
     }
 
     @Test
@@ -153,7 +147,7 @@ class VaultCacheLifecycleTest {
     }
 
     @Test
-    fun `TTL eviction keeps expired unsynced turns and removes expired synced ones`() = runBlocking {
+    fun `TTL entry point keeps expired unsynced and synced turns`() = runBlocking {
         val stale = System.currentTimeMillis() - VaultCacheLifecycle.DEFAULT_TTL_MILLIS - 1
         val unsynced = db.conversationTurnDao().insert(
             ConversationTurnEntity(sessionId = "s1", role = "user", content = "only copy", inputType = "voice", createdAt = stale),
@@ -166,8 +160,8 @@ class VaultCacheLifecycleTest {
 
         assertNotNull("expired unsynced turn is the only copy in existence", db.conversationTurnDao().getById(unsynced))
         assertTrue(
-            "expired synced turn (copy in vault) must be evicted",
-            db.conversationTurnDao().allOnce().none { it.sessionId == "s2" },
+            "expired synced turn must remain in the independent local store",
+            db.conversationTurnDao().allOnce().any { it.sessionId == "s2" },
         )
     }
 }

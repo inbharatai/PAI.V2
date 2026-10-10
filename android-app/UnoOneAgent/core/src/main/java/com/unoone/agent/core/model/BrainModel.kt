@@ -1,17 +1,19 @@
 package com.unoone.agent.core.model
 
-/**
- * UnoOne V2 on-device planning brains. E2B is the Lite tier; E4B is the Medium tier.
- * The active profile is selected before each task and never switches mid-task.
- * If the active model fails, the task stops and the orchestrator offers a retry with a different tier.
- */
-enum class BrainModelId { GEMMA_4_E2B, GEMMA_4_E4B }
+/** Selectable on-device planning profiles; existing E4B selections are preserved. */
+enum class BrainModelId { GEMMA_4_E4B, GEMMA_4_E2B, QWEN3_5_2B, GUI_OWL_1_5_4B_INSTRUCT }
 
 /** Model family used by prompt construction. */
-enum class ModelFamily { GEMMA_4 }
+enum class ModelFamily { GEMMA_4, QWEN3_5, GUI_OWL_1_5 }
+
+/** Runtime format; never dispatch an MNN config to LiteRT-LM. */
+enum class BrainRuntime { LITERT_LM, MNN, LLAMA_CPP }
 
 /** Hardware backend preference. LiteRT-LM backend mapping lives in `:localbrain`. */
 enum class BackendPreference { GPU_FIRST, CPU_ONLY, ANY }
+
+/** Developer qualification override. AUTO uses only a recorded-qualified backend. */
+enum class BackendQualificationChoice { AUTO, CPU, GPU }
 
 /**
  * Authoritative specification of the UnoOne planning brain.
@@ -37,39 +39,14 @@ data class BrainModelSpec(
     val isLegacy: Boolean,
     val isDeviceVerified: Boolean,
     val experimentalLabel: String?,
-    val description: String
+    val description: String,
+    val runtime: BrainRuntime = BrainRuntime.LITERT_LM,
+    val supportsBrowserProtocol: Boolean = true
 )
 
-/** Authoritative registry for all UnoOne planning brains. */
+/** Single source of truth for the selectable Gemma 4 runtime contracts. */
 object BrainModelRegistry {
 
-    val GEMMA_4_E2B: BrainModelSpec = BrainModelSpec(
-        id = BrainModelId.GEMMA_4_E2B,
-        manifestId = "gemma-4-e2b",
-        displayName = "Gemma 4 E2B",
-        modelFamily = ModelFamily.GEMMA_4,
-        modelFolder = "brain/gemma-4-e2b",
-        fileName = "gemma-4-E2B-it.litertlm",
-        fileExtension = ".litertlm",
-        preferredBackend = BackendPreference.GPU_FIRST,
-        minimumRamMb = 6_144,
-        recommendedRamMb = 8_192,
-        maximumContextTokens = 32_768,
-        defaultContextTokens = 4_096,
-        supportsNativeSystemRole = true,
-        isLegacy = false,
-        isDeviceVerified = false,
-        experimentalLabel = "Device qualification required",
-        description = "UnoOne Lite planning brain. The generic Android LiteRT-LM artifact must pass integrity, tool-call, memory, thermal and real-device tests before production release."
-    )
-
-    /**
-     * Gemma 4 E4B — UnoOne Medium planning brain.
-     *
-     * Better reasoning for compound commands. Requires ≥ 8 GB available RAM.
-     * SHA-256: 0b2a8980ce155fd97673d8e820b4d29d9c7d99b8fa6806f425d969b145bd52e0
-     * File size: ~3.66 GB on disk.
-     */
     val GEMMA_4_E4B: BrainModelSpec = BrainModelSpec(
         id = BrainModelId.GEMMA_4_E4B,
         manifestId = "gemma-4-e4b",
@@ -78,28 +55,70 @@ object BrainModelRegistry {
         modelFolder = "brain/gemma-4-e4b",
         fileName = "gemma-4-E4B-it.litertlm",
         fileExtension = ".litertlm",
-        preferredBackend = BackendPreference.GPU_FIRST,
+        // AUTO stays on the conservative CPU baseline until device/hash/build qualification records
+        // prove another backend meets the same strict accuracy and stability gates.
+        preferredBackend = BackendPreference.ANY,
         minimumRamMb = 8_192,
-        recommendedRamMb = 10_240,
+        recommendedRamMb = 12_288,
         maximumContextTokens = 32_768,
-        defaultContextTokens = 4_096,
+        // Accuracy does not require wasting the full theoretical context window on a phone. Start
+        // with the same bounded context used by published mobile measurements; device qualification
+        // may raise this only after memory, latency and thermal evidence is recorded.
+        defaultContextTokens = 2_048,
         supportsNativeSystemRole = true,
         isLegacy = false,
         isDeviceVerified = false,
-        experimentalLabel = "Device qualification required",
-        description = "UnoOne Medium planning brain. Better reasoning for compound commands. Requires ≥ 8 GB available RAM."
+        experimentalLabel = "Xiaomi 14 qualification required",
+        description = "UnoOne's retained accuracy-first local planning brain. Common phone actions remain deterministic; Gemma 4 E4B handles conversation, ambiguity and bounded agent planning through LiteRT-LM with schema validation, safety checks and execution verification."
     )
 
-    val all: List<BrainModelSpec> = listOf(GEMMA_4_E2B, GEMMA_4_E4B)
+    // RAM/context values are conservative application policy, not device qualification claims.
+    val GEMMA_4_E2B: BrainModelSpec = GEMMA_4_E4B.copy(
+        id = BrainModelId.GEMMA_4_E2B,
+        manifestId = "gemma-4-e2b",
+        displayName = "Gemma 4 E2B",
+        modelFolder = "brain/gemma-4-e2b",
+        fileName = "gemma-4-E2B-it.litertlm",
+        description = "Default local planning profile using the pinned LiteRT-LM E2B artifact. Physical-device, image and grounding qualification is required; E4B remains selectable."
+    )
+
+    val QWEN3_5_2B: BrainModelSpec = GEMMA_4_E2B.copy(
+        id = BrainModelId.QWEN3_5_2B,
+        manifestId = "qwen3.5-2b-mnn",
+        displayName = "Qwen 3.5 2B (EXPERIMENTAL)",
+        modelFamily = ModelFamily.QWEN3_5,
+        modelFolder = "brain/qwen3.5-2b-mnn",
+        fileName = "config.json",
+        fileExtension = ".json",
+        preferredBackend = BackendPreference.CPU_ONLY,
+        maximumContextTokens = 4_096,
+        defaultContextTokens = 2_048,
+        experimentalLabel = "EXPERIMENTAL — native/device qualification required",
+        description = "Pinned 4-bit MNN export. Opt-in only; no device performance or vision qualification claimed. E4B remains recoverable.",
+        runtime = BrainRuntime.MNN
+    )
+
+    val GUI_OWL_1_5_4B_INSTRUCT = BrainModelSpec(
+        id = BrainModelId.GUI_OWL_1_5_4B_INSTRUCT,
+        manifestId = GuiOwlArtifact.MANIFEST_ID,
+        displayName = "GUI-Owl 1.5 4B Instruct (EXPERIMENTAL)",
+        modelFamily = ModelFamily.GUI_OWL_1_5,
+        modelFolder = GuiOwlArtifact.FOLDER,
+        fileName = GuiOwlArtifact.DECODER,
+        fileExtension = ".gguf",
+        preferredBackend = BackendPreference.CPU_ONLY,
+        minimumRamMb = 8_192, recommendedRamMb = 8_192,
+        maximumContextTokens = 2_048, defaultContextTokens = 2_048,
+        supportsNativeSystemRole = true, isLegacy = false, isDeviceVerified = false,
+        experimentalLabel = "EXPERIMENTAL — phone qualification pending",
+        description = "Third-party Q4_K_M GGUF plus required Q8_0 projector. 8 GB device RAM is conservative policy, not measured suitability. Load admission also reserves model + KV/vision/runtime overhead. Browser DOM protocol unsupported; no fallback. " + GuiOwlArtifact.PROVENANCE_DISCLOSURE,
+        runtime = BrainRuntime.LLAMA_CPP, supportsBrowserProtocol = false
+    )
+
+    val all: List<BrainModelSpec> = listOf(GEMMA_4_E2B, GEMMA_4_E4B, QWEN3_5_2B, GUI_OWL_1_5_4B_INSTRUCT)
     val defaultProfile: BrainModelSpec = GEMMA_4_E2B
 
-    private val byIdMap: Map<BrainModelId, BrainModelSpec> = mapOf(
-        BrainModelId.GEMMA_4_E2B to GEMMA_4_E2B,
-        BrainModelId.GEMMA_4_E4B to GEMMA_4_E4B
-    )
-
-    fun byId(id: BrainModelId): BrainModelSpec =
-        byIdMap[id] ?: GEMMA_4_E2B
+    fun byId(id: BrainModelId): BrainModelSpec = all.first { it.id == id }
 
     fun byManifestId(manifestId: String): BrainModelSpec? =
         all.firstOrNull { it.manifestId == manifestId }
@@ -107,7 +126,7 @@ object BrainModelRegistry {
     fun byFolder(folder: String): BrainModelSpec? =
         all.firstOrNull { it.modelFolder == folder }
 
-    /** Resolve a persisted manifest id to a spec, falling back to E2B for unknown values. */
+    /** New/unknown selections use E2B; persisted E4B is never silently migrated. */
     fun resolveOrDefault(manifestId: String?): BrainModelSpec =
-        manifestId?.let { byManifestId(it) } ?: GEMMA_4_E2B
+        manifestId?.let(::byManifestId) ?: defaultProfile
 }
