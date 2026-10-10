@@ -1,5 +1,9 @@
 package com.unoone.agent.voice.stt
 
+import com.unoone.agent.voice.processMicrophoneLease
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -10,21 +14,28 @@ import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.util.Logger
 import java.util.Locale
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.CancellableContinuation
+import android.os.Handler
+import android.os.Looper
+import android.media.AudioManager
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Highly compatible, multilingual STT using Android System Speech.
- * Fully supports Indian languages (Hindi, Tamil, Telugu, Malayalam, Kannada, Bengali) and English.
+ * Optional Android on-device speech fallback (API 31+ with an installed local recognizer).
+ * Language availability is device-dependent. Never substitutes a provider-dependent/cloud recognizer.
  */
 class AndroidSttEngine(private val context: Context) {
 
     private var speechRecognizer: SpeechRecognizer? = null
+    @Volatile private var destructionAck = true
+    fun isDrainAcknowledged(): Boolean = destructionAck
 
     fun initialize(): Result<Unit> {
         return try {
-            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                return Result.Error("Speech recognition not available on this device")
+            if (android.os.Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
+                return Result.Error("Local system speech recognition unavailable. Install UnoOne's offline speech models; no cloud fallback will be used.")
             }
             Result.Success(Unit)
         } catch (e: Exception) {
@@ -41,37 +52,78 @@ class AndroidSttEngine(private val context: Context) {
         locale: Locale = Locale("en", "IN"),
         onAmplitude: ((Float) -> Unit)? = null
     ): Result<String> {
-        // 0C-3: Wrap in timeout to prevent indefinite hangs if SpeechRecognizer
-        // never fires onError or onResults (happens on some devices/emulators)
-        return withTimeoutOrNull(15_000L) {
-            suspendCoroutine { continuation ->
-                doTranscribe(locale, onAmplitude, continuation)
+        // Reject unsupported/local-recognizer-unavailable requests before taking the mic
+        // or posting work to Main. Never create a provider-dependent recognizer.
+        if (android.os.Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(context))
+            return Result.Error("Local system recognizer unavailable; offline models required")
+        val owner = Any()
+        if (!processMicrophoneLease.acquire(owner)) return Result.Error("Microphone busy")
+        try {
+            // withContext awaits the recognition child, including cancellation, before returning.
+            return withContext(Dispatchers.Main.immediate) {
+                withTimeoutOrNull(15_000L) {
+                    suspendCancellableCoroutine<Result<String>> { continuation ->
+                        doTranscribe(locale, onAmplitude, continuation)
+                    }
+                } ?: Result.Error("Speech recognition timed out")
             }
-        } ?: run {
-            // Timeout: destroy the recognizer and return error
-            Logger.w("AndroidSttEngine: Transcription timed out after 15s")
-            release()
-            Result.Error("Speech recognition timed out")
+        } finally {
+            withContext(NonCancellable + Dispatchers.Main.immediate) {
+                speechRecognizer?.let { safeDestroyRecognizer(it) }
+            }
+            processMicrophoneLease.release(owner, destructionAck, true)
         }
     }
 
     private fun doTranscribe(
         locale: Locale,
         onAmplitude: ((Float) -> Unit)?,
-        continuation: kotlin.coroutines.Continuation<Result<String>>
+        continuation: CancellableContinuation<Result<String>>
     ) {
-        val recognizer = SpeechRecognizer.createSpeechRecognizer(context).also {
+        if (android.os.Build.VERSION.SDK_INT < 31 || !SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
+            if (continuation.isActive) continuation.resume(Result.Error("Local system recognizer unavailable; offline models required"))
+            return
+        }
+        val recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(context).also {
             speechRecognizer = it
+            destructionAck = false
         }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, locale.toString())
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, locale.toString())
             // Enable fallback for other languages (e.g., Hindi: hi, Tamil: ta, Telugu: te)
             putExtra(RecognizerIntent.EXTRA_SUPPORTED_LANGUAGES, arrayOf("en-IN", "hi-IN"))
         }
 
-        var resumed = false
+        val resumed = AtomicBoolean(false)
+        val handler = Handler(Looper.getMainLooper())
+        fun allowed(): Boolean {
+            val mode = context.getSystemService(AudioManager::class.java)?.mode ?: return false
+            return mode != AudioManager.MODE_IN_CALL && mode != AudioManager.MODE_IN_COMMUNICATION &&
+                context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        fun complete(result: Result<String>) {
+            if (resumed.compareAndSet(false, true)) {
+                handler.removeCallbacksAndMessages(null)
+                safeDestroyRecognizer(recognizer)
+                if (continuation.isActive) continuation.resume(result)
+            }
+        }
+        val monitor = object : Runnable {
+            override fun run() {
+                if (!allowed()) complete(Result.Error("Speech capture discarded during call or permission loss"))
+                else if (!resumed.get()) handler.postDelayed(this, 50L)
+            }
+        }
+        continuation.invokeOnCancellation {
+            resumed.set(true)
+            handler.removeCallbacksAndMessages(null)
+            handler.post { safeDestroyRecognizer(recognizer) }
+        }
+        if (!allowed()) { complete(Result.Error("Speech capture unavailable")); return }
+        handler.post(monitor)
 
         recognizer.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
@@ -81,33 +133,26 @@ class AndroidSttEngine(private val context: Context) {
             override fun onRmsChanged(rmsdB: Float) {
                 // Normalize rmsdB (typically ranges from -2 to 10+) to 0..1 range
                 val normalized = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
-                onAmplitude?.invoke(normalized)
+                if (allowed() && !resumed.get()) onAmplitude?.invoke(normalized)
             }
             override fun onBufferReceived(buffer: ByteArray?) {}
             override fun onEndOfSpeech() {}
             override fun onError(error: Int) {
                 Logger.e("Multilingual STT Error: $error")
-                if (!resumed) {
-                    resumed = true
-                    continuation.resume(Result.Error("Speech error code: $error"))
-                }
-                safeDestroyRecognizer(recognizer)
+                complete(Result.Error("Speech error code: $error"))
             }
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 val text = matches?.firstOrNull() ?: ""
-                Logger.i("Multilingual STT Transcribed: '$text'")
-                if (!resumed) {
-                    resumed = true
-                    continuation.resume(Result.Success(text))
-                }
-                safeDestroyRecognizer(recognizer)
+                val accepted = allowed()
+                Logger.i("Multilingual STT: result received, accepted=$accepted")
+                complete(if (accepted) Result.Success(text) else Result.Error("Speech capture discarded during call"))
             }
             override fun onPartialResults(partialResults: Bundle?) {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         })
 
-        recognizer.startListening(intent)
+        try { recognizer.startListening(intent) } catch (e: Exception) { complete(Result.Error("Speech capture failed", e)) }
     }
 
     /**
@@ -117,9 +162,10 @@ class AndroidSttEngine(private val context: Context) {
     private fun safeDestroyRecognizer(recognizer: SpeechRecognizer) {
         synchronized(this) {
             if (speechRecognizer == recognizer) {
-                speechRecognizer = null
                 try {
                     recognizer.destroy()
+                    speechRecognizer = null
+                    destructionAck = true
                 } catch (e: Exception) {
                     Logger.e("AndroidSttEngine: Error destroying recognizer", e)
                 }
@@ -128,18 +174,12 @@ class AndroidSttEngine(private val context: Context) {
     }
 
     fun stopListening() {
-        try {
-            speechRecognizer?.stopListening()
-        } catch (e: Exception) {
-            Logger.e("AndroidSttEngine: Error stopping listening", e)
+        Handler(Looper.getMainLooper()).post {
+            try { speechRecognizer?.stopListening() }
+            catch (e: Exception) { Logger.e("AndroidSttEngine: Error stopping listening", e) }
         }
     }
 
-    fun release() {
-        synchronized(this) {
-            val recognizer = speechRecognizer
-            speechRecognizer = null
-            recognizer?.destroy()
-        }
-    }
+    /** Called on Main after the recognition child has joined. */
+    fun release() { speechRecognizer?.let { safeDestroyRecognizer(it) } }
 }

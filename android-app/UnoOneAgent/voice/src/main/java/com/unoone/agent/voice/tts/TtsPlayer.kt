@@ -2,7 +2,9 @@ package com.unoone.agent.voice.tts
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
@@ -10,37 +12,36 @@ import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.util.Logger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.resume
+import kotlin.math.sqrt
 
 /**
  * Universal, highly robust TextToSpeech engine supporting English and Indian languages (Hindi, Tamil, etc.).
  * Fully offline-first.
  */
-class TtsPlayer : TextToSpeech.OnInitListener {
+class TtsPlayer(context: Context? = null) : TextToSpeech.OnInitListener {
 
     private var tts: TextToSpeech? = null
     private var isReady = false
-    private var pendingText: String? = null
+    private var pendingText: Pair<String, String>? = null
     private var activeTrack: AudioTrack? = null
+    private var audioManager: AudioManager? = context?.getSystemService(AudioManager::class.java)
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private val speechAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
 
-    /**
-     * Finding A6: per-utterance completion callbacks keyed by the utterance id
-     * handed to speak(). The old single `onUtteranceDone` slot was clobbered by
-     * any concurrent await, and it was compared against an id speak() never
-     * used, so the fallback startsWith() match resumed the WRONG await.
-     */
-    private val awaitListeners = ConcurrentHashMap<String, (Boolean) -> Unit>()
-    private val utteranceCounter = AtomicLong()
-
-    private fun finishUtterance(utteranceId: String?, success: Boolean) {
-        val id = utteranceId ?: return
-        awaitListeners.remove(id)?.invoke(success)
-    }
+    // 0C-9: UtteranceProgressListener for tracking TTS completion
+    @Volatile private var onUtteranceDone: ((String, Result<Unit>) -> Unit)? = null
+    private val awaitMutex = Mutex()
 
     fun initialize(context: Context): Result<Unit> {
         return try {
+            audioManager = context.getSystemService(AudioManager::class.java)
             tts = TextToSpeech(context, this)
             Result.Success(Unit)
         } catch (e: Exception) {
@@ -57,20 +58,18 @@ class TtsPlayer : TextToSpeech.OnInitListener {
                 tts?.setLanguage(Locale.getDefault())
             }
 
-            // 0C-9: Register UtteranceProgressListener to track TTS completion.
-            // Finding A6: done/error both complete the awaiting caller, but with
-            // distinct outcomes so a failed playback never reads as success.
+            // 0C-9: Register UtteranceProgressListener to track TTS completion
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {
                     Logger.d("TTS Player: Utterance started: $utteranceId")
                 }
                 override fun onDone(utteranceId: String?) {
                     Logger.d("TTS Player: Utterance completed: $utteranceId")
-                    finishUtterance(utteranceId, success = true)
+                    onUtteranceDone?.invoke(utteranceId ?: "", Result.Success(Unit))
                 }
                 override fun onError(utteranceId: String?) {
                     Logger.w("TTS Player: Utterance error: $utteranceId")
-                    finishUtterance(utteranceId, success = false)
+                    onUtteranceDone?.invoke(utteranceId ?: "", Result.Error("System TTS playback failed"))
                 }
             })
 
@@ -79,7 +78,7 @@ class TtsPlayer : TextToSpeech.OnInitListener {
 
             // Speak any pending text that was queued during init
             pendingText?.let {
-                speak(it)
+                speak(it.first, it.second)
                 pendingText = null
             }
         } else {
@@ -89,25 +88,23 @@ class TtsPlayer : TextToSpeech.OnInitListener {
 
     /**
      * Synthesize and speak text. Automatically detects Indian language context or falls back to English.
-     *
-     * @param utteranceId the id the UtteranceProgressListener reports for this
-     * utterance. [speakAwait] passes its own unique id so it resumes on exactly
-     * the utterance it started (finding A6).
      */
-    fun speak(
-        text: String,
-        languageCode: String = "en-IN",
-        utteranceId: String = DEFAULT_UTTERANCE_ID
-    ): Result<Unit> {
+    fun speak(text: String, languageCode: String = "en-IN", utteranceId: String = "UnoOne_TTS_Playback"): Result<Unit> {
         val t = tts
         if (!isReady || t == null) {
-            pendingText = text
+            pendingText = text to languageCode
             return Result.Success(Unit) // Queued
         }
 
         return try {
             val locale = Locale.forLanguageTag(languageCode)
-            val languageResult = t.setLanguage(locale)
+            val voice = t.voices?.filter {
+                !it.isNetworkConnectionRequired && it.locale.language == locale.language &&
+                    !it.features.orEmpty().contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED)
+            }?.sortedByDescending { it.locale.country == locale.country }?.firstOrNull()
+                ?: return Result.Error("No installed offline voice for ${locale.toLanguageTag()}")
+            if (t.setVoice(voice) == TextToSpeech.ERROR) return Result.Error("Offline voice selection failed")
+            val languageResult = t.isLanguageAvailable(locale)
             if (
                 languageResult == TextToSpeech.LANG_MISSING_DATA ||
                 languageResult == TextToSpeech.LANG_NOT_SUPPORTED
@@ -135,6 +132,7 @@ class TtsPlayer : TextToSpeech.OnInitListener {
      * 0C-8: Play raw PCM audio data from Sherpa-ONNX TTS or other offline engines.
      * Converts FloatArray samples → Int16 PCM → AudioTrack for playback.
      */
+    @Synchronized
     fun playPcm(samples: FloatArray, sampleRate: Int = 22050): Result<Unit> {
         if (samples.isEmpty()) {
             Logger.w("TTS Player: playPcm called with empty samples")
@@ -144,6 +142,25 @@ class TtsPlayer : TextToSpeech.OnInitListener {
         return try {
             // Stop any currently playing AudioTrack first
             stopPcmTrack()
+
+            val rms = sqrt(samples.fold(0.0) { sum, sample -> sum + sample * sample } / samples.size)
+            val peak = samples.maxOf { kotlin.math.abs(it) }
+            if (peak < 0.001f || rms < 0.0001) {
+                Logger.e("TTS Player: synthesized PCM is effectively silent (peak=$peak rms=$rms)")
+                return Result.Error("Synthesized speech was silent")
+            }
+
+            val manager = audioManager
+            if (manager != null) {
+                val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                    .setAudioAttributes(speechAttributes)
+                    .setAcceptsDelayedFocusGain(false)
+                    .build()
+                audioFocusRequest = focusRequest
+                if (manager.requestAudioFocus(focusRequest) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                    Logger.w("TTS Player: audio focus was not granted; attempting direct playback")
+                }
+            }
 
             // Convert FloatArray [-1.0, 1.0] → Int16 PCM bytes
             val pcmBytes = ByteArray(samples.size * 2)
@@ -164,10 +181,7 @@ class TtsPlayer : TextToSpeech.OnInitListener {
 
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
+                    speechAttributes
                 )
                 .setAudioFormat(
                     AudioFormat.Builder()
@@ -180,12 +194,15 @@ class TtsPlayer : TextToSpeech.OnInitListener {
                 .setTransferMode(AudioTrack.MODE_STATIC)
                 .build()
 
-            track.write(pcmBytes, 0, pcmBytes.size)
+            activeTrack = track
+            check(track.write(pcmBytes, 0, pcmBytes.size) == pcmBytes.size) { "Incomplete PCM write" }
+            track.setVolume(1.0f)
             track.play()
             activeTrack = track
-            Logger.i("TTS Player: PCM playback started (${samples.size} samples at ${sampleRate}Hz)")
+            Logger.i("TTS Player: audible PCM playback started (${samples.size} samples at ${sampleRate}Hz, peak=${"%.3f".format(peak)}, rms=${"%.3f".format(rms)})")
             Result.Success(Unit)
         } catch (e: Exception) {
+            stopPcmTrack()
             Logger.e("TTS Player: PCM playback failed", e)
             Result.Error("PCM playback failed: ${e.message}")
         }
@@ -193,39 +210,30 @@ class TtsPlayer : TextToSpeech.OnInitListener {
 
     /**
      * 0C-9: Suspends until TTS finishes speaking the given text.
-     *
-     * Finding A6: the awaited id and the id passed to speak() are now the SAME
-     * string, so this resumes on exactly the utterance it started. A failed
-     * playback ([UtteranceProgressListener.onError]) resumes as an Error. The
-     * safety timeout remains: if the listener never fires the await resumes
-     * (hands-free callers must not wedge on a silent engine), with a warning —
-     * and via a cancellable [withTimeoutOrNull] instead of a leaked raw timer
-     * thread per call.
+     * Falls back to a 10-second timeout if UtteranceProgressListener doesn't fire.
      */
-    suspend fun speakAwait(text: String, languageCode: String = "en-IN", timeoutMs: Long = 10_000L): Result<Unit> {
-        val utteranceId = "UnoOne_TTS_Await_${utteranceCounter.incrementAndGet()}"
-        val result = speak(text, languageCode, utteranceId)
-        if (result is Result.Error) return result
-
-        val done = CompletableDeferred<Boolean>()
-        awaitListeners[utteranceId] = { success -> done.complete(success) }
-        return try {
-            val completed = withTimeoutOrNull(timeoutMs) { done.await() }
-            when (completed) {
-                true -> Result.Success(Unit)
-                false -> Result.Error("System TTS playback failed")
-                // Timeout: resume rather than wedge the hands-free flow, but say so loudly.
-                null -> {
-                    Logger.w("TTS Player: speakAwait timed out after ${timeoutMs}ms; resuming without a completion event")
-                    Result.Success(Unit)
-                }
-            }
+    suspend fun speakAwait(text: String, languageCode: String = "en-IN", timeoutMs: Long = 10_000L): Result<Unit> = awaitMutex.withLock {
+        if (!isReady || tts == null) return@withLock Result.Error("System TTS is not ready")
+        val completion = CompletableDeferred<Result<Unit>>()
+        val id = "UnoOne_TTS_${java.util.UUID.randomUUID()}"
+        onUtteranceDone = { reportedId, result ->
+            if (reportedId == id || reportedId == "") completion.complete(result)
+        }
+        try {
+            val started = speak(text, languageCode, id)
+            if (started is Result.Error) started
+            else withTimeoutOrNull(timeoutMs.coerceAtLeast(0)) { completion.await() }
+                ?: Result.Error("System TTS playback timed out")
         } finally {
-            awaitListeners.remove(utteranceId)
+            onUtteranceDone = null
+            pendingText = null
+            runCatching { tts?.stop() }
         }
     }
 
     fun stop() {
+        onUtteranceDone?.invoke("", Result.Error("Speech interrupted"))
+        pendingText = null
         try {
             tts?.stop()
         } catch (e: Exception) {
@@ -234,13 +242,15 @@ class TtsPlayer : TextToSpeech.OnInitListener {
         stopPcmTrack()
     }
 
+    /** Release the static AudioTrack and transient focus after a suspending caller heard it. */
+    fun finishPcmPlayback() {
+        stopPcmTrack()
+    }
+
     fun release() {
         stop()
         stopPcmTrack()
-        // Finding A6: fail any pending await instead of stranding it until the
-        // timeout — the engine it is waiting on is being shut down right now.
-        for (listener in awaitListeners.values) runCatching { listener.invoke(false) }
-        awaitListeners.clear()
+        onUtteranceDone = null
         try {
             tts?.shutdown()
         } catch (e: Exception) {
@@ -250,22 +260,22 @@ class TtsPlayer : TextToSpeech.OnInitListener {
         isReady = false
     }
 
+    @Synchronized
     private fun stopPcmTrack() {
-        try {
-            activeTrack?.let { track ->
-                if (track.state == AudioTrack.PLAYSTATE_PLAYING) {
-                    track.stop()
-                }
-                track.release()
-            }
-        } catch (e: Exception) {
-            Logger.e("TTS Player: Error releasing AudioTrack", e)
-        }
+        val track = activeTrack
         activeTrack = null
-    }
-
-    companion object {
-        /** Utterance id for fire-and-forget [speak] calls nobody is awaiting. */
-        const val DEFAULT_UTTERANCE_ID = "UnoOne_TTS_Playback"
+        if (track != null) {
+            try {
+                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.stop()
+            } catch (e: Exception) {
+                Logger.e("TTS Player: Error stopping AudioTrack", e)
+            } finally {
+                runCatching { track.release() }
+            }
+        }
+        audioFocusRequest?.let { request ->
+            runCatching { audioManager?.abandonAudioFocusRequest(request) }
+        }
+        audioFocusRequest = null
     }
 }

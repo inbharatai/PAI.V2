@@ -31,6 +31,10 @@ pub struct ChatTurn {
     pub assistant_message: String,
     /// ISO 8601 (RFC 3339) — when the turn completed.
     pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_binding: Option<pai_harness_adapter::personal_execution::Binding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personal_task_id: Option<String>,
 }
 
 impl ChatTurn {
@@ -42,6 +46,8 @@ impl ChatTurn {
             user_message: user_message.to_string(),
             assistant_message: assistant_message.to_string(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            personal_binding: None,
+            personal_task_id: None,
         }
     }
 }

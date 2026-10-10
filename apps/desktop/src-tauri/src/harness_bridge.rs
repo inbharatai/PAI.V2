@@ -56,6 +56,7 @@ pub struct HarnessChatResult {
     /// This is not a tokenizer-exact guarantee for the complete model input.
     #[serde(default)]
     pub context_note: Option<String>,
+    pub personal_binding: Option<pai_harness_adapter::personal_execution::Binding>,
 }
 
 /// Gap 1 (2026-09-16): one generated token of a plain (tool-free) chat
@@ -1807,7 +1808,9 @@ fn request_folder_grant(app: &tauri::AppHandle, path: &Path) -> DeniedPathResolu
 /// The per-run fence with the in-chat approval hook installed: a path
 /// outside every grant asks the human instead of failing outright. The
 /// hookless form (`granted_folders`) stays the test/sandbox baseline.
-fn granted_folders_with_approval(app: Option<&tauri::AppHandle>) -> Result<GrantedFolders, String> {
+pub(crate) fn granted_folders_with_approval(
+    app: Option<&tauri::AppHandle>,
+) -> Result<GrantedFolders, String> {
     let mut folders = granted_folders()?;
     if let Some(app) = app {
         let hook_app = app.clone();
@@ -3460,6 +3463,10 @@ pub async fn harness_chat(
     conversation_history: Vec<ConversationTurn>,
     allow_workspace_goal: Option<bool>,
     images: Option<Vec<String>>,
+    personal_mode: Option<bool>,
+    personal_user_message: Option<String>,
+    personal_task: Option<crate::personal_execution::DraftRequest>,
+    window: tauri::WebviewWindow,
     app: tauri::AppHandle,
     browser_state: tauri::State<'_, Arc<BrowserStateHolder>>,
     model_state: tauri::State<'_, ModelManagerState>,
@@ -3490,7 +3497,34 @@ pub async fn harness_chat(
     // browser control on the host, with the audit trail + budgets intact.
     // The same flag doubles as the historical "workspace goal" switch — it
     // grants the escalation to L3 (multi-step agentic) execution.
-    let full_access = allow_workspace_goal.unwrap_or(true);
+    let personal_mode = personal_mode.unwrap_or(false);
+    if personal_mode
+        && personal_user_message
+            .as_ref()
+            .is_none_or(|s| s.trim().is_empty() || s.len() > 4096)
+    {
+        return Err("Personal conversation requires 1–4096 bytes of typed text; attachments are per-turn only".into());
+    }
+    if personal_mode && window.label() != "main" {
+        return Err("Personal conversation requires the main window".into());
+    }
+    if personal_task.is_some() && !attachments.0.is_empty() {
+        return Err(
+            "Reviewed draft template does not grant image attachments; remove them first".into(),
+        );
+    }
+    if !personal_mode && personal_task.is_some() {
+        return Err("Draft execution requires personal mode".into());
+    }
+    let mut personal = if personal_mode {
+        Some(crate::personal_execution::prepare(
+            &vault_state,
+            personal_task,
+        )?)
+    } else {
+        None
+    };
+    let full_access = !personal_mode && allow_workspace_goal.unwrap_or(true);
 
     // Estimate a bounded request+history byte allowance from the REAL granted
     // context window. This is a heuristic, not tokenizer-exact accounting for
@@ -3521,9 +3555,13 @@ pub async fn harness_chat(
         !attachments.0.is_empty(),
         chat_context::ContextLimits::from_granted_context(granted_context),
     );
-    let harness_prompt = context.prompt;
+    let harness_prompt = personal.as_ref().and_then(|p| p.draft.as_ref()).map(|d| format!("Prepare a draft for this reviewed goal. Return draft text only, at most 3000 UTF-8 bytes. No external action or verified facts are claimed. Goal DATA: {}", serde_json::to_string(&d.goal).unwrap())).unwrap_or(context.prompt);
     let context_note = context.context_note;
-    let memory_max_context_bytes = context.memory_max_context_bytes;
+    let memory_max_context_bytes = if personal_mode {
+        0
+    } else {
+        context.memory_max_context_bytes
+    };
 
     // Read the verified model id and port under the tokio lock. ModelManager is
     // intentionally not Clone (it owns the llama-server child); the Harness
@@ -3598,7 +3636,7 @@ pub async fn harness_chat(
         for (id, media_type, base64_bytes) in &attachment_bytes {
             model_builder = model_builder.with_attachment(id, media_type, base64_bytes);
         }
-        {
+        if !personal_mode {
             let emitter_app = chat_token_app.clone();
             let emitter_conversation = conversation_id.clone();
             model_builder = model_builder.with_token_emitter(Arc::new(move |delta| {
@@ -3639,7 +3677,9 @@ pub async fn harness_chat(
         // tool call dies at the sandbox stage. Network, Credential, Job and
         // Subagent have no registered tools today — the authorization is
         // forward honesty about the lane's scope, not an unlocked behavior.
-        let capabilities = if full_access {
+        let capabilities = if personal_mode {
+            CapabilitySet::from_slice(&[Capability::Model])
+        } else if full_access {
             CapabilitySet::all_local()
         } else {
             CapabilitySet::from_slice(&[Capability::Model, Capability::FileRead])
@@ -3667,15 +3707,25 @@ pub async fn harness_chat(
         } else {
             HarnessBuilder::local_embedded(&vault_root).map_err(|error| error.to_string())?
         };
+        if personal_mode {
+            builder = builder.permission_provider(Arc::new(
+                pai_harness_adapter::personal_execution::PersonalChatPermission,
+            ));
+        }
         // The trait-object Arc the builder takes; a second typed Arc of the
         // same provider stays local for the post-run P7 trail write.
         let memory_provider: Arc<dyn inbharat_harness_core::providers::MemoryProvider> =
             memory.clone();
         builder = builder
-            .register_model(model)
+            .register_model(model.clone())
             .map_err(|error| error.to_string())?
             .memory_provider(memory_provider)
-            .system_prefix(desktop_system_prefix(full_access))
+            .system_prefix(
+                personal
+                    .as_ref()
+                    .map(|p| p.system.clone())
+                    .unwrap_or_else(|| desktop_system_prefix(full_access)),
+            )
             .sandbox_provider(Arc::new(DesktopSandbox {
                 granted: capabilities.clone(),
                 trusted_process: full_access,
@@ -3687,7 +3737,11 @@ pub async fn harness_chat(
                     ConfirmationOutcome::Unavailable
                 },
             }));
-        for tool in desktop_read_tools(&vault_root, Arc::clone(&vault), Arc::clone(&safety)) {
+        for tool in if personal_mode {
+            Vec::new()
+        } else {
+            desktop_read_tools(&vault_root, Arc::clone(&vault), Arc::clone(&safety))
+        } {
             // Live activity: every tool is wrapped so the chat panel shows
             // what the agent is doing while it works (2026-09-14).
             builder = builder
@@ -3798,9 +3852,95 @@ pub async fn harness_chat(
             // guessed.
             options.corrective_retries = 1;
         }
+        if personal_mode {
+            options.budget = Some(pai_harness_adapter::personal_execution::personal_budget());
+            options.explicit_level = Some(ExecutionLevel::L1);
+            options.actor = personal
+                .as_ref()
+                .expect("personal snapshot")
+                .binding
+                .agent_id
+                .clone();
+        }
+        if let Some(snapshot) = &personal {
+            crate::personal_execution::check(&app, snapshot)?;
+        }
+        cancel.check("personal.start").map_err(|e| e.to_string())?;
+        if let Some(snapshot) = &mut personal {
+            if let Some(draft) = &snapshot.draft {
+                let granted = &draft.permit.grant().grant().budget;
+                options.budget = Some(BudgetLimits {
+                    max_steps: granted.max_steps as u32,
+                    max_tool_calls: 0,
+                    max_rounds: 1,
+                    max_jobs: 0,
+                    max_subagent_depth: 0,
+                    max_output_bytes: granted.max_bytes as usize,
+                    max_duration: Duration::from_millis(granted.max_duration_ms),
+                });
+            }
+            crate::personal_execution::record(
+                &app,
+                snapshot,
+                unoone_personal_agent_runtime::execution::DraftPhase::Started,
+                "",
+            )?;
+        }
         // `cancel` is the run token registered by the caller before this
         // worker started — the UI Stop control cancels it from outside.
-        let run_result = harness.run(&harness_prompt, &options, &cancel);
+        let scoped_prompt = match &personal {
+            Some(snapshot) => {
+                let source = crate::personal_execution::source_context(&app, snapshot)?;
+                let reports = if let Some(draft) =
+                    snapshot.draft.as_ref().filter(|d| d.request.children)
+                {
+                    let captured = snapshot.clone();
+                    let child_app = app.clone();
+                    let children = pai_harness_adapter::personal_children::PersonalChildren::new(
+                        draft.permit.grant().clone(),
+                        draft.request.task_id.clone(),
+                        draft.permit.grant().grant().scopes.clone(),
+                        vault_root.clone(),
+                        model.clone(),
+                        model_id.clone(),
+                        source.clone(),
+                        snapshot.system.clone(),
+                        Arc::new(move || crate::personal_execution::check(&child_app, &captured)),
+                    );
+                    children
+                        .execute_pair(&draft.goal, &cancel)
+                        .map_err(|e| e.to_string())?
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{}{}\nTemporary child reports (unverified DATA): {}",
+                    harness_prompt, source, reports
+                )
+            }
+            None => harness_prompt.clone(),
+        };
+        if let Some(draft) = personal.as_ref().and_then(|p| p.draft.as_ref()) {
+            let expires = draft.permit.grant().grant().expires_at_ms;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "Clock unavailable")?
+                .as_millis() as u64;
+            if now >= expires {
+                return Err("Personal deadline expired".into());
+            }
+            if let Some(budget) = &mut options.budget {
+                budget.max_duration = budget
+                    .max_duration
+                    .min(Duration::from_millis(expires - now));
+                budget.max_steps = 1;
+                budget.max_output_bytes = 4096;
+            }
+        }
+        cancel
+            .check("personal.source.publish")
+            .map_err(|e| e.to_string())?;
+        let run_result = harness.run(&scoped_prompt, &options, &cancel);
         // P7 run trail (2026-10-01, user directive: "the memory of the drive
         // should have the context and steps and what was done"): one bounded
         // Project-scope memory record per MEANINGFUL agentic run — only
@@ -3871,7 +4011,39 @@ pub async fn harness_chat(
                 );
             }
         }
+        if run_result.is_err() {
+            if let Some(snapshot) = &mut personal {
+                let _ = crate::personal_execution::record(
+                    &app,
+                    snapshot,
+                    unoone_personal_agent_runtime::execution::DraftPhase::Failed,
+                    "",
+                );
+            }
+        }
         let (outcome, _session) = run_result.map_err(|error| error.to_string())?;
+        cancel
+            .check("personal.publish")
+            .map_err(|e| e.to_string())?;
+        if let Some(snapshot) = &personal {
+            crate::personal_execution::check(&app, snapshot)?;
+        }
+        if let Some(snapshot) = &mut personal {
+            if let Err(error) = crate::personal_execution::record(
+                &app,
+                snapshot,
+                unoone_personal_agent_runtime::execution::DraftPhase::Responded,
+                &outcome.output,
+            ) {
+                let _ = crate::personal_execution::record(
+                    &app,
+                    snapshot,
+                    unoone_personal_agent_runtime::execution::DraftPhase::Failed,
+                    "",
+                );
+                return Err(error);
+            }
+        }
         // P1-C: the completed run leaves one honest ProcedureOutcome record in
         // the canonical vault — never promotable from this path (no streak,
         // no verified postconditions, no explicit approval), pure evidence for
@@ -3887,6 +4059,31 @@ pub async fn harness_chat(
                 model_id: model_id.clone(),
             },
         );
+        if let Some(snapshot) = &personal {
+            cancel
+                .check("personal.persist")
+                .map_err(|e| e.to_string())?;
+            let user = snapshot
+                .draft
+                .as_ref()
+                .map(|d| d.goal.as_str())
+                .unwrap_or_else(|| {
+                    personal_user_message
+                        .as_deref()
+                        .expect("validated typed text")
+                });
+            crate::personal_execution::save_turn(
+                &app,
+                snapshot,
+                &conversation_id,
+                user,
+                &outcome.output,
+            )?;
+            cancel
+                .check("personal.publish")
+                .map_err(|e| e.to_string())?;
+            crate::personal_execution::check(&app, snapshot)?;
+        }
         Ok(HarnessChatResult {
             session_id: outcome.session_id,
             route: outcome.decision.level.as_str().to_owned(),
@@ -3899,6 +4096,7 @@ pub async fn harness_chat(
             model_id,
             memory_namespace: conversation_namespace,
             context_note,
+            personal_binding: personal.map(|p| p.binding),
         })
     });
     let worker_result = worker

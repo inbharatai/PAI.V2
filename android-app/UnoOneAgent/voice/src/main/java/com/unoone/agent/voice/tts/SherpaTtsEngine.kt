@@ -1,6 +1,10 @@
 package com.unoone.agent.voice.tts
 
+import com.unoone.agent.core.latency.*
+import com.unoone.agent.voice.VoiceLatency
 import android.content.Context
+import com.unoone.agent.modelmanager.ModelType
+import com.unoone.agent.voice.stt.SpeechModelIntegrity
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
@@ -46,7 +50,7 @@ data class SynthesizedSpeech(
  */
 class SherpaTtsEngine(private val context: Context, private val modelDir: String) {
 
-    private val player = TtsPlayer()
+    private val player = TtsPlayer(context)
     // Native generation is blocking and ignores coroutine cancellation. Serialize requests and
     // invalidate every pre-stop request so cached Blind Aid speech cannot play after the camera is
     // closed. New speech (including "Blind Aid deactivated") uses the new epoch normally.
@@ -62,6 +66,7 @@ class SherpaTtsEngine(private val context: Context, private val modelDir: String
     @Synchronized
     fun initialize(): Result<Unit> {
         return try {
+            SpeechModelIntegrity.requireVerified(context, modelDir, ModelType.tts)
             Logger.i("SherpaTtsEngine: Checking model files in $modelDir")
             val model = File("$modelDir/model.onnx")
             val tokens = File("$modelDir/tokens.txt")
@@ -110,24 +115,29 @@ class SherpaTtsEngine(private val context: Context, private val modelDir: String
     }
 
     @Synchronized
-    private fun speakAtEpoch(text: String, requestEpoch: Long): Result<Unit> {
+    private fun speakAtEpoch(text: String, requestEpoch: Long, trace: LatencyToken? = null): Result<Unit> {
         if (text.isBlank()) return Result.Success(Unit)
-        if (requestEpoch != speechEpoch.get()) return Result.Success(Unit)
+        if (requestEpoch != speechEpoch.get()) return Result.Error("Speech interrupted")
 
-        return when (val synthesis = synthesizeInternal(text)) {
+        VoiceLatency.recorder.mark(trace, LatencyStage.SYNTHESIS_BEGIN)
+        val generated = synthesizeInternal(text)
+        VoiceLatency.recorder.mark(trace, LatencyStage.SYNTHESIS_END, reason = if (generated is Result.Error) LatencyReason.ERROR else LatencyReason.NONE)
+        return when (val synthesis = generated) {
             is Result.Error -> synthesis
             is Result.Success -> {
                 val audio = synthesis.data
-            // stop() may have run while the native, non-cancellable generate() call was active.
-            if (requestEpoch != speechEpoch.get()) return Result.Success(Unit)
-                player.playPcm(audio.samples, audio.sampleRate)
-            if (requestEpoch != speechEpoch.get()) {
-                player.stop()
-                return Result.Success(Unit)
-            }
-            lastPlaybackDurationMs = audio.samples.size.toLong() * 1_000L / audio.sampleRate
-            Logger.i("SherpaTtsEngine: Generated ${audio.samples.size} samples @ ${audio.sampleRate}Hz")
-            Result.Success(Unit)
+                // Native generation is non-cancellable; never play a superseded result.
+                if (requestEpoch != speechEpoch.get()) return Result.Error("Speech interrupted")
+                VoiceLatency.recorder.mark(trace, LatencyStage.AUDIO_ENQUEUE)
+                val playback = player.playPcm(audio.samples, audio.sampleRate)
+                if (playback is Result.Error) return playback
+                if (requestEpoch != speechEpoch.get()) {
+                    player.stop()
+                    return Result.Error("Speech interrupted")
+                }
+                lastPlaybackDurationMs = audio.samples.size.toLong() * 1_000L / audio.sampleRate
+                Logger.i("SherpaTtsEngine: Generated ${audio.samples.size} samples @ ${audio.sampleRate}Hz")
+                Result.Success(Unit)
             }
         }
     }
@@ -159,16 +169,19 @@ class SherpaTtsEngine(private val context: Context, private val modelDir: String
     }
 
     /** Synthesizes off the UI thread and returns after the generated PCM finishes playing. */
-    suspend fun speakAwait(text: String, timeoutMs: Long = 30_000L): Result<Unit> {
+    suspend fun speakAwait(text: String, timeoutMs: Long = 30_000L, trace: LatencyToken? = null): Result<Unit> {
         val requestEpoch = speechEpoch.get()
+        VoiceLatency.recorder.mark(trace, LatencyStage.TTS_QUEUE_REQUEST)
         return synthesisMutex.withLock {
+            VoiceLatency.recorder.mark(trace, LatencyStage.TTS_QUEUE_ACQUIRED)
             // Waiting for this mutex is cancellable, unlike waiting on @Synchronized native work.
-            if (requestEpoch != speechEpoch.get()) return@withLock Result.Success(Unit)
-            val result = withContext(Dispatchers.IO) { speakAtEpoch(text, requestEpoch) }
-            if (result is Result.Success && requestEpoch == speechEpoch.get()) {
-                delay((lastPlaybackDurationMs + 100L).coerceAtMost(timeoutMs))
-            }
-            result
+            if (requestEpoch != speechEpoch.get()) return@withLock Result.Error("Speech interrupted")
+            awaitPcmPlayback(timeoutMs, { requestEpoch == speechEpoch.get() },
+                { player.finishPcmPlayback() }) {
+                lastPlaybackDurationMs = 0L
+                val result: Result<Unit> = withContext(Dispatchers.IO) { speakAtEpoch(text, requestEpoch, trace) }
+                result to lastPlaybackDurationMs
+            }.also { if (it is Result.Success) VoiceLatency.recorder.mark(trace, LatencyStage.PLAYBACK_COMPLETE, source = LatencySource.PLAYBACK_WAIT_PROXY) }
         }
     }
 

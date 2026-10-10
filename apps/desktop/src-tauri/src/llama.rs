@@ -2955,10 +2955,127 @@ fn admit_model(model: &ModelInfo, config: &ModelConfig, total: f64) -> bool {
     crate::desktop_model_policy::fits(tier, total, weights, projector, kv)
 }
 
+/// Local lane inventory: the declared files `find_models` discovers (either
+/// manifest format), paired with their declared digests. Scanned fallbacks
+/// without a declared digest stay listed but can never be admitted.
+fn local_model_files(vault_root: &str) -> Vec<(ModelInfo, crate::provisioning::LocalModelFile)> {
+    ModelManager::new()
+        .find_models(vault_root)
+        .into_iter()
+        .filter(|model| !model.path.is_empty())
+        .map(|model| {
+            let file = crate::provisioning::LocalModelFile {
+                id: model.name.clone(),
+                path: PathBuf::from(&model.path),
+                expected_sha256: ModelManager::read_manifest_model_hash(vault_root, &model.path),
+                mmproj_path: model.mmproj_path.as_ref().map(PathBuf::from),
+                expected_mmproj_sha256: model
+                    .mmproj_path
+                    .as_deref()
+                    .and_then(|path| ModelManager::read_manifest_model_hash(vault_root, path)),
+            };
+            (model, file)
+        })
+        .collect()
+}
+
+/// The single local decision point (provisioning::decide_local) fed with a fresh
+/// native probe: total AND available RAM, backend DETECTED only, declared digests.
+async fn local_decision(
+    vault_root: &str,
+    file: &crate::provisioning::LocalModelFile,
+    config: &ModelConfig,
+) -> crate::provisioning::LocalModelReport {
+    let root = std::path::Path::new(vault_root);
+    let probe = crate::provisioning_probe::probe(root).await;
+    crate::provisioning::decide_local(
+        root,
+        file,
+        &probe,
+        &crate::provisioning::LocalRequest {
+            context_tokens: config.context_size,
+            cache_type_k: config.cache_type_k.clone(),
+        },
+        &crate::provisioning::load_signed_records(root),
+        &crate::provisioning::RingVerifier::shipping(),
+        crate::provisioning_probe::now_ms(),
+    )
+}
+
+/// Local mode selection: ALREADY PRESENT, declared, hash-verified files only,
+/// largest admitted tier first, same context ladder as the drive lane. No
+/// typed Pocket manifest is required; no download is ever suggested here.
+async fn select_local_model(vault_root: &str) -> Result<DesktopModelSelection, String> {
+    let mut files = local_model_files(vault_root);
+    files.sort_by_key(|(model, _)| {
+        std::cmp::Reverse(crate::desktop_model_policy::tier(&model.name))
+    });
+    let defaults = get_model_config();
+    let mut contexts = vec![defaults.context_size, 16384, 8192, 4096];
+    contexts.retain(|context| *context <= defaults.context_size);
+    contexts.sort_unstable_by(|a, b| b.cmp(a));
+    contexts.dedup();
+    let mut refusals = Vec::new();
+    for (model, file) in &files {
+        let mut last_reasons = String::new();
+        for context_size in &contexts {
+            let mut config = defaults.clone();
+            config.context_size = *context_size;
+            config.model_path = model.path.clone();
+            config.mmproj_path = model.mmproj_path.clone();
+            let report = local_decision(vault_root, file, &config).await;
+            if report.outcome.allows_load() {
+                crate::boot_trace::mark_detail(
+                    "select_local_model: admitted",
+                    &format!(
+                        "{} ctx={} {:?}",
+                        model.name, report.context_tokens, report.outcome
+                    ),
+                );
+                return Ok(DesktopModelSelection {
+                    reason: format!(
+                        "{} — {}: {} (requested {}-token context; granted {}).",
+                        model.name,
+                        report.label,
+                        report.reasons.join("; "),
+                        context_size,
+                        report.context_tokens
+                    ),
+                    model: model.clone(),
+                    config,
+                });
+            }
+            last_reasons = report.reasons.join("; ");
+            // Presence/digest/tier failures do not depend on the context ladder.
+            if report.outcome != crate::provisioning::LocalOutcome::Refused {
+                break;
+            }
+        }
+        refusals.push(format!("{}: {}", model.name, last_reasons));
+    }
+    if refusals.is_empty() {
+        return Err("No declared model file is present in the local installation root. Nothing can be downloaded automatically until a signed catalog exists.".to_owned());
+    }
+    Err(format!(
+        "No present, hash-verified model file can load on this machine right now: {}",
+        refusals.join(" | ")
+    ))
+}
+
 #[tauri::command]
-pub fn select_desktop_model(vault_root: String) -> Result<DesktopModelSelection, String> {
-    // A self-declared filename or an arbitrary scanned GGUF is not a qualified
-    // desktop tier. Only the validated package's declared model lane is eligible.
+pub async fn select_desktop_model(
+    vault_root: String,
+    startup: tauri::State<'_, crate::startup::StartupCoordinator>,
+) -> Result<DesktopModelSelection, String> {
+    if startup.is_local() {
+        startup.require_selected_root(std::path::Path::new(&vault_root))?;
+        // Local mode: files already present in the selected root decide, through
+        // one native decision function. No typed Pocket manifest requirement.
+        return select_local_model(&vault_root).await;
+    }
+    // Explicit legacy drive lane — unchanged. A self-declared filename or an
+    // arbitrary scanned GGUF is not a qualified desktop tier. Only the validated
+    // package's declared model lane is eligible.
     let manifest = std::fs::read_to_string(PathBuf::from(&vault_root).join("manifest.json"))
         .map_err(|e| e.to_string())?;
     serde_json::from_str::<unoone_usb_manifest::PocketManifest>(&manifest)
@@ -3143,6 +3260,33 @@ pub async fn start_model_server(
     startup: tauri::State<'_, crate::startup::StartupCoordinator>,
 ) -> Result<u16, String> {
     use std::sync::atomic::Ordering;
+    // Decide before touching the existing process/activation state. In local
+    // mode the one native decision function (provisioning::decide_local) must
+    // admit this exact declared, hash-verified file against total AND available
+    // RAM; a refusal leaves any running server untouched. Downloads remain
+    // blocked separately (provisioning::require_shipping_admission).
+    let local_report = if startup.is_local() {
+        startup.require_selected_root(std::path::Path::new(&vault_root))?;
+        let (_, file) = local_model_files(&vault_root)
+            .into_iter()
+            .find(|(model, _)| {
+                model.path == config.model_path
+                    || model_cache_alias(&vault_root, &model.path, &config.model_path)
+            })
+            .ok_or("Selected file is not a declared model in the local installation root")?;
+        let report = local_decision(&vault_root, &file, &config).await;
+        if !report.outcome.allows_load() {
+            return Err(format!(
+                "{} cannot load on this machine right now ({:?}): {}",
+                report.id,
+                report.outcome,
+                report.reasons.join("; ")
+            ));
+        }
+        Some(report)
+    } else {
+        None
+    };
     if state.suspended.load(Ordering::SeqCst) {
         return Err("Unlock Pocket AI before restarting inference".to_owned());
     }
@@ -3169,8 +3313,10 @@ pub async fn start_model_server(
     let serving_verified_host_cache = model_served_from_verified_host_cache(&config.model_path);
     // Two-tier gate (see the comment above); the release condition reads
     // cleanly as: full sweep done, or (boot gate done AND cached model).
+    // Local mode has no drive asset sweep: the declared digest was verified by
+    // decide_local above and `start_server` re-hashes the bytes before spawn.
     let gate_deadline = Instant::now() + Duration::from_secs(20 * 60);
-    loop {
+    while local_report.is_none() {
         cancel
             .check("desktop.model.validation")
             .map_err(|e| e.to_string())?;
@@ -3216,9 +3362,22 @@ pub async fn start_model_server(
             serving_verified_host_cache
         ),
     );
-    if let Some(previous) = active_manager.take() {
-        previous.stop_server()?;
-    }
+    // Legacy drive lane: stop-before-replacement, unchanged. Local lane: the
+    // previous server stays resident and published until the candidate passes
+    // its inference smoke (decide_local already budgeted the candidate against
+    // the RAM that is AVAILABLE with the previous server still running).
+    let previous_port = *state
+        .server_port
+        .lock()
+        .map_err(|e| format!("State lock error: {}", e))?;
+    let previous = if local_report.is_some() {
+        active_manager.take()
+    } else {
+        if let Some(previous) = active_manager.take() {
+            previous.stop_server()?;
+        }
+        None
+    };
     startup.set_phase(crate::startup::StartupPhase::StartingModel);
     let manager = std::sync::Arc::new(ModelManager::new());
     // Default to the best detected backend.
@@ -3232,12 +3391,129 @@ pub async fn start_model_server(
     let port = match manager.start_server(&config, &vault_root, &cancel).await {
         Ok(port) => port,
         Err(error) => {
+            let retained = previous.is_some();
+            *active_manager = previous;
             if generation == state.generation.load(Ordering::SeqCst) {
-                startup.set_phase(crate::startup::StartupPhase::LimitedMode);
+                startup.set_phase(if retained {
+                    crate::startup::StartupPhase::Ready
+                } else {
+                    crate::startup::StartupPhase::LimitedMode
+                });
             }
-            return Err(error);
+            return Err(if retained {
+                format!("{error} (previous model server retained)")
+            } else {
+                error
+            });
         }
     };
+    // Local lane: identity + /health is not inference. One bounded completion
+    // must return tokens before this server can replace the previous one or be
+    // reported as ready. Failure/OOM: candidate killed, previous server kept.
+    if let Some(report) = local_report.as_ref() {
+        let model_id = manager.running_model_id().unwrap_or_default();
+        let smoke =
+            crate::provisioning::inference_smoke(port, &model_id, Duration::from_secs(120)).await;
+        crate::boot_trace::mark_detail(
+            "start_model_server: local inference smoke",
+            &format!("port={port} result={smoke:?}"),
+        );
+        match crate::provisioning::resolve_replacement(previous, manager, smoke.is_ok()) {
+            crate::provisioning::Replacement::Rollback {
+                kill_candidate,
+                active,
+            } => {
+                let _ = kill_candidate.stop_server();
+                let retained = active.is_some();
+                *active_manager = active;
+                if generation == state.generation.load(Ordering::SeqCst) {
+                    startup.set_phase(if retained {
+                        crate::startup::StartupPhase::Ready
+                    } else {
+                        crate::startup::StartupPhase::LimitedMode
+                    });
+                }
+                return Err(format!(
+                    "Inference smoke failed; {} not marked ready{}: {}",
+                    report.id,
+                    if retained {
+                        " (previous model server retained)"
+                    } else {
+                        ""
+                    },
+                    smoke.err().unwrap_or_default()
+                ));
+            }
+            crate::provisioning::Replacement::Promote {
+                stop_previous,
+                active,
+            } => {
+                if let Some(previous) = stop_previous {
+                    if let Err(e) = previous.stop_server() {
+                        crate::boot_trace::mark_detail("start_model_server: previous stop", &e);
+                    }
+                }
+                if let (Ok((tokens, ms, chars)), Some(sha256)) = (
+                    smoke,
+                    ModelManager::read_manifest_model_hash(&vault_root, &config.model_path),
+                ) {
+                    let probe =
+                        crate::provisioning_probe::probe(std::path::Path::new(&vault_root)).await;
+                    let evidence = crate::provisioning::SmokeEvidence {
+                        schema_version: 1,
+                        sha256: sha256.to_ascii_lowercase(),
+                        generated_tokens: tokens,
+                        generation_ms: ms,
+                        content_chars: chars,
+                        captured_at_ms: crate::provisioning_probe::now_ms(),
+                        os: probe.os.measured().cloned().unwrap_or_default(),
+                        total_ram_bytes: probe.total_ram_bytes.measured().copied().unwrap_or(0),
+                    };
+                    if let Err(e) = crate::provisioning::record_smoke(
+                        std::path::Path::new(&vault_root),
+                        &evidence,
+                    ) {
+                        crate::boot_trace::mark_detail("start_model_server: smoke record", &e);
+                    }
+                }
+                return finish_model_start(
+                    state,
+                    startup,
+                    active_manager,
+                    active,
+                    port,
+                    previous_port,
+                    generation,
+                )
+                .await;
+            }
+        }
+    }
+    finish_model_start(
+        state,
+        startup,
+        active_manager,
+        manager,
+        port,
+        previous_port,
+        generation,
+    )
+    .await
+}
+
+/// Publish a started (and, in local mode, smoke-tested) server under the same
+/// admission mutex as suspend. Shared by both lanes; a late cancel kills the
+/// candidate and restores the previous port.
+async fn finish_model_start(
+    state: tauri::State<'_, ModelManagerState>,
+    startup: tauri::State<'_, crate::startup::StartupCoordinator>,
+    mut active_manager: tokio::sync::MutexGuard<'_, Option<std::sync::Arc<ModelManager>>>,
+    manager: std::sync::Arc<ModelManager>,
+    port: u16,
+    previous_port: u16,
+    generation: u64,
+) -> Result<u16, String> {
+    use std::sync::atomic::Ordering;
     *state
         .server_port
         .lock()
@@ -3253,6 +3529,10 @@ pub async fn start_model_server(
         || generation != state.generation.load(Ordering::SeqCst)
     {
         let _ = manager.stop_server();
+        *state
+            .server_port
+            .lock()
+            .map_err(|e| format!("State lock error: {}", e))? = previous_port;
         return Err("Model startup was cancelled by lock or disconnect".to_owned());
     }
     *state
@@ -3262,6 +3542,22 @@ pub async fn start_model_server(
     *active_manager = Some(manager);
     startup.set_phase(crate::startup::StartupPhase::VerifyingModel);
     Ok(port)
+}
+
+/// True when `candidate` is the digest-verified host-cache copy of the declared
+/// `declared_path` (same manifest sha256), so local-mode admission can resolve
+/// a cache launch path back to its declared inventory entry.
+fn model_cache_alias(vault_root: &str, declared_path: &str, candidate: &str) -> bool {
+    if !model_served_from_verified_host_cache(candidate) {
+        return false;
+    }
+    match (
+        ModelManager::read_manifest_model_hash(vault_root, declared_path),
+        ModelManager::read_manifest_model_hash(vault_root, candidate),
+    ) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
+        _ => false,
+    }
 }
 
 /// Proper health check using reqwest instead of raw TCP.
