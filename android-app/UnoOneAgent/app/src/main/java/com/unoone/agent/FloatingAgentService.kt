@@ -1,5 +1,9 @@
 package com.unoone.agent
 
+import com.unoone.agent.core.latency.*
+import com.unoone.agent.voice.VoiceLatency
+
+import com.unoone.agent.core.runtime.GlobalTaskCancellation
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -45,10 +49,16 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-import com.unoone.agent.di.DatabaseProvider
+import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.runtime.AgentRuntimeGate
+import com.unoone.agent.core.util.Logger
 import com.unoone.agent.ui.theme.UnoOneTheme
+import com.unoone.agent.voice.VoiceActivityPolicy
 import com.unoone.agent.voice.VoiceModule
+import com.unoone.agent.voice.VoiceService
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -58,6 +68,11 @@ import kotlinx.coroutines.launch
 class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner {
 
     private lateinit var windowManager: WindowManager
+    private var overlayOwner: com.unoone.agent.core.overlay.OwnOverlayBroker? = null
+    private val ownedWindows = linkedMapOf<String, Pair<View, WindowManager.LayoutParams>>()
+    private var stopRegistration: AutoCloseable? = null
+    private var permissionRegistration: AutoCloseable? = null
+    private var systemPermissionRegistration: AutoCloseable? = null
     private var bubbleView: View? = null
     private var chatOverlayView: View? = null
 
@@ -72,6 +87,8 @@ class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, Sav
 
     private lateinit var orchestrator: AgentOrchestrator
     private lateinit var voiceModule: VoiceModule
+    private var cancelFloatingCapture: (() -> Unit)? = null
+    private var floatingCaptureIdle: () -> Boolean = { true }
 
     override val lifecycle: Lifecycle get() = lifecycleRegistry
     override val viewModelStore: ViewModelStore get() = store
@@ -95,27 +112,50 @@ class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, Sav
         // Reuse the orchestrator's shared VoiceModule instead of creating a duplicate
         voiceModule = orchestrator.voiceModule
 
-        // Expert: handle permissions by redirecting to MainActivity
-        orchestrator.onPermissionRequired = { _ ->
-            val intent = Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(intent)
-            Toast.makeText(this, "Permissions required. Opening UnoOne...", Toast.LENGTH_SHORT).show()
+        // Detachable, independent listeners: never overwrite MainActivity's permission owner.
+        val appContext = applicationContext
+        val permissionListener: com.unoone.agent.core.util.PermissionListener = { _ ->
+            appContext.startActivity(Intent(appContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
-
-        // System permissions (Accessibility / MediaProjection / Overlay) need a settings/consent
-        // screen — hand off to MainActivity, which deep-links to the right one and resumes the
-        // stashed command on return. Mirrors the runtime-perm redirect above.
-        orchestrator.onSystemPermissionRequired = { _ ->
-            val intent = Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(intent)
-            Toast.makeText(this, "System access required. Opening UnoOne...", Toast.LENGTH_SHORT).show()
+        val systemListener: com.unoone.agent.core.util.SystemPermissionListener = { _ ->
+            appContext.startActivity(Intent(appContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
+        val runtimeCallbacks = orchestrator.onPermissionRequiredMulticast
+        val systemCallbacks = orchestrator.onSystemPermissionRequiredMulticast
+        runtimeCallbacks.add(permissionListener)
+        systemCallbacks.add(systemListener)
+        permissionRegistration = AutoCloseable { runtimeCallbacks.remove(permissionListener) }
+        systemPermissionRegistration = AutoCloseable { systemCallbacks.remove(systemListener) }
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        overlayOwner = com.unoone.agent.overlay.OwnOverlayBridge.install(object : com.unoone.agent.core.overlay.OwnOverlayBroker.WindowPort {
+            override fun add(id: String) {
+                val (view, params) = checkNotNull(ownedWindows[id])
+                check(android.provider.Settings.canDrawOverlays(this@FloatingAgentService))
+                val owner = checkNotNull(overlayOwner)
+                com.unoone.agent.overlay.OwnOverlayBridge.registerView(owner, id, view)
+                try { windowManager.addView(view, params) } catch (t: Throwable) {
+                    if (!view.isAttachedToWindow)
+                        com.unoone.agent.overlay.OwnOverlayBridge.unregisterView(owner, id, view)
+                    throw t
+                }
+            }
+            override fun remove(id: String) {
+                val (view, _) = checkNotNull(ownedWindows[id])
+                // Synchronous Main-thread removal ACK; caller still needs native window proof.
+                windowManager.removeViewImmediate(view)
+                com.unoone.agent.overlay.OwnOverlayBridge.unregisterView(checkNotNull(overlayOwner), id, view)
+            }
+        }, stopAvailable = { com.unoone.agent.overlay.StopSurfaceAdmission.nativeStopNotificationAvailable(applicationContext) },
+            captureIdle = { floatingCaptureIdle() && voiceModule.isForegroundCaptureIdle() })
+        stopRegistration = GlobalTaskCancellation.register(this) { service ->
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                service.cancelFloatingCapture?.invoke()
+                com.unoone.agent.overlay.FloatingContextEvidence.current = null
+                runCatching { service.overlayOwner?.let { com.unoone.agent.overlay.OwnOverlayBridge.stop(it, AgentRuntimeGate.isEnabled()) } }
+                    .onFailure { Logger.e("Overlay Stop cleanup failed", it) }
+            }
+        }
         showFloatingBubble()
     }
 
@@ -149,6 +189,7 @@ class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, Sav
         }
 
         val composeView = ComposeView(this).apply {
+            setViewCompositionStrategy(androidx.compose.ui.platform.ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setViewTreeLifecycleOwner(this@FloatingAgentService)
             setViewTreeViewModelStoreOwner(this@FloatingAgentService)
             setViewTreeSavedStateRegistryOwner(this@FloatingAgentService)
@@ -168,14 +209,30 @@ class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, Sav
         }
 
         bubbleView = composeView
-        windowManager.addView(composeView, params)
+        ownedWindows["bubble"] = composeView to params
+        overlayOwner!!.register("bubble", idle = true)
     }
 
     private fun toggleChatOverlay() {
-        if (chatOverlayView == null) showChatOverlay() else hideChatOverlay()
+        // A bubble tap is an explicit user interaction. Use it to recover the microphone FGS when
+        // Android/HyperOS killed an earlier sticky instance; background Application startup is not
+        // always allowed to launch a microphone foreground service on Android 14+.
+        runCatching { VoiceService.start(this) }
+            .onFailure { Logger.w("FloatingAgentService: voice service restart failed: ${it.message}") }
+        showChatOverlay()
     }
 
+    private var chatSourceSessionOpen = false
+
     private fun showChatOverlay() {
+        // Only an explicit new chat session captures a source. A visible/resumed chat retains
+        // its original scope, including its original timestamp; stale admission asks for an app.
+        if (!chatSourceSessionOpen) {
+            com.unoone.agent.overlay.FloatingContextEvidence.current =
+                com.unoone.agent.overlay.FloatingContextEvidence.capture()
+            chatSourceSessionOpen = true
+        }
+        if (chatOverlayView != null) { overlayOwner?.desired("chat", true); return }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -187,6 +244,7 @@ class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, Sav
         }
 
         val composeView = ComposeView(this).apply {
+            setViewCompositionStrategy(androidx.compose.ui.platform.ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
             setViewTreeLifecycleOwner(this@FloatingAgentService)
             setViewTreeViewModelStoreOwner(this@FloatingAgentService)
             setViewTreeSavedStateRegistryOwner(this@FloatingAgentService)
@@ -202,7 +260,9 @@ class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, Sav
                             serviceContext = this@FloatingAgentService,
                             orchestrator = orchestrator,
                             voiceModule = voiceModule,
-                            onClose = { hideChatOverlay() }
+                            onClose = { hideChatOverlay() },
+                            registerCaptureClose = { cancelFloatingCapture = it },
+                            registerCaptureIdle = { floatingCaptureIdle = it }
                         )
                     }
                 }
@@ -210,36 +270,35 @@ class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, Sav
         }
 
         chatOverlayView = composeView
-        windowManager.addView(composeView, params)
+        ownedWindows["chat"] = composeView to params
+        overlayOwner!!.register("chat")
     }
 
     private fun hideChatOverlay() {
-        chatOverlayView?.let {
-            windowManager.removeView(it)
-            chatOverlayView = null
-        }
+        cancelFloatingCapture?.invoke()
+        if (chatOverlayView != null) overlayOwner?.desired("chat", false)
+        // desired(false) synchronously removes the window; reopening is explicit fresh scope.
+        chatSourceSessionOpen = false
+        com.unoone.agent.overlay.FloatingContextEvidence.current = null
     }
 
     override fun onDestroy() {
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
-        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
-
-        // 0C-10: Dispose ComposeView compositions before removing from window
-        // to prevent memory leaks from lingering compositions
-        (bubbleView as? ComposeView)?.disposeComposition()
-        (chatOverlayView as? ComposeView)?.disposeComposition()
-
-        bubbleView?.let { windowManager.removeView(it) }
-        bubbleView = null
-        hideChatOverlay()
-
-        // 0C-1: Stop foreground service properly
+        cancelFloatingCapture?.invoke()
+        stopRegistration?.close()
+        permissionRegistration?.close(); permissionRegistration = null
+        systemPermissionRegistration?.close(); systemPermissionRegistration = null
+        runCatching { overlayOwner?.let { com.unoone.agent.overlay.OwnOverlayBridge.detach(it) } }
+            .onFailure { Logger.e("Overlay destruction failed", it) }
+        overlayOwner = null
+        ownedWindows.values.forEach { (view, _) ->
+            runCatching { (view as? ComposeView)?.disposeComposition() }
+                .onFailure { Logger.e("Overlay disposal failed", it) }
+        }
+        ownedWindows.clear(); bubbleView = null; chatOverlayView = null
+        lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
         stopForeground(STOP_FOREGROUND_REMOVE)
-
-        // No voiceModule.release() here — it's shared with the orchestrator and will be
-        // released when the Application is destroyed or the ViewModel is cleared.
         store.clear()
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -260,8 +319,9 @@ class FloatingAgentService : Service(), LifecycleOwner, ViewModelStoreOwner, Sav
         // User-perceptible FGS notification (Play policy): the user toggled the bubble on, and can
         // pause/stop from the notification. No silent background surface.
         return NotificationCompat.Builder(this, CHANNEL_ID)
+            .addAction(android.R.drawable.ic_media_pause, "Stop", TaskStopReceiver.pendingIntent(this))
             .setContentTitle("UnoOne active")
-            .setContentText("Floating agent is active — tap to pause / stop")
+            .setContentText("Floating agent ready — Stop cancels current tasks")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
@@ -304,12 +364,194 @@ fun ChatOverlayCard(
     serviceContext: android.content.Context,
     orchestrator: AgentOrchestrator,
     voiceModule: VoiceModule,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    registerCaptureClose: ((() -> Unit)?) -> Unit = {},
+    registerCaptureIdle: (() -> Boolean) -> Unit = {}
 ) {
     var text by remember { mutableStateOf("") }
     var isListening by remember { mutableStateOf(false) }
+    var captureJob by remember { mutableStateOf<Job?>(null) }
+    var ownerHandle by remember { mutableStateOf<VoiceModule.CaptureHandle?>(null) }
+    var starting by remember { mutableStateOf<Any?>(null) }
+    var captureEpoch by remember { mutableStateOf(0L) }
+    var recordingGeneration by remember { mutableStateOf<Long?>(null) }
+    val cueView = androidx.compose.ui.platform.LocalView.current
+    var captureTrace by remember { mutableStateOf<LatencyToken?>(null) }
+    var captureIngress by remember { mutableStateOf<com.unoone.agent.core.voice.VoiceIngress?>(null) }
+    val review by orchestrator.unifiedVoice.review.collectAsState()
+    val voiceStatus by orchestrator.unifiedVoice.status.collectAsState()
+    var legacyReview by remember { mutableStateOf<Pair<String, (Boolean) -> Unit>?>(null) }
+    DisposableEffect(orchestrator) {
+        val listener: com.unoone.agent.core.util.ConfirmationListener = { message, respond -> legacyReview = message to respond }
+        orchestrator.onConfirmationRequiredMulticast.add(listener)
+        onDispose { orchestrator.onConfirmationRequiredMulticast.remove(listener); legacyReview = null }
+    }
+    val ownsCapture = remember { mutableStateOf(false) }
+    val latestAmplitude = remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
+    val voiceRoutes = remember(scope) { CaptureRoutingLifetime(scope) }
     val steps by orchestrator.timelineSteps.collectAsState()
+
+    val amplitudeListener = remember<(Float) -> Unit> {
+        { amplitude -> latestAmplitude.floatValue = amplitude }
+    }
+    fun closeCapture() {
+        voiceRoutes.stop()
+        captureEpoch++
+        starting = null
+        captureJob?.cancel()
+        ownerHandle?.let { voiceModule.discardCapture(it) }
+        ownerHandle = null
+        ownsCapture.value = false
+        isListening = false
+        orchestrator.unifiedVoice.clear()
+        VoiceService.foregroundSessionActive = false
+    }
+    DisposableEffect(voiceModule) {
+        registerCaptureClose { closeCapture() }
+        registerCaptureIdle { starting == null && voiceModule.isForegroundCaptureIdle() }
+        voiceModule.addAmplitudeListener(amplitudeListener)
+        onDispose {
+            voiceModule.removeAmplitudeListener(amplitudeListener)
+            closeCapture()
+            registerCaptureClose(null)
+            registerCaptureIdle { true }
+        }
+    }
+
+    fun finishVoiceCapture(completed: Boolean = true) {
+        val owner = ownerHandle ?: return
+        val epoch = captureEpoch
+        val ingress = captureIngress ?: return
+        val trace = captureTrace
+        val generation = ingress.captureGlobalGeneration
+        if (!ownsCapture.value) return
+        ownsCapture.value = false
+        isListening = false
+        captureJob?.cancel()
+        captureJob = null
+        captureJob = scope.launch {
+            var routed = false
+            try {
+                VoiceLatency.recorder.mark(trace, LatencyStage.ENDPOINT_DECISION)
+                val result = voiceModule.stopAndTranscribe(owner, trace)
+                voiceRoutes.retire(owner, ownerHandle) {
+                    ownerHandle = null
+                    starting = null
+                    captureJob = null
+                    VoiceService.foregroundSessionActive = false
+                }
+                if (epoch != captureEpoch) return@launch
+                if (result is Result.Success && com.unoone.agent.voice.VoiceControlPolicy.isStop(result.data)) { routed = true; voiceRoutes.route { try { kotlinx.coroutines.withContext(CurrentLatencyContext(trace)) { orchestrator.unifiedVoice.accept(ingress.copy(transcript = result.data), trace) } } finally { VoiceLatency.recorder.closeCapture(trace) } }; return@launch }
+                if (generation != GlobalTaskCancellation.generation || !com.unoone.agent.core.runtime.AgentRuntimeGate.isEnabled()) return@launch
+                if (!com.unoone.agent.voice.UtteranceCompletionPolicy.eligible(com.unoone.agent.voice.UtteranceCompletionPolicy.endpointReason(completed), (result as? Result.Success)?.data)) {
+                    if (!completed) voiceModule.speakAwait(com.unoone.agent.voice.UtteranceCompletionPolicy.SHORTER_CUE)
+                    return@launch
+                }
+                when (result) {
+                    is Result.Success -> {
+                        val command = result.data.trim()
+                        if (command.isBlank()) {
+                            voiceModule.speakAwait("I didn't hear a command. Tap the microphone and try again.")
+                        } else {
+                            routed = true
+                            voiceRoutes.route {
+                            VoiceService.beginForegroundTask()
+                            try {
+                                kotlinx.coroutines.withContext(CurrentLatencyContext(trace)) { orchestrator.unifiedVoice.accept(ingress.copy(transcript = command), trace) }
+                            } finally {
+                                VoiceService.endForegroundTask()
+                                VoiceLatency.recorder.closeCapture(trace)
+                            }
+                            }
+                        }
+                    }
+                    is Result.Error -> {
+                        Logger.w("FloatingAgentService: transcription failed: ${result.message}")
+                        voiceModule.speakAwait("I couldn't understand that. Tap the microphone and try again.")
+                    }
+                }
+            } finally {
+                if (!routed) VoiceLatency.recorder.closeCapture(trace)
+                voiceRoutes.retire(owner, ownerHandle) {
+                    voiceModule.discardCapture(owner)
+                    ownerHandle = null
+                    VoiceService.foregroundSessionActive = false
+                }
+            }
+        }
+    }
+
+    fun startVoiceCapture() {
+        if (starting != null || ownerHandle != null || ownsCapture.value) return
+        val startOwner = Any()
+        starting = startOwner
+        val generation = GlobalTaskCancellation.generation
+        recordingGeneration = generation
+        captureJob = scope.launch {
+            try {
+            // Pause the passive wake recorder before the audible cue and one-shot capture so the
+            // two AudioRecord owners never contend or transcribe UnoOne's own voice.
+            VoiceService.foregroundSessionActive = true
+            runCatching { VoiceService.start(serviceContext) }
+                .onFailure { Logger.w("FloatingAgentService: voice service unavailable: ${it.message}") }
+            if (voiceModule.isSpeechBusy()) { VoiceService.foregroundSessionActive = false; return@launch }
+            captureIngress = orchestrator.unifiedVoice.capture(floating = true)
+            captureTrace = captureIngress?.let { VoiceLatency.recorder.forRequest(it.requestId) }
+            VoiceLatency.recorder.mark(captureTrace, LatencyStage.MIC_REQUEST)
+            val spokenCue = com.unoone.agent.voice.ListeningCuePolicy.selected(serviceContext) == com.unoone.agent.voice.ListeningCue.SPOKEN
+            if (generation != GlobalTaskCancellation.generation || !com.unoone.agent.core.runtime.AgentRuntimeGate.isEnabled()) { VoiceService.foregroundSessionActive = false; return@launch }
+            if (starting !== startOwner) return@launch
+            latestAmplitude.floatValue = 0f
+            val captureResult = voiceModule.startForegroundCapture(serviceContext, scope, captureTrace) {
+                if (spokenCue) {
+                    VoiceLatency.recorder.mark(captureTrace, LatencyStage.CUE_REQUEST)
+                    check(voiceModule.speakAwait("Listening. Say one command.", trace = captureTrace) !is Result.Error)
+                }
+                check(starting === startOwner && generation == GlobalTaskCancellation.generation)
+            }
+            when (val result = captureResult) {
+                is Result.Success -> {
+                    ownerHandle = result.data
+                    ownsCapture.value = true
+                    isListening = true
+                    if (!spokenCue) {
+                        val haptic = cueView.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+                        android.widget.Toast.makeText(serviceContext, if (haptic) "Listening — haptic delivered" else "Listening — visual cue", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                    captureJob = scope.launch {
+                        var completed = false
+                        var speechStarted = false
+                        var silenceSince = 0L
+                        val startedAt = System.currentTimeMillis()
+                        while (
+                            isActive && ownsCapture.value &&
+                            System.currentTimeMillis() - startedAt < VoiceActivityPolicy.MAX_UTTERANCE_MS
+                        ) {
+                            delay(100L)
+                            if (VoiceActivityPolicy.isSpeech(latestAmplitude.floatValue)) {
+                                speechStarted = true
+                                silenceSince = 0L
+                            } else if (speechStarted) {
+                                if (silenceSince == 0L) silenceSince = System.currentTimeMillis()
+                                if (System.currentTimeMillis() - silenceSince >= VoiceActivityPolicy.TRAILING_SILENCE_MS) {
+                                    completed = true
+                                    break
+                                }
+                            }
+                        }
+                        finishVoiceCapture(completed)
+                    }
+                }
+                is Result.Error -> {
+                    VoiceService.foregroundSessionActive = false
+                    Logger.w("FloatingAgentService: record start failed: ${result.message}")
+                    voiceModule.speakAwait("The microphone could not start. Open UnoOne and check voice settings.")
+                }
+            }
+            } finally { if (starting === startOwner) starting = null }
+        }
+    }
 
     // Reactive mic permission check — re-evaluated on every recomposition
     val hasMicPermission = ContextCompat.checkSelfPermission(
@@ -338,6 +580,21 @@ fun ChatOverlayCard(
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 val scrollState = rememberScrollState()
                 Column(modifier = Modifier.verticalScroll(scrollState)) {
+                    Text(voiceStatus)
+                    legacyReview?.let { displayed ->
+                        Text(displayed.first)
+                        Row {
+                            Button(onClick = { legacyReview = null; displayed.second(true) }) { Text("Confirm") }
+                            Button(onClick = { legacyReview = null; displayed.second(false) }) { Text("Cancel") }
+                        }
+                    }
+                    review?.let { displayed ->
+                        Text(VoicePurposeAdapter.description(displayed))
+                        Row {
+                            Button(onClick = { scope.launch { orchestrator.unifiedVoice.button(displayed, com.unoone.agent.core.voice.ReviewDecision.CONFIRM) } }) { Text("Confirm") }
+                            Button(onClick = { scope.launch { orchestrator.unifiedVoice.button(displayed, com.unoone.agent.core.voice.ReviewDecision.CANCEL) } }) { Text("Cancel") }
+                        }
+                    }
                     steps.forEachIndexed { index, step ->
                         // Eyes-free (WS6): the most recent step is a TalkBack live region, so a blind
                         // user hears progress ("Listening", "Processing", "Done") without touching the
@@ -385,16 +642,9 @@ fun ChatOverlayCard(
                             return@IconButton
                         }
                         if (isListening) {
-                            isListening = false
-                            scope.launch {
-                                val result = voiceModule.stopAndTranscribe()
-                                if (result is com.unoone.agent.core.model.Result.Success) {
-                                    orchestrator.processCommand(result.data, com.unoone.agent.core.model.InputType.VOICE)
-                                }
-                            }
+                            finishVoiceCapture()
                         } else {
-                            isListening = true
-                            voiceModule.startRecording(serviceContext, scope)
+                            startVoiceCapture()
                         }
                     },
                     colors = IconButtonDefaults.iconButtonColors(

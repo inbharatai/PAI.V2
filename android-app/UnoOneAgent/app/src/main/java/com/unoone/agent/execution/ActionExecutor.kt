@@ -1,14 +1,18 @@
 package com.unoone.agent.execution
 
+import com.unoone.agent.vault.VaultSyncPlanner
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import android.content.Context
+import com.unoone.agent.core.device.sensitiveObservation
 import com.unoone.agent.accessibilitycontrol.AccessibilityControl
 import com.unoone.agent.agentrouter.AgentRouter
 import com.unoone.agent.core.interfaces.IActionExecutor
 import com.unoone.agent.core.model.Result
 import com.unoone.agent.core.model.ToolCall
+import com.unoone.agent.core.model.ToolCallValidator
 import com.unoone.agent.core.runtime.AgentRuntimeGate
 import com.unoone.agent.core.safety.ToolPermissionRegistry
-import com.unoone.agent.core.util.Logger
 import com.unoone.agent.core.util.TextSummarizer
 import com.unoone.agent.data.DataExporter
 import com.unoone.agent.phonecontrol.CalendarControl
@@ -17,15 +21,12 @@ import com.unoone.agent.phonecontrol.OcrControl
 import com.unoone.agent.phonecontrol.PackageResolver
 import com.unoone.agent.phonecontrol.PhoneControl
 import com.unoone.agent.phonecontrol.ScreenshotCapture
-import com.unoone.agent.screenshot.ScreenshotPermissionActivity
 import com.unoone.agent.storage.dao.ActionLogDao
 import com.unoone.agent.storage.dao.MemoryDao
 import com.unoone.agent.storage.dao.NoteDao
 import com.unoone.agent.storage.dao.SkillDao
 import com.unoone.agent.storage.entity.NoteEntity
-import com.unoone.agent.vault.VaultSyncPlanner
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.delay
 
@@ -44,23 +45,30 @@ class ActionExecutor(
     private val ocrControl: OcrControl,
     private val accessibilityControl: AccessibilityControl,
     private val agentRouter: AgentRouter,
-    /** Supplies the current voice/TTS language code (e.g. "en", "hi") so OCR can select
-     *  the appropriate Indic recognizer alongside Latin for Indic-script screens. M15. */
-    var voiceLanguageProvider: () -> String = { "en" }
+    private val calendarAdapter: CalendarAdapter = AndroidCalendarAdapter(context),
+    // Null until a native caller has a known user-configured zone; never systemDefault().
+    private val configuredCalendarZone: java.time.ZoneId? = null
 ) : IActionExecutor {
+
+    var vaultMirror: com.unoone.agent.vaultbridge.VaultMirror? = null
 
     private val dataExporter = DataExporter(context, noteDao, skillDao, memoryDao, actionLogDao)
     /** Own screenshot capturer for the `describe_scene` vision path (shares the static MediaProjection). */
     private val screenshotCapture = ScreenshotCapture(context)
 
-    /**
-     * Mirrors note writes/deletes to the shared drive vault when attached +
-     * unlocked; null (tests) keeps cache-only behaviour. Set by the
-     * orchestrator like the other late-bound collaborators.
-     */
-    var vaultMirror: com.unoone.agent.vaultbridge.VaultMirror? = null
-
     override suspend fun executeTool(toolCall: ToolCall): Result<String> {
+        val normalized = try { ToolCallValidator.adaptLegacySkill(toolCall) } catch (e: IllegalArgumentException) {
+            return Result.Error(e.message ?: "Invalid legacy skill")
+        }
+        ToolCallValidator.rejection(normalized)?.let { return Result.Error(it) }
+        // Runtime already owns UI. Never reacquire from an inherited dispatcher/child Job.
+        val execution = com.unoone.agent.task.ResourceEffects.execution()
+        require(com.unoone.agent.task.TaskToolAuthorization.handle(normalized) in execution.context.scope.objectHandles) { "Tool outside native task scope" }
+        execution.beforeEffect(com.unoone.agent.task.NativeToolEffects.capability(normalized.tool))
+        return executeValidatedTool(normalized)
+    }
+
+    private suspend fun executeValidatedTool(toolCall: ToolCall): Result<String> {
         if (!AgentRuntimeGate.isEnabled()) {
             return Result.Error("UnoOne is disabled. Enable it before running an action.")
         }
@@ -77,14 +85,7 @@ class ActionExecutor(
                 }
                 "create_skill" -> {
                     val name = toolCall.args["name"]?.jsonPrimitive?.content ?: "Custom Skill"
-                    // "steps" may arrive as a pipe-delimited string (rule-based parser) OR as a JSON
-                    // array of strings (LLM tool-calling, per UnoOneToolSet). Handle both so the
-                    // LLM path doesn't throw on .jsonPrimitive-of-a-JsonArray and silently fail.
-                    val stepsList: List<String> = when (val stepsEl = toolCall.args["steps"]) {
-                        null -> emptyList()
-                        is JsonArray -> stepsEl.mapNotNull { runCatching { it.jsonPrimitive.content }.getOrNull() }
-                        else -> stepsEl.jsonPrimitive.content.split("|").filter { it.isNotBlank() }
-                    }
+                    val stepsList = (toolCall.args.getValue("steps") as JsonArray).map { it.jsonPrimitive.content }
                     val module = _skillsModule
                         ?: return Result.Error("Skills module not available")
                     if (stepsList.isEmpty()) {
@@ -118,23 +119,14 @@ class ActionExecutor(
                     val query = toolCall.args["query"]?.jsonPrimitive?.content ?: ""
                     if (query.isBlank()) Result.Error("delete_notes requires a query")
                     else {
-                        // Capture vault links BEFORE the rows are gone so the
-                        // deletions can be tombstoned in the shared vault
-                        // (searchOnce uses the same LIKE filter as deleteByQuery).
-                        val victims = noteDao.searchOnce(query)
+                        noteDao.searchOnce(query).forEach { vaultMirror?.onRowDeleted(it.vaultRecordId, VaultSyncPlanner.Kind.NOTE) }
                         val count = noteDao.deleteByQuery(query)
-                        victims.forEach {
-                            vaultMirror?.onRowDeleted(it.vaultRecordId, VaultSyncPlanner.Kind.NOTE)
-                        }
                         Result.Success("Deleted $count note(s) matching '$query'.")
                     }
                 }
                 "delete_all_notes" -> {
-                    val victims = noteDao.allOnce()
+                    noteDao.allOnce().forEach { vaultMirror?.onRowDeleted(it.vaultRecordId, VaultSyncPlanner.Kind.NOTE) }
                     val count = noteDao.deleteAll()
-                    victims.forEach {
-                        vaultMirror?.onRowDeleted(it.vaultRecordId, VaultSyncPlanner.Kind.NOTE)
-                    }
                     Result.Success("Deleted all notes ($count).")
                 }
                 "export_data" -> {
@@ -161,7 +153,7 @@ class ActionExecutor(
                 }
                 "check_calendar" -> {
                     val now = System.currentTimeMillis()
-                    val eventsResult = calendarControl.getEvents(now, now + 86400000)
+                    val eventsResult = calendarAdapter.getEvents(now, now + 86400000)
                     if (eventsResult is Result.Success) {
                         val events = eventsResult.data
                         if (events.isEmpty()) Result.Success("Calendar clear today.")
@@ -170,15 +162,11 @@ class ActionExecutor(
                 }
                 "open_calendar_insert" -> {
                     val title = toolCall.args["title"]?.jsonPrimitive?.content ?: "Untitled event"
-                    val start = parseTimeMs(toolCall.args["start_time"]?.jsonPrimitive?.content)
-                        ?: return Result.Error(
-                            "Calendar date or time is missing or ambiguous. Please give an exact date and time."
-                        )
-                    val end = parseTimeMs(toolCall.args["end_time"]?.jsonPrimitive?.content) ?: (start + 3_600_000L)
+                    val interval = resolveCalendarInterval(toolCall)
                     verifyForegroundLaunch(
-                        phoneControl.openCalendarInsert(title, start, end),
+                        phoneControl.openCalendarInsert(title, interval.startMs, interval.endMs),
                         actionLabel = "Calendar",
-                        successMessage = "Calendar insert opened for '$title'."
+                        successMessage = "ACTION_VERIFIED: Calendar insert opened for '$title' (${interval.report()}). Review and save manually; no event persistence or invitation delivery was verified."
                     )
                 }
                 "open_calendar" -> {
@@ -203,7 +191,9 @@ class ActionExecutor(
                 "open_url" -> {
                     val url = toolCall.args["url"]?.jsonPrimitive?.content ?: ""
                     if (url.isBlank()) Result.Error("open_url requires a url")
-                    else phoneControl.openUrl(url).map { "Opened $url." }
+                    else guardianGate(com.unoone.agent.core.guardian.Intent.OpenLink(
+                        com.unoone.agent.core.guardian.Link(toolCall.args["display_text"]?.jsonPrimitive?.content ?: url, url),
+                        com.unoone.agent.core.guardian.ContentSource.MODEL_OUTPUT)) { phoneControl.openUrl(url).map { "Opened $url." } }
                 }
                 "prepare_document_fill" -> {
                     val format = toolCall.args["format"]?.jsonPrimitive?.content?.lowercase() ?: "pdf"
@@ -223,7 +213,7 @@ class ActionExecutor(
                 "share_text" -> {
                     val text = toolCall.args["text"]?.jsonPrimitive?.content ?: ""
                     if (text.isBlank()) Result.Error("share_text requires text")
-                    else phoneControl.shareText(text).map { "Share sheet opened." }
+                    else guardianGate(com.unoone.agent.core.guardian.Intent.SendMessage(emptyList(), "", text, false, emptyList())) { phoneControl.shareText(text).map { "Share sheet opened." } }
                 }
                 "open_chrome" -> phoneControl.openChrome().map { "Chrome opened." }
                 "open_camera" -> phoneControl.openCamera().map { "Camera active." }
@@ -231,166 +221,41 @@ class ActionExecutor(
                 "ocr_screen" -> readScreenWithOcr()
                 "read_screen" -> readScreenWithAccessibility()
                 "describe_scene" -> describeScene(toolCall)
-
-                // --- Atomic accessibility tools (prefer over system_control) ---
-
-                "go_home" -> accessibilityControl.goHome().map { "Went home" }
-                "go_back" -> accessibilityControl.goBack().map { "Went back" }
-                "scroll" -> {
-                    val direction = toolCall.args["direction"]?.jsonPrimitive?.content?.lowercase() ?: ""
-                    when (direction) {
-                        "up" -> accessibilityControl.scrollUp().map { "Scrolled up" }
-                        "down" -> accessibilityControl.scrollDown().map { "Scrolled down" }
-                        "left", "right" -> accessibilityControl.swipe(direction).map { "Scrolled $direction" }
-                        else -> Result.Error("Unknown scroll direction: $direction. Use 'up', 'down', 'left', or 'right'.")
+                // Same validated task capability, exact original handle and native controls as source.
+                "go_home", "go_back", "open_notifications", "open_recents" ->
+                    executeSystemAction(ToolCall("system_control", JsonObject(mapOf("action" to JsonPrimitive(toolCall.tool)))))
+                "scroll" -> executeSystemAction(ToolCall("system_control", JsonObject(mapOf(
+                    "action" to JsonPrimitive("scroll_" + toolCall.args.getValue("direction").jsonPrimitive.content)))))
+                "click_accessibility_node", "type_into_accessibility_node", "long_press_accessibility_node" ->
+                    Result.Error("Manual handover required: legacy node handles are not native reviewed targets.")
+                "resolve_contact" -> phoneControl.resolveContactName(toolCall.args.getValue("query").jsonPrimitive.content)
+                "draft_whatsapp_message", "send_prepared_whatsapp" -> {
+                    val contact = toolCall.args.getValue("contact_name").jsonPrimitive.content
+                    val number = when (val resolved = phoneControl.resolveContactName(contact)) {
+                        is Result.Error -> return resolved
+                        is Result.Success -> resolved.data
                     }
+                    verifyForegroundLaunch(phoneControl.sendWhatsAppMessage(number, toolCall.args.getValue("message").jsonPrimitive.content),
+                        actionLabel = "WhatsApp", successMessage = "WhatsApp draft opened. Review recipient and press send manually; no message was sent.")
                 }
-                "click_accessibility_node" -> {
-                    val nodeId = toolCall.args["node_id"]?.jsonPrimitive?.content ?: ""
-                    if (nodeId.isBlank()) Result.Error("click_accessibility_node requires a node_id")
-                    else accessibilityControl.clickNodeById(nodeId).map { "Clicked node $nodeId" }
-                }
-                "type_into_accessibility_node" -> {
-                    val nodeId = toolCall.args["node_id"]?.jsonPrimitive?.content ?: ""
-                    val text = toolCall.args["text"]?.jsonPrimitive?.content ?: ""
-                    if (nodeId.isBlank()) Result.Error("type_into_accessibility_node requires a node_id")
-                    else accessibilityControl.typeIntoNodeById(nodeId, text).map { "Typed text into $nodeId" }
-                }
-                "open_notifications" -> accessibilityControl.openNotifications().map { "Opened notifications" }
-                "open_recents" -> accessibilityControl.openRecents().map { "Opened recents" }
-                "long_press_accessibility_node" -> {
-                    val nodeId = toolCall.args["node_id"]?.jsonPrimitive?.content ?: ""
-                    if (nodeId.isBlank()) Result.Error("long_press_accessibility_node requires a node_id")
-                    else accessibilityControl.longPressNodeById(nodeId).map { "Long pressed node $nodeId" }
-                }
-
-                // --- Messaging tools (prefer over send_whatsapp) ---
-
-                "resolve_contact" -> {
-                    val query = toolCall.args["query"]?.jsonPrimitive?.content ?: ""
-                    if (query.isBlank()) Result.Error("resolve_contact requires a query")
-                    else {
-                        // Resolve contact name to phone number via PhoneControl contacts lookup
-                        val resolved = phoneControl.resolveContactName(query)
-                        if (resolved is Result.Success) {
-                            Result.Success("Resolved '$query' to ${resolved.data}")
-                        } else resolved as Result<String>
-                    }
-                }
-                "draft_whatsapp_message" -> {
-                    val contact = toolCall.args["contact_name"]?.jsonPrimitive?.content ?: ""
-                    val msg = toolCall.args["message"]?.jsonPrimitive?.content ?: ""
-                    if (contact.isBlank()) Result.Error("draft_whatsapp_message requires a contact_name")
-                    else {
-                        // Resolve contact name to number, then open WhatsApp draft
-                        val resolved = phoneControl.resolveContactName(contact)
-                        val number = when (resolved) {
-                            is Result.Success -> resolved.data
-                            is Result.Error -> contact // Fall back to raw input (may be a number already)
-                        }
-                        verifyForegroundLaunch(
-                            phoneControl.sendWhatsAppMessage(number, msg),
-                            actionLabel = "WhatsApp",
-                            successMessage = "WhatsApp draft opened for $contact. Please review and press send."
-                        )
-                    }
-                }
-                "send_prepared_whatsapp" -> {
-                    val contact = toolCall.args["contact_name"]?.jsonPrimitive?.content ?: ""
-                    val msg = toolCall.args["message"]?.jsonPrimitive?.content ?: ""
-                    if (contact.isBlank()) Result.Error("send_prepared_whatsapp requires a contact_name")
-                    else {
-                        // Same as draft_whatsapp_message but semantically distinct:
-                        // this tool is called after user confirmation of the draft
-                        val resolved = phoneControl.resolveContactName(contact)
-                        val number = when (resolved) {
-                            is Result.Success -> resolved.data
-                            is Result.Error -> contact
-                        }
-                        verifyForegroundLaunch(
-                            phoneControl.sendWhatsAppMessage(number, msg),
-                            actionLabel = "WhatsApp",
-                            successMessage = "WhatsApp draft opened for $contact. Please review and press send."
-                        )
-                    }
-                }
-
-                // --- Calendar tools (prefer over open_calendar_insert) ---
-
                 "check_calendar_conflict" -> {
-                    // Check for calendar conflicts at a proposed time
-                    // Parse the date/time arguments to narrow the query window
-                    val dateStr = toolCall.args["date"]?.jsonPrimitive?.content
-                    val startTimeStr = toolCall.args["start_time"]?.jsonPrimitive?.content
-                    val endTimeStr = toolCall.args["end_time"]?.jsonPrimitive?.content
-
-                    // Determine the proposed time window using parseTimeMs (already available in this class)
-                    val proposedStart = parseTimeMs(startTimeStr)
-                        ?: parseTimeMs(dateStr)
-                        ?: System.currentTimeMillis()
-                    val proposedEnd = parseTimeMs(endTimeStr)
-                        ?: (proposedStart + 3_600_000L) // default 1-hour slot
-
-                    // Query calendar for the proposed window (with 30min buffer on each side)
-                    val bufferMs = 1_800_000L // 30 minutes
-                    val eventsResult = calendarControl.getEvents(
-                        proposedStart - bufferMs,
-                        proposedEnd + bufferMs
-                    )
-                    if (eventsResult is Result.Success) {
-                        val events = eventsResult.data
-                        // Filter for events that actually overlap with the proposed time
-                        val conflicts = events.filter { event ->
-                            event.startTime < proposedEnd && event.endTime > proposedStart
-                        }
-                        if (conflicts.isEmpty()) {
-                            Result.Success("No calendar conflicts found for the requested time.")
-                        } else {
-                            val conflictList = conflicts.take(5).joinToString("; ") {
-                                val startStr = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
-                                    .format(java.util.Date(it.startTime))
-                                "${it.title} at $startStr"
-                            }
-                            Result.Success("Found ${conflicts.size} conflict(s): $conflictList")
-                        }
-                    } else Result.Error("Calendar access failed.")
+                    CalendarConflictQuery.execute(resolveCalendarInterval(toolCall), calendarAdapter)
                 }
                 "create_calendar_event" -> {
                     val title = toolCall.args["title"]?.jsonPrimitive?.content ?: "Untitled event"
-                    val start = parseTimeMs(toolCall.args["start_time"]?.jsonPrimitive?.content)
-                    val end = parseTimeMs(toolCall.args["end_time"]?.jsonPrimitive?.content)
-                        ?: (start?.plus(3_600_000L))
-                    if (start == null) {
-                        // Try to parse the date field as a fallback
-                        val dateStr = toolCall.args["date"]?.jsonPrimitive?.content
-                        val parsedStart = dateStr?.let { parseTimeMs(it) }
-                        if (parsedStart != null) {
-                            verifyForegroundLaunch(
-                                phoneControl.openCalendarInsert(title, parsedStart, end ?: parsedStart + 3_600_000L),
-                                actionLabel = "Calendar",
-                                successMessage = "Calendar event created for '$title'."
-                            )
-                        } else {
-                            Result.Error("Calendar date or time is missing or ambiguous. Please give an exact date and time.")
-                        }
-                    } else {
-                        verifyForegroundLaunch(
-                            phoneControl.openCalendarInsert(title, start, end ?: start + 3_600_000L),
-                            actionLabel = "Calendar",
-                            successMessage = "Calendar event created for '$title'."
-                        )
-                    }
+                    val interval = resolveCalendarInterval(toolCall)
+                    verifyForegroundLaunch(
+                        phoneControl.openCalendarInsert(title, interval.startMs, interval.endMs),
+                        actionLabel = "Calendar",
+                        successMessage = "ACTION_VERIFIED: Calendar draft opened for '$title' (${interval.report()}). Review and save manually; no event persistence or invitation delivery was verified."
+                    )
                 }
                 "detect_objects" -> {
-                    val activator = _setBlindAidActive
-                        ?: return Result.Error("Blind Aid is not available right now.")
-                    activator(true)
+                    _setBlindAidActive?.invoke(true)
                     Result.Success("Blind Aid activated.")
                 }
                 "deactivate_blind_aid" -> {
-                    val deactivator = _setBlindAidActive
-                        ?: return Result.Error("Blind Aid is not available right now.")
-                    deactivator(false)
+                    _setBlindAidActive?.invoke(false)
                     Result.Success("Blind Aid deactivated.")
                 }
                 "voice_recording" -> {
@@ -465,11 +330,24 @@ class ActionExecutor(
                     }
                 }
                 // "compound" is expanded into ordered sub-calls by AgentOrchestrator and never
-                // reaches executeTool; fall through to the plugin router for anything unrecognized.
-                else -> agentRouter.route(toolCall)
+                // reaches executeTool; unknown tools are rejected rather than routed around validation.
+                else -> Result.Error("Unknown tool: ${toolCall.tool}")
             }
         } catch (e: Exception) {
             Result.Error("Action failed: ${e.message}")
+        }
+    }
+
+    /** §3.6 host-owned guardian at the model-tool boundary. A tool call carries no human acknowledgement, so
+     * WARN and BLOCK both stop here; the person can perform a reviewed action from the native UI instead.
+     * Nothing in the tool arguments (model output) can supply context, contacts or an acknowledgement. */
+    private suspend fun guardianGate(intent: com.unoone.agent.core.guardian.Intent, action: suspend () -> Result<String>): Result<String> {
+        val decision = com.unoone.agent.core.guardian.PrivacyGuardian.check(intent, com.unoone.agent.core.guardian.Context())
+        return try {
+            com.unoone.agent.core.guardian.PrivacyGuardian.enforce(decision, null, System.currentTimeMillis())
+            action()
+        } catch (refusal: com.unoone.agent.core.guardian.GuardianRefusal) {
+            Result.Error(refusal.message + (decision.verification_route?.let { " Independent check: $it" } ?: "") + " Not performed; review it yourself from the personal screen if you still want it.")
         }
     }
 
@@ -518,8 +396,8 @@ class ActionExecutor(
     /**
      * Optional multimodal-vision path for `describe_scene`: when set AND a vision-capable Gemma
      * model is loaded, the orchestrator supplies a callback that describes a screenshot image via
-     * LiteRT-LM `Content.ImageBytes`. Null by default → vision is inactive (the shipped Gemma 4 E2B
-     * artifact is text-only), so `describe_scene` falls back to the always-available
+     * LiteRT-LM `Content.ImageBytes`. Null by default → vision is inactive in this app configuration,
+     * not absent from the upstream multimodal E4B artifact. `describe_scene` falls back to the
      * OCR + foreground-context description built by [com.unoone.agent.core.agent.SceneDescriptionBuilder].
      * Device-time-only; not exercised by unit tests.
      */
@@ -552,28 +430,13 @@ class ActionExecutor(
         false
     }
 
-    /**
-     * Parses an ISO-8601 time string (Instant / offset / local) to epoch millis, or null if absent
-     * or unparseable. Used by open_calendar_insert to honour model-provided start/end times.
-     */
-    private fun parseTimeMs(iso: String?): Long? {
-        if (iso.isNullOrBlank()) return null
-        return try {
-            java.time.Instant.parse(iso).toEpochMilli()
-        } catch (_: Exception) {
-            try {
-                java.time.ZonedDateTime.parse(iso).toInstant().toEpochMilli()
-            } catch (_: Exception) {
-                try {
-                    java.time.LocalDateTime.parse(iso)
-                        .atZone(java.time.ZoneId.systemDefault())
-                        .toInstant().toEpochMilli()
-                } catch (_: Exception) {
-                    null
-                }
-            }
-        }
-    }
+    private fun resolveCalendarInterval(call: ToolCall): CalendarIntervalPolicy.Interval =
+        CalendarIntervalPolicy.resolve(
+            call.args["date"]?.jsonPrimitive?.content,
+            call.args["start_time"]?.jsonPrimitive?.content,
+            call.args["end_time"]?.jsonPrimitive?.content,
+            configuredCalendarZone
+        )
 
     private companion object {
         const val FOREGROUND_VERIFICATION_ATTEMPTS = 20
@@ -584,160 +447,100 @@ class ActionExecutor(
      * read_screen: reads on-screen text via the Accessibility tree only. The pre-execution gate
      * already required Accessibility; we do NOT prompt for MediaProjection mid-execution — that
      * would request access the permission registry never declared for this tool.
-     *
-     * In addition to flat text, includes a structured node list with IDs so the LLM can use
-     * click_accessibility_node / type_into_accessibility_node to target specific nodes.
      */
-    private suspend fun readScreenWithAccessibility(): Result<String> {
-        val accResult = accessibilityControl.captureScreenText()
-        val flatText = when (accResult) {
-            is Result.Success -> accResult.data
-            is Result.Error -> return Result.Error(accResult.message)
-        }
-        val structuredNodes = try {
-            (accessibilityControl.captureStructuredTree() as? Result.Success)?.data ?: emptyList()
-        } catch (_: Exception) { emptyList() }
+    /** Immutable metadata identity; obtaining it never reads node text. */
+    private data class ReadIdentity(val pkg: String, val window: Int, val bounds: android.graphics.Rect,
+        val width: Int, val height: Int, val sequence: Long)
 
-        if (flatText.isBlank() && structuredNodes.isEmpty()) {
-            return Result.Error("No readable text on screen")
-        }
-
-        val parts = mutableListOf<String>()
-        if (flatText.isNotBlank()) parts.add(flatText)
-        if (structuredNodes.isNotEmpty()) {
-            parts.add(com.unoone.agent.core.agent.SceneDescriptionBuilder.formatStructuredNodes(structuredNodes))
-        }
-        return Result.Success(parts.joinToString("\n\n"))
+    private fun readIdentity(packages: Set<String>): ReadIdentity {
+        val service = checkNotNull(com.unoone.agent.accessibilitycontrol.UnoOneAccessibilityService.getInstance())
+        val sequence = service.eventSequence
+        val root = checkNotNull(service.rootInActiveWindow) { "No active window" }
+        return try {
+            val pkg = root.packageName?.toString().orEmpty()
+            check(pkg.isNotEmpty() && pkg in packages) { "Screen outside admitted package scope" }
+            val bounds = android.graphics.Rect().also(root::getBoundsInScreen)
+            val metrics = service.resources.displayMetrics
+            check(sequence == service.eventSequence) { "Screen changed" }
+            ReadIdentity(pkg, root.windowId, bounds, metrics.widthPixels, metrics.heightPixels, sequence)
+        } finally { root.recycle() }
     }
 
-    /**
-     * ocr_screen: runs OCR on a MediaProjection screenshot. The pre-execution gate already required
-     * MediaProjection; we go straight to OCR rather than returning the accessibility tree (which
-     * would defeat the purpose of a dedicated OCR tool).
-     *
-     * For Indic voice languages, runs both Latin and Devanagari recognizers so Hindi/Devanagari
-     * text on screen is captured alongside any English text. M15.
-     */
-    private suspend fun readScreenWithOcr(): Result<String> {
-        if (!ScreenshotCapture.hasPermission()) {
-            // Should not happen — the gate checks this before execute — but be defensive.
-            return Result.Error("Screenshot permission not granted. Grant it in Settings.")
-        }
-        return when (val ocrResult = ocrControl.recognizeScreen(voiceLanguageProvider())) {
-            is Result.Success -> if (ocrResult.data.isNotBlank()) {
-                Result.Success(ocrResult.data)
-            } else {
-                Result.Error("No text found on screen")
-            }
-            is Result.Error -> Result.Error(ocrResult.message)
-        }
+    private suspend fun <T> scopedRead(block: suspend (ReadIdentity, () -> Unit) -> T): T {
+        val execution = com.unoone.agent.task.ResourceEffects.execution()
+        val packages = execution.context.scope.packages.toSet()
+        val identity = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main.immediate) { readIdentity(packages) }
+        val boundary = com.unoone.agent.core.task.NativeReadBoundary(packages,
+            { readIdentity(packages).let { it.pkg to it } }, execution::checkActive)
+        check(identity == readIdentity(packages)) { "Screen changed before read" }
+        return boundary.read { verify -> block(identity, verify) }
     }
 
-    /**
-     * describe_scene: produces a short, spoken scene description of the current screen. The
-     * MediaProjection permission is already gated by the safety pipeline before this runs.
-     *
-     * Two paths, in priority order:
-     *  1. Multimodal vision (device-time, INACTIVE with the shipped text-only models): when
-     *     [_describeSceneWithVision] is wired by the orchestrator AND a vision-capable Gemma model
-     *     is loaded, the screenshot bytes are described by LiteRT-LM `Content.ImageBytes`. On any
-     *     Error (no vision weights, inference failure), this degrades to path 2 — never fails the
-     *     tool solely because vision is unavailable.
-     *  2. Always-available fallback: OCR text + foreground app/activity, framed by the JVM-tested
-     *     [com.unoone.agent.core.agent.SceneDescriptionBuilder]. This is what runs today.
-     *
-     * Honesty: the fallback is a structured description from OCR + context, not true visual
-     * understanding of objects/layout; it never fabricates screen content (the builder says "could
-     * not read" when there are no signals). Vision understanding is pending a vision-capable
-     * `.litertlm` artifact and a device matrix — see DEVICE_VERIFICATION.md.
-     */
-    private suspend fun describeScene(toolCall: ToolCall): Result<String> {
-        if (!ScreenshotCapture.hasPermission()) {
-            return Result.Error("Scene description requires MediaProjection permission. Grant it in Settings.")
-        }
-        val aspect = toolCall.args["aspect"]?.jsonPrimitive?.content ?: ""
+    private suspend fun readScreenWithAccessibility(): Result<String> = scopedRead { identity, verify ->
+        val service = checkNotNull(com.unoone.agent.accessibilitycontrol.UnoOneAccessibilityService.getInstance())
+        val adapter = com.unoone.agent.accessibilitycontrol.AndroidDeviceAdapter(service,
+            allowedObservationPackages = setOf(identity.pkg))
+        verify()
+        val snapshot = adapter.observe().snapshot
+        verify()
+        val text = com.unoone.agent.core.device.SensitiveReadRedaction.readScreen(snapshot, identity.pkg)
+        if (text.isBlank()) Result.Error("No readable text on screen") else Result.Success(text)
+    }
 
-        // Path 1: multimodal vision, if wired. Best-effort; any failure falls through to the
-        // always-available OCR + context description.
-        val vision = _describeSceneWithVision
-        if (vision != null) {
-            val bitmap = (screenshotCapture.captureScreen() as? Result.Success)?.data
-            if (bitmap != null) {
-                val bytes = bitmapToJpeg(bitmap)
-                if (bytes != null) {
-                    try {
-                        val v = vision(bytes, aspect)
-                        if (v is Result.Success && v.data.isNotBlank()) return Result.Success(v.data)
-                    } catch (e: Exception) {
-                        Logger.w("describe_scene: vision path failed, using OCR fallback (${e.message})")
-                    }
-                }
+    private suspend fun readScreenWithOcr(): Result<String> = scopedRead { identity, verify ->
+        if (!ScreenshotCapture.hasPermission()) return@scopedRead Result.Error("Screenshot permission not granted")
+        // Full-display pixels are unsafe for split windows/overlays. Require one full-size active
+        // application window; source redaction remains mandatory even on this narrow path.
+        check(identity.bounds == android.graphics.Rect(0, 0, identity.width, identity.height)) { "Ambiguous screen geometry" }
+        val service = checkNotNull(com.unoone.agent.accessibilitycontrol.UnoOneAccessibilityService.getInstance())
+        fun verifyPixelWindows() {
+            verify()
+            check(com.unoone.agent.core.task.PixelWindowPolicy.allows(
+                service.windows.map { it.id to it.type }, identity.window,
+                android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION)) {
+                "Overlay or ambiguous display pixels; close overlays or review a capture manually"
             }
         }
-
-        // Path 2: OCR + foreground context → SceneDescriptionBuilder.
-        // M15: language-aware OCR — for Indic voice languages, both Latin and Devanagari
-        // recognizers run so Hindi/Devanagari text is captured alongside any English text.
-        val contextStr = try { accessibilityControl.getCurrentContext() ?: "" } catch (_: Exception) { "" }
-        val pkg = contextStr.substringBefore("/").ifBlank { "" }
-        val activity = contextStr.substringAfter("/", "").ifBlank { "" }
-        val ocrText = try {
-            (ocrControl.recognizeScreen(voiceLanguageProvider()) as? Result.Success)?.data ?: ""
-        } catch (_: Exception) { "" }
-        val structuredNodes = try {
-            (accessibilityControl.captureStructuredTree() as? Result.Success)?.data ?: emptyList()
-        } catch (_: Exception) { emptyList() }
-        val description = com.unoone.agent.core.agent.SceneDescriptionBuilder.build(
-            com.unoone.agent.core.agent.SceneInput(
-                currentPackage = pkg,
-                currentActivity = activity,
-                ocrText = ocrText,
-                aspect = aspect,
-                structuredNodes = structuredNodes
-            )
-        )
-        return Result.Success(description)
+        verifyPixelWindows()
+        val snapshot = com.unoone.agent.accessibilitycontrol.AndroidDeviceAdapter(service,
+            allowedObservationPackages = setOf(identity.pkg)).observe().snapshot
+        check(!snapshot.truncated && snapshot.nodes.isNotEmpty() && snapshot.nodes.none {
+            it.password || it.semantic.sensitiveObservation()
+        }) { "Sensitive or unverifiable screen; read manually" }
+        verifyPixelWindows()
+        when (val capture = screenshotCapture.captureScreen()) {
+            is Result.Error -> Result.Error(capture.message)
+            is Result.Success -> try {
+                verifyPixelWindows()
+                check(capture.data.width == identity.width && capture.data.height == identity.height) { "Capture geometry changed" }
+                val result = ocrControl.recognizeText(capture.data)
+                verifyPixelWindows()
+                result
+            } finally { capture.data.recycle() }
+        }
     }
 
-    /** Encodes a screenshot Bitmap to JPEG bytes for the LiteRT-LM `Content.ImageBytes` vision path. */
-    private fun bitmapToJpeg(bitmap: android.graphics.Bitmap): ByteArray? = try {
-        val baos = java.io.ByteArrayOutputStream()
-        bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, baos)
-        baos.toByteArray()
-    } catch (e: Exception) {
-        Logger.w("describe_scene: bitmap encode failed (${e.message})")
-        null
+    private suspend fun describeScene(toolCall: ToolCall): Result<String> = scopedRead { identity, verify ->
+        // Raw pixels must not enter a model before source redaction. Use guarded OCR only.
+        val ocr = readScreenWithOcr()
+        verify()
+        when (ocr) {
+            is Result.Error -> ocr
+            is Result.Success -> Result.Success(com.unoone.agent.core.agent.SceneDescriptionBuilder.build(
+                com.unoone.agent.core.agent.SceneInput(currentPackage = identity.pkg, currentActivity = "",
+                    ocrText = ocr.data, aspect = toolCall.args["aspect"]?.jsonPrimitive?.content ?: "")))
+        }
     }
 
     private suspend fun executeSystemAction(toolCall: ToolCall): Result<String> {
         val action = toolCall.args["action"]?.jsonPrimitive?.content ?: ""
-        val target = toolCall.args["target"]?.jsonPrimitive?.content ?: ""
         return when (action) {
-            "click" -> accessibilityControl.clickText(target).map { "Clicked $target" }
-            "type" -> accessibilityControl.typeText(target).map { "Typed text" }
-            "fill" -> {
-                val value = toolCall.args["value"]?.jsonPrimitive?.content ?: ""
-                accessibilityControl.fillField(target, value).map { "Filled $target" }
-            }
             "scroll_down" -> accessibilityControl.scrollDown().map { "Scrolled down" }
             "scroll_up" -> accessibilityControl.scrollUp().map { "Scrolled up" }
-            "swipe" -> accessibilityControl.swipe(target).map { "Swiped $target" }
-            "long_press" -> {
-                val x = target.toFloatOrNull()
-                val y = toolCall.args["y"]?.jsonPrimitive?.content?.toFloatOrNull()
-                if (x != null && y != null) {
-                    accessibilityControl.longPress(x, y).map { "Long pressed at ($x, $y)" }
-                } else if (target.isNotBlank()) {
-                    accessibilityControl.longPressNodeWithText(target).map { "Long pressed '$target'" }
-                } else {
-                    Result.Error("Long press requires either coordinates or a target text label")
-                }
-            }
             "go_back" -> accessibilityControl.goBack().map { "Went back" }
-            "go_home" -> accessibilityControl.goHome().map { "Went home" }
-            "open_notifications" -> accessibilityControl.openNotifications().map { "Opened notifications" }
-            "open_recents" -> accessibilityControl.openRecents().map { "Opened recents" }
-            "find_and_click" -> accessibilityControl.findAndClick(target).map { "Found and clicked $target" }
+            "go_home" -> accessibilityControl.goHome().map { "Home dispatch requested; foreground outcome unverified." }
+            "open_notifications" -> accessibilityControl.openNotifications().map { "Notifications dispatch requested; foreground outcome unverified." }
+            "open_recents" -> accessibilityControl.openRecents().map { "Recents dispatch requested; foreground outcome unverified." }
             else -> Result.Error("Unknown system action: $action")
         }
     }

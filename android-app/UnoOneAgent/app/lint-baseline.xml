@@ -8,7 +8,7 @@
         errorLine2="                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/unoone/agent/MainActivity.kt"
-            line="366"
+            line="170"
             column="37"/>
     </issue>
 
@@ -19,7 +19,7 @@
         errorLine2="                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/unoone/agent/PermissionManager.kt"
-            line="83"
+            line="88"
             column="32"/>
     </issue>
 
@@ -30,7 +30,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/AndroidManifest.xml"
-            line="87"
+            line="58"
             column="13"/>
     </issue>
 
@@ -41,7 +41,7 @@
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/AndroidManifest.xml"
-            line="87"
+            line="58"
             column="13"/>
     </issue>
 
@@ -52,7 +52,7 @@
         errorLine2="                             ~~~~~">
         <location
             file="src/main/AndroidManifest.xml"
-            line="75"
+            line="47"
             column="30"/>
     </issue>
 
@@ -70,7 +70,7 @@
         errorLine2="        ^">
         <location
             file="src/main/java/com/unoone/agent/MainActivity.kt"
-            line="327"
+            line="131"
             column="9"/>
     </issue>
 
@@ -81,7 +81,7 @@
         errorLine2="                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/unoone/agent/MainActivity.kt"
-            line="341"
+            line="145"
             column="21"/>
     </issue>
 
@@ -92,7 +92,7 @@
         errorLine2="                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/unoone/agent/MainActivity.kt"
-            line="367"
+            line="171"
             column="32"/>
     </issue>
 
@@ -103,7 +103,7 @@
         errorLine2="                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
             file="src/main/java/com/unoone/agent/MainActivity.kt"
-            line="367"
+            line="171"
             column="32"/>
     </issue>
 
@@ -158,7 +158,7 @@
         errorLine2="        ~~~~~~~~~~~~">
         <location
             file="src/main/java/com/unoone/agent/ui/viewmodel/SettingsViewModel.kt"
-            line="93"
+            line="69"
             column="9"/>
     </issue>
 

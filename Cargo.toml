@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "packages/vault-core",
+    "packages/android-vault-jni",
     "packages/usb-manifest",
     "packages/recording-policy",
     "packages/text-util",
@@ -11,6 +12,12 @@ members = [
     "packages/speech-contracts",
     "packages/tool-contracts",
     "packages/capability-contracts",
+    "packages/personal-agent-contracts",
+    "packages/personal-agent-runtime",
+    "packages/personal-provider-adapters",
+    "packages/privacy-guardian",
+    "packages/local-peer-sync",
+    "packages/model-admission",
     "apps/desktop/src-tauri",
     "apps/dock/windows",
     "apps/starter/windows",
